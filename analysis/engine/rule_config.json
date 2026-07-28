@@ -1,0 +1,36 @@
+{
+  "rule_version": "0.2.0-tcb",
+  "_comment": "Thresholds per Analysis_Phase0_TCB_Jan26.md section 7.1. PRD section 6.2 requires these be admin-configurable, not hard-coded.",
+
+  "_operating_point": "Selected from the s7 frontier sweep. 'wide' strictly dominates 'balanced' and 'tight' (same review volume, higher trap catch). 'widest' is rejected: R9 precision falls to 0.38 and action agreement collapses to 62%. autoclear_guard cuts value wrongly auto-cleared from 12.1% to 3.1% for +12pp review volume.",
+  "rule9_mode": "wide",
+  "autoclear_guard": true,
+
+  "low_cost_threshold": 50.0,
+  "high_cost_threshold": 1500.0,
+  "long_lead_time_threshold": 45,
+  "zero_stock_risk_clt": 60,
+  "recent_usage_days": 180,
+  "min_usage_months": 2,
+  "max_change_pct_review": 0.5,
+  "value_gate_usd": 1000.0,
+
+  "_layer3": "Inventory calculation inputs (PRD section 6.3).",
+  "quantity_anchor": "atm_recommended",
+  "service_level_z": { "High": 2.05, "Medium": 1.28, "Low": 1.04 },
+  "default_criticality": "Medium",
+  "min_protective_stock": 1,
+
+  "_criticality": "PRD section 5.3 machine_criticality_config. Engineer-owned; keyed on machine_type, NOT module (APPJ machine types appear inside TCB module rows). Empty until engineers populate it.",
+  "machine_criticality": {},
+
+  "_riskfactors": "Rule 9 fires when recom=0 AND any of these input-only risk factors hold.",
+  "rule9_risk_factors": [
+    "lead_time_ge_threshold",
+    "stock_on_hand",
+    "not_dead",
+    "any_usage_547d",
+    "open_po",
+    "critical_machine"
+  ]
+}
