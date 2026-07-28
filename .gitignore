@@ -7,3 +7,13 @@ __pycache__/
 # These contain unitprice, supplier and engineer-name data that PRD 5.1
 # classifies as sensitive -- keep them out of version control.
 analysis/output/
+
+# Backend local database (contains ingested BOM data -- same sensitivity)
+backend/data/
+*.db
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/shots/
+frontend/debug*.mjs

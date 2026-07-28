@@ -1,0 +1,128 @@
+import csv
+import io
+import sys
+from pathlib import Path
+
+import pytest
+
+BACKEND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+ENG = {"X-User": "alice", "X-Role": "engineer"}
+SENIOR = {"X-User": "boss", "X-Role": "senior"}
+ADMIN = {"X-User": "root", "X-Role": "admin"}
+VIEWER = {"X-User": "eve", "X-Role": "viewer"}
+AUDITOR = {"X-User": "aud", "X-Role": "auditor"}
+
+
+@pytest.fixture()
+def db_file(tmp_path, monkeypatch):
+    p = tmp_path / "test.db"
+    monkeypatch.setenv("BOM_DB_PATH", str(p))
+    return p
+
+
+@pytest.fixture()
+def client(db_file):
+    from app.main import create_app
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+
+
+def make_row(**kw) -> dict:
+    base = {
+        "item_id": "", "item_desc": "TEST PART", "stockroom_id": "24", "module": "TCB",
+        "machine_type": "ASM-Pacific,Phoenix", "aging_status": "Active Moving",
+        "replenishment_policy": "Order to Demand", "partfreq": "",
+        "sfm_recommendation": "Maintain Algo", "sfm_criticality": "",
+        "max_qty": "0", "rop_qty": "0", "min_qty": "0", "unitprice": "10",
+        "avail_qty": "0", "contractual_lead_time": "10", "open_po_qty": "0",
+        "order_qty_multiple": "",
+        "last_5_day_cnsmptn_qty": "0", "last_30_day_cnsmptn_qty": "0",
+        "last_90_day_cnsmptn_qty": "0", "last_180_day_cnsmptn_qty": "0",
+        "last_365_day_cnsmptn_qty": "0", "last_547_day_cnsmptn_qty": "0",
+        "days_since_last_issue": "", "frequencymonthswithusage": "",
+        "recom_max": "0", "recom_rop": "0", "recom_min": "0",
+        "atm_recommended_max": "0", "atm_recommended_rop": "0", "atm_recommended_min": "0",
+        "sfm_brr_max": "0", "sfm_brr_rop": "0", "sfm_brr_min": "0",
+        "sfm_max": "", "sfm_rop": "", "sfm_min": "",
+        "excess_status_tf": "No Excess Sharing Available",
+        "new_modulle": "Module-TCB", "senstivity_tag": "",
+        # PRD 5.1 output/memory columns, poisoned with sentinel values: if any of
+        # these leak into the engine, tests fail loudly.
+        "justification": "LEAK_IF_USED", "comments": "LEAK_IF_USED",
+        "factory_recommended_new_max": "999", "factory_recommended_new_rop": "999",
+        "factory_recommended_new_min": "999",
+        "max_adoption": "LEAK", "rop_adoption": "LEAK", "ooq_adoption": "",
+        "review_acknowledge": "Y", "modified_user": "x", "modified_date": "x",
+    }
+    base.update({k: str(v) for k, v in kw.items()})
+    return base
+
+
+def rows_to_csv(rows: list[dict]) -> bytes:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()), lineterminator="\n")
+    w.writeheader()
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+@pytest.fixture()
+def synth_csv() -> bytes:
+    rows = [
+        # r1: clean maintain -> auto_cleared
+        make_row(item_id=100001, max_qty=2, rop_qty=1, recom_max=2, recom_rop=1,
+                 atm_recommended_max=2, atm_recommended_rop=1,
+                 sfm_brr_max=2, sfm_brr_rop=1),
+        # r2: the recom=0 trap -- stocked today, another source wants stock
+        make_row(item_id=100002, max_qty=2, rop_qty=1, unitprice=200,
+                 contractual_lead_time=30, aging_status="Dead",
+                 recom_max=0, recom_rop=0, atm_recommended_max=2,
+                 atm_recommended_rop=1, sfm_brr_max=2, sfm_brr_rop=1, avail_qty=1),
+        # r3: negative consumption -> quarantine
+        make_row(item_id=100003, last_30_day_cnsmptn_qty=-5),
+        # r4: duplicate key (twice) -> quarantine both
+        make_row(item_id=100004),
+        make_row(item_id=100004),
+        # r5: high-cost increase with real usage -> review Y, risk High
+        make_row(item_id=100005, max_qty=1, unitprice=5000, contractual_lead_time=30,
+                 last_90_day_cnsmptn_qty=1, last_180_day_cnsmptn_qty=1,
+                 last_365_day_cnsmptn_qty=2, last_547_day_cnsmptn_qty=2,
+                 recom_max=3, recom_rop=2, recom_min=1,
+                 atm_recommended_max=3, atm_recommended_rop=2, atm_recommended_min=1,
+                 sfm_brr_max=3, sfm_brr_rop=2, sfm_brr_min=1,
+                 days_since_last_issue=30, frequencymonthswithusage=2),
+        # r6: casing normalization check; dead + short LT + all-zero -> auto_cleared
+        make_row(item_id=100006, sfm_recommendation="maintain algo",
+                 aging_status="Dead", unitprice=5),
+        # r7: dormant, recom=0, 90-day lead time -> R9 (wide) -> review Y
+        make_row(item_id=100007, unitprice=300, contractual_lead_time=90,
+                 aging_status="Dead"),
+        # r8: engine proposes a change (2 -> 3, under the 50% threshold) but no
+        # rule forces review -> pending via REQUIRE_REVIEW_FOR_ALL_CHANGES
+        make_row(item_id=100008, max_qty=2, rop_qty=1, unitprice=100,
+                 contractual_lead_time=20,
+                 last_180_day_cnsmptn_qty=1, last_365_day_cnsmptn_qty=1,
+                 last_547_day_cnsmptn_qty=1, days_since_last_issue=100,
+                 recom_max=3, recom_rop=1, atm_recommended_max=3,
+                 atm_recommended_rop=1, sfm_brr_max=3, sfm_brr_rop=1),
+        # r10: dead maintain at 1 -> auto_cleared
+        make_row(item_id=100010, max_qty=1, recom_max=1, atm_recommended_max=1,
+                 sfm_brr_max=1, unitprice=20, aging_status="Dead"),
+        # r11: different module -> excluded by TCB filter
+        make_row(item_id=100011, module="BA"),
+    ]
+    return rows_to_csv(rows)
+
+
+def upload(client, csv_bytes: bytes, headers=ENG, label="TEST", module="TCB"):
+    return client.post(
+        "/upload-bom-file",
+        files={"file": ("test.csv", csv_bytes, "text/csv")},
+        data={"label": label, "module_filter": module},
+        headers=headers,
+    )

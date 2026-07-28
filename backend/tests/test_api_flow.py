@@ -1,0 +1,197 @@
+import csv
+import io
+import json
+import sqlite3
+
+from conftest import ADMIN, AUDITOR, ENG, SENIOR, VIEWER, upload
+
+
+def scored_batch(client, synth_csv) -> int:
+    b = upload(client, synth_csv).json()["batch_id"]
+    r = client.post(f"/run-recommendation?batch_id={b}", headers=ENG)
+    assert r.status_code == 200, r.text
+    return b, r.json()
+
+
+def test_run_summary_counts(client, synth_csv):
+    _, s = scored_batch(client, synth_csv)
+    assert s["rows_scored"] == 7
+    assert s["review_required_Y"] == 3          # r2 (trap), r5 (high cost), r7 (R9 wide)
+    assert s["review_required_N"] == 4
+    assert "ZERO_RECOMMENDATION_OVERRIDE" in s["top_reason_codes"]
+    assert s["rule_version"] == "0.2.0-tcb"
+
+
+def test_no_leakage_from_poisoned_columns(client, synth_csv):
+    """Fixture carries factory_recommended_new_max=999 on every row; if the
+    engine could see it, outputs would echo it."""
+    b, _ = scored_batch(client, synth_csv)
+    r = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()
+    assert all(item["new_max"] != 999 for item in r["items"])
+
+
+def test_status_derivation_and_filters(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    pending = client.get(f"/recommendations?batch_id={b}&status=pending_review",
+                         headers=VIEWER).json()
+    cleared = client.get(f"/recommendations?batch_id={b}&status=auto_cleared",
+                         headers=VIEWER).json()
+    # pending = 3 review-Y rows + r8 (changed but unflagged, safety switch on)
+    assert pending["total"] == 4
+    assert {i["item_id"] for i in pending["items"]} == {"100002", "100005", "100007", "100008"}
+    assert cleared["total"] == 3
+    assert {i["item_id"] for i in cleared["items"]} == {"100001", "100006", "100010"}
+
+
+def test_trap_item_detail(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    d = client.get(f"/recommendations/100002?batch_id={b}", headers=VIEWER).json()
+    assert "ZERO_RECOMMENDATION_OVERRIDE" in d["recommendation"]["reason_code"]
+    assert d["recommendation"]["new_max"] >= 1      # protective: never zeroed
+    assert d["status"] == "pending_review"
+
+
+def test_full_review_and_export_flow(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+
+    # Viewer cannot review
+    assert client.post(f"/review/100005?batch_id={b}",
+                       json={"decision": "accept"}, headers=VIEWER).status_code == 403
+
+    # r5: accept (risk High -> needs senior)
+    r = client.post(f"/review/100005?batch_id={b}",
+                    json={"decision": "accept", "comment": "ok"}, headers=ENG).json()
+    assert r["requires_senior_approval"] is True
+    assert r["status"] == "awaiting_senior"
+
+    # Engineer cannot approve; approver cannot be the reviewer
+    assert client.post(f"/review/100005/approve?batch_id={b}",
+                       headers=ENG).status_code == 403
+    same_user_senior = {"X-User": "alice", "X-Role": "senior"}
+    assert client.post(f"/review/100005/approve?batch_id={b}",
+                       headers=same_user_senior).status_code == 403
+    assert client.post(f"/review/100005/approve?batch_id={b}",
+                       headers=SENIOR).status_code == 200
+
+    # r8: override (always needs senior); invalid ordering rejected first
+    bad = client.post(f"/review/100008?batch_id={b}",
+                      json={"decision": "override", "final_max": 1,
+                            "final_rop": 2, "final_min": 0}, headers=ENG)
+    assert bad.status_code == 422
+    r = client.post(f"/review/100008?batch_id={b}",
+                    json={"decision": "override", "final_max": 3, "final_rop": 1,
+                          "final_min": 0, "justification": "constraint tool"},
+                    headers=ENG).json()
+    assert r["requires_senior_approval"] is True
+    assert client.post(f"/review/100008/approve?batch_id={b}",
+                       headers=SENIOR).status_code == 200
+
+    # r2: accept -> engine says Maintain -> reviewed but nothing to export
+    r = client.post(f"/review/100002?batch_id={b}",
+                    json={"decision": "accept"}, headers=ENG).json()
+    assert r["requires_senior_approval"] is False
+
+    # r7 left pending -> export excludes it and reports it
+    e = client.get(f"/export/wings?batch_id={b}", headers=ENG)
+    assert e.status_code == 200
+    assert e.headers["X-Pending-Review"] == "1"          # r7
+    assert e.headers["X-Awaiting-Senior"] == "0"
+    rows = list(csv.DictReader(io.StringIO(e.text)))
+    assert e.headers["X-Rows-Exported"] == str(len(rows)) == "2"
+    by_item = {r["item_id"]: r for r in rows}
+    assert by_item["100005"]["current_max"] == "1"
+    assert int(by_item["100005"]["new_max"]) >= 3        # engine value, senior-approved
+    assert by_item["100008"]["current_max"] == "2"
+    assert by_item["100008"]["new_max"] == "3"           # engineer override value
+    assert by_item["100008"]["decision"] == "override"
+
+
+def test_history_endpoint(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    client.post(f"/review/100005?batch_id={b}", json={"decision": "accept"}, headers=ENG)
+    h = client.get("/history/100005", headers=AUDITOR).json()
+    assert len(h["reviews"]) == 1
+    assert h["reviews"][0]["decision"] == "accept"
+    assert h["reviews"][0]["rule_version"] == "0.2.0-tcb"
+
+
+def test_chat_read_only_tools(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    why = client.post("/chat", json={"question": "why item 100007?"},
+                      headers=VIEWER).json()
+    assert "recommends 0" in why["answer"]
+    assert why["sources"]
+
+    client.post(f"/review/100005?batch_id={b}", json={"decision": "accept"}, headers=ENG)
+    hist = client.post("/chat", json={"question": "history 100005"},
+                       headers=VIEWER).json()
+    assert "accept" in hist["answer"]
+
+    top = client.post("/chat", json={"question": "top exposure items"},
+                      headers=VIEWER).json()
+    assert "100005" in top["answer"]
+
+    unknown = client.post("/chat", json={"question": "what is the meaning of life"},
+                          headers=VIEWER).json()
+    assert "I don't know" in unknown["answer"]
+    assert unknown["sources"] == []
+
+
+def test_config_versioning(client, synth_csv, db_file):
+    b, _ = scored_batch(client, synth_csv)
+    cfg = client.get("/config/rules", headers=VIEWER).json()
+    assert cfg["rule_version"] == "0.2.0-tcb"
+
+    assert client.post("/config/rules", json={"rule_version": "x", "updates": {}},
+                       headers=ENG).status_code == 403
+    assert client.post("/config/rules",
+                       json={"rule_version": "0.2.0-tcb",
+                             "updates": {"long_lead_time_threshold": 45}},
+                       headers=ADMIN).status_code == 400      # version must change
+    assert client.post("/config/rules",
+                       json={"rule_version": "0.2.1-test",
+                             "updates": {"nonsense_key": 1}},
+                       headers=ADMIN).status_code == 400
+    r = client.post("/config/rules",
+                    json={"rule_version": "0.2.1-test",
+                          "updates": {"long_lead_time_threshold": 45}},
+                    headers=ADMIN)
+    assert r.status_code == 200
+
+    # Re-scoring stamps the new version on results (determinism audit trail)
+    s = client.post(f"/run-recommendation?batch_id={b}", headers=ENG).json()
+    assert s["rule_version"] == "0.2.1-test"
+
+
+def test_criticality_two_person_rule(client, synth_csv):
+    scored_batch(client, synth_csv)
+    r = client.post("/config/criticality",
+                    json={"pattern": "KnS TCX3", "criticality": "High",
+                          "service_level_target": 0.98}, headers=ENG)
+    assert r.status_code == 200 and r.json()["confirmed"] is False
+
+    # Not yet confirmed -> engine must not see it
+    cfg = client.get("/config/rules", headers=VIEWER).json()
+    assert "KnS TCX3" not in cfg["config"].get("machine_criticality", {})
+
+    same_user = {"X-User": "alice", "X-Role": "senior"}
+    assert client.post("/config/criticality/KnS TCX3/confirm",
+                       headers=same_user).status_code == 403   # proposer == confirmer
+    assert client.post("/config/criticality/KnS TCX3/confirm",
+                       headers=SENIOR).status_code == 200
+    cfg = client.get("/config/rules", headers=VIEWER).json()
+    assert cfg["config"]["machine_criticality"]["KnS TCX3"] == "High"
+
+
+def test_everything_is_audited(client, synth_csv, db_file):
+    b, _ = scored_batch(client, synth_csv)
+    client.post(f"/review/100005?batch_id={b}", json={"decision": "accept"}, headers=ENG)
+    client.post("/chat", json={"question": "why item 100002"}, headers=VIEWER)
+    client.get(f"/export/wings?batch_id={b}", headers=ENG)
+
+    conn = sqlite3.connect(db_file)
+    entities = {r[0] for r in conn.execute("SELECT DISTINCT entity FROM audit_log")}
+    users = {r[0] for r in conn.execute("SELECT DISTINCT user FROM audit_log")}
+    conn.close()
+    assert {"batch", "review", "chat"} <= entities
+    assert "alice" in users
