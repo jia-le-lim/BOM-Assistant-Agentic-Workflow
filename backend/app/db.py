@@ -32,11 +32,79 @@ import sqlite3
 from pathlib import Path
 
 from .config import (ENGINE_DIR, database_url, db_path, is_postgres,
-                     require_database)
+                     require_database, use_rest)
 
 # --------------------------------------------------------------------------
 # Schema
 # --------------------------------------------------------------------------
+
+# Every foreign key in the schema, as data. The DDL below declares them inline
+# for a fresh database; this list is what `_ensure_foreign_keys()` uses to bring
+# an ALREADY EXISTING Postgres database up to the same shape, since
+# CREATE TABLE IF NOT EXISTS is a no-op there. Names match the constraints
+# already on the Supabase project, so the migration is a no-op against it.
+# tests/test_foreign_keys.py asserts this list and the two DDL blocks agree.
+FOREIGN_KEYS = [
+    ("bom_rows_batch_fk", "bom_rows", ("batch_id",),
+     "batches", ("batch_id",), "CASCADE"),
+    ("recommendation_result_batch_fk", "recommendation_result", ("batch_id",),
+     "batches", ("batch_id",), "CASCADE"),
+    ("recommendation_result_row_fk", "recommendation_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "bom_rows", ("batch_id", "item_id", "stockroom_id"), "CASCADE"),
+    ("review_history_batch_fk", "review_history", ("batch_id",),
+     "batches", ("batch_id",), "RESTRICT"),
+    ("review_history_result_fk", "review_history",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "RESTRICT"),
+    ("pending_change_batch_fk", "pending_change", ("batch_id",),
+     "batches", ("batch_id",), "RESTRICT"),
+    ("pending_change_review_fk", "pending_change", ("confirmed_review_id",),
+     "review_history", ("review_id",), "RESTRICT"),
+    ("conversation_turn_batch_fk", "conversation_turn", ("batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
+    ("item_note_batch_fk", "item_note", ("origin_batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
+    ("item_note_turn_fk", "item_note", ("origin_turn_id",),
+     "conversation_turn", ("turn_id",), "SET NULL"),
+    ("model_prediction_log_batch_fk", "model_prediction_log", ("batch_id",),
+     "batches", ("batch_id",), "CASCADE"),
+]
+
+# Postgres does not index the referencing side of a foreign key, so every
+# parent delete and every RESTRICT check would otherwise scan the child table
+# (bom_rows is 2.8k rows for one month of TCB, 17k in the raw workbook).
+# Where the child's PRIMARY KEY already leads with the FK columns
+# (bom_rows, recommendation_result composite) no extra index is needed.
+# Identical on SQLite so the two dialects stay comparable.
+FK_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS ix_bom_rows_batch ON bom_rows(batch_id);
+CREATE INDEX IF NOT EXISTS ix_recommendation_result_batch
+  ON recommendation_result(batch_id);
+CREATE INDEX IF NOT EXISTS ix_review_history_batch ON review_history(batch_id);
+CREATE INDEX IF NOT EXISTS ix_review_history_result
+  ON review_history(batch_id, item_id, stockroom_id);
+CREATE INDEX IF NOT EXISTS ix_review_history_item ON review_history(item_id);
+CREATE INDEX IF NOT EXISTS ix_pending_change_batch ON pending_change(batch_id);
+CREATE INDEX IF NOT EXISTS ix_pending_change_review
+  ON pending_change(confirmed_review_id);
+CREATE INDEX IF NOT EXISTS ix_conversation_turn_batch
+  ON conversation_turn(batch_id);
+CREATE INDEX IF NOT EXISTS ix_item_note_batch ON item_note(origin_batch_id);
+CREATE INDEX IF NOT EXISTS ix_item_note_turn ON item_note(origin_turn_id);
+CREATE INDEX IF NOT EXISTS ix_model_prediction_log_batch
+  ON model_prediction_log(batch_id);
+"""
+
+# Full-text search over engineer free text. GIN/to_tsvector is Postgres-only;
+# SQLite would need FTS5 virtual tables, and nothing queries it there.
+PG_ONLY_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS ix_item_note_fts
+  ON item_note USING gin (to_tsvector('english', note));
+CREATE INDEX IF NOT EXISTS ix_review_history_comment_fts
+  ON review_history USING gin (to_tsvector('english', coalesce(comment, '')));
+"""
 
 SQLITE_DDL = """
 CREATE TABLE IF NOT EXISTS batches (
@@ -194,7 +262,7 @@ CREATE TABLE IF NOT EXISTS model_prediction_log (
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
-"""
+""" + FK_INDEX_DDL
 
 # Postgres equivalent. Differences are confined to: IDENTITY vs AUTOINCREMENT,
 # the now() expression, and quoting `user` (reserved word in Postgres).
@@ -346,7 +414,7 @@ CREATE TABLE IF NOT EXISTS model_prediction_log (
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
-"""
+""" + FK_INDEX_DDL + PG_ONLY_INDEX_DDL
 
 # Tables whose PK is a generated identity -- needed to translate lastrowid.
 IDENTITY_PK = {
@@ -462,6 +530,11 @@ class Conn:
 
 def get_conn() -> Conn:
     require_database()
+    if use_rest():
+        # Duck-typed, not a Conn subclass: it implements the same five methods
+        # over HTTP and shares none of the psycopg/sqlite machinery.
+        from .rest_conn import connect as rest_connect
+        return rest_connect()            # type: ignore[return-value]
     if is_postgres():
         import psycopg
         from psycopg.rows import dict_row
@@ -476,14 +549,61 @@ def get_conn() -> Conn:
     return Conn(raw, False)
 
 
+class SchemaMigrationFailed(RuntimeError):
+    pass
+
+
+def _ensure_foreign_keys(conn: Conn) -> list[str]:
+    """Add any FOREIGN_KEYS entry missing from an existing Postgres database.
+
+    CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+    without this a database created before a constraint was declared keeps the
+    constraint-free schema for good -- and the suite, which builds a fresh tmp
+    database every run, can never notice. That is code and production being two
+    separate sources of truth, which is what F10 warns about.
+
+    SQLite has no ALTER TABLE ADD CONSTRAINT. It is the test backend and its
+    databases are always created from scratch, so there is nothing to migrate.
+    """
+    added = []
+    for name, child, cols, parent, pcols, action in FOREIGN_KEYS:
+        exists = conn.execute(
+            "SELECT 1 AS ok FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "JOIN pg_class p ON p.oid = c.confrelid "
+            "WHERE c.contype='f' AND t.relname=? AND p.relname=?",
+            (child, parent)).fetchone()
+        if exists:
+            continue
+        stmt = (f"ALTER TABLE {child} ADD CONSTRAINT {name} "
+                f"FOREIGN KEY ({', '.join(cols)}) "
+                f"REFERENCES {parent} ({', '.join(pcols)}) ON DELETE {action}")
+        try:
+            conn.execute(stmt)
+        except Exception as e:      # orphan rows, or no rights to ALTER
+            raise SchemaMigrationFailed(
+                f"could not add {name}: {e}\n"
+                f"Run backend/scripts/check_referential_integrity.py first -- "
+                f"an existing row that violates the constraint has to be "
+                f"resolved before it can be applied.") from e
+        added.append(name)
+    return added
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
         pg = is_postgres()
         ddl = POSTGRES_DDL if pg else SQLITE_DDL
-        if pg:
+        if use_rest():
+            # exec_sql runs a multi-statement string, so the whole DDL goes in
+            # one call. No _raw cursor exists on this transport.
+            conn.execute(ddl)
+            _ensure_foreign_keys(conn)
+        elif pg:
             cur = conn._raw.cursor()
             cur.execute(ddl)
+            _ensure_foreign_keys(conn)
         else:
             conn._raw.executescript(ddl)
         # Seed rule_config from the analysed engine config on first run.
@@ -500,11 +620,22 @@ def init_db() -> None:
         conn.close()
 
 
-def active_config(conn: Conn) -> dict:
+def stored_config(conn: Conn) -> dict:
+    """The active rule config exactly as persisted -- no criticality merge.
+
+    Anything that WRITES a config back must start here. active_config() returns
+    a view with machine_criticality_config folded in for the engine; persisting
+    that view would bake a snapshot of a mutable table into the immutable
+    rule_version stamp, and later criticality edits would then be ignored.
+    """
     row = conn.execute(
         "SELECT config_json FROM rule_config WHERE active=1 ORDER BY config_id DESC LIMIT 1"
     ).fetchone()
-    cfg = json.loads(row["config_json"])
+    return json.loads(row["config_json"])
+
+
+def active_config(conn: Conn) -> dict:
+    cfg = stored_config(conn)
     # Merge engineer-confirmed criticality (PRD 5.3). Only confirmed rows count:
     # an agent/LLM may WRITE a proposal, a human must confirm before the engine
     # reads it.

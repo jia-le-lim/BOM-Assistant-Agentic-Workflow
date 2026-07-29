@@ -3,7 +3,8 @@ import io
 import json
 import sqlite3
 
-from conftest import ADMIN, AUDITOR, ENG, SENIOR, VIEWER, upload
+from conftest import (ADMIN, AUDITOR, ENG, SENIOR, VIEWER, make_row,
+                      rows_to_csv, upload)
 
 
 def scored_batch(client, synth_csv) -> int:
@@ -181,6 +182,102 @@ def test_criticality_two_person_rule(client, synth_csv):
                        headers=SENIOR).status_code == 200
     cfg = client.get("/config/rules", headers=VIEWER).json()
     assert cfg["config"]["machine_criticality"]["KnS TCX3"] == "High"
+
+
+def test_rescore_survives_an_existing_review(client, synth_csv):
+    """review_history -> recommendation_result is ON DELETE RESTRICT.
+
+    Re-scoring after a rule-config change used to DELETE the whole batch's
+    results and hit that constraint -> IntegrityError -> HTTP 500. Reviewed rows
+    are now kept on the recommendation their reviewer actually saw.
+    """
+    b, _ = scored_batch(client, synth_csv)
+    assert client.post(f"/review/100005?batch_id={b}",
+                       json={"decision": "accept"},
+                       headers=ENG).status_code == 200
+
+    r = client.post(f"/run-recommendation?batch_id={b}", headers=ENG)
+    assert r.status_code == 200, r.text
+    assert r.json()["rows_preserved"] == 1
+
+    d = client.get(f"/recommendations/100005?batch_id={b}", headers=ENG)
+    assert d.status_code == 200
+    assert d.json()["status"] == "awaiting_senior"      # High risk -> senior
+
+
+def test_chat_rejects_a_batch_that_does_not_exist(client, synth_csv):
+    """conversation_turn.batch_id is a real FK: an invented id is a bad
+    request, not a 500 from the insert."""
+    scored_batch(client, synth_csv)
+    r = client.post("/chat", json={"question": "why item 100002",
+                                   "batch_id": 99999}, headers=ENG)
+    assert r.status_code == 404
+
+
+def test_item_in_two_stockrooms_is_never_guessed(client):
+    """The PK is (batch_id, item_id, stockroom_id). Lookups that dropped the
+    stockroom picked an arbitrary row and stranded the other one forever."""
+    csv_bytes = rows_to_csv([
+        make_row(item_id=100020, stockroom_id="24", max_qty=2, rop_qty=1),
+        make_row(item_id=100020, stockroom_id="31", max_qty=5, rop_qty=2),
+    ])
+    b = upload(client, csv_bytes).json()["batch_id"]
+    assert client.post(f"/run-recommendation?batch_id={b}",
+                       headers=ENG).status_code == 200
+
+    assert client.get(f"/recommendations/100020?batch_id={b}",
+                      headers=ENG).status_code == 409
+    r = client.get(f"/recommendations/100020?batch_id={b}&stockroom_id=31",
+                   headers=ENG)
+    assert r.status_code == 200
+    assert r.json()["recommendation"]["stockroom_id"] == "31"
+
+    assert client.post(f"/review/100020?batch_id={b}",
+                       json={"decision": "accept"},
+                       headers=ENG).status_code == 409
+    for stk in ("24", "31"):
+        rv = client.post(f"/review/100020?batch_id={b}&stockroom_id={stk}",
+                         json={"decision": "accept"}, headers=ENG)
+        assert rv.status_code == 200, rv.text
+        assert rv.json()["stockroom_id"] == stk
+
+
+def test_confirmed_criticality_is_not_frozen_into_the_stored_config(
+        client, synth_csv, db_file):
+    """active_config() merges machine_criticality_config for the engine.
+    Persisting that merged view would bake a snapshot of a table an admin can
+    still edit into the rule_version stamp that is supposed to be immutable."""
+    scored_batch(client, synth_csv)
+    client.post("/config/criticality",
+                json={"pattern": "ZZZ Test Machine", "criticality": "High",
+                      "service_level_target": 0.98}, headers=ENG)
+    assert client.post("/config/criticality/ZZZ Test Machine/confirm",
+                       headers=SENIOR).status_code == 200
+
+    assert client.post("/config/rules",
+                       json={"rule_version": "0.2.1-test",
+                             "updates": {"long_lead_time_threshold": 45}},
+                       headers=ADMIN).status_code == 200
+
+    conn = sqlite3.connect(db_file)
+    stored = json.loads(conn.execute(
+        "SELECT config_json FROM rule_config WHERE active=1").fetchone()[0])
+    conn.close()
+    assert stored["long_lead_time_threshold"] == 45
+    assert "ZZZ Test Machine" not in stored.get("machine_criticality", {})
+
+    # The engine still sees it -- through the merge, from the live table.
+    cfg = client.get("/config/rules", headers=VIEWER).json()["config"]
+    assert cfg["machine_criticality"]["ZZZ Test Machine"] == "High"
+
+
+def test_building_the_app_does_not_touch_the_database(db_file):
+    """init_db() belongs in the lifespan handler. At module scope it fired on
+    any `import app.main` -- against real Supabase on a machine with a .env."""
+    from app.main import create_app
+
+    create_app()
+    assert not db_file.exists(), "create_app() issued DDL before startup"
 
 
 def test_everything_is_audited(client, synth_csv, db_file):

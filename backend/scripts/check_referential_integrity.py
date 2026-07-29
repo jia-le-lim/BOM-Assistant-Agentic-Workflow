@@ -115,6 +115,11 @@ def main() -> int:
     top = conn.execute(
         "SELECT * FROM recommendation_result WHERE batch_id=? AND review_required='Y' "
         "ORDER BY exposure_usd DESC LIMIT 2", (batch_id,)).fetchall()
+    if not top:
+        print("  NO review_required='Y' rows -- review_history and "
+              "pending_change would stay empty, so their orphan counts would "
+              "prove nothing. Aborting.")
+        return 1
     for rec in top:
         _record_review(conn, actor, batch_id, rec, "accept",
                        (rec["new_max"], rec["new_rop"], rec["new_min"]),
@@ -131,9 +136,18 @@ def main() -> int:
 
     pend = conn.execute("SELECT * FROM pending_change LIMIT 1").fetchone()
     if pend:
+        # Keyed on all three PK columns: item_id alone matches an arbitrary row
+        # for an item stocked in two stockrooms, and returns None whenever the
+        # staged row is not the one that comes back first.
         rec = conn.execute(
-            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
-            (batch_id, pend["item_id"])).fetchone()
+            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=? "
+            "AND stockroom_id=?",
+            (batch_id, pend["item_id"], pend["stockroom_id"])).fetchone()
+    if pend and rec is None:
+        print(f"  pending change for item {pend['item_id']} has no matching "
+              f"recommendation_result row -- that IS the orphan this script "
+              f"looks for. Continuing to the counts.")
+    elif pend:
         rid, *_ = _record_review(conn, actor, batch_id, rec, "override",
                                  (4, 2, 1), "confirmed", "")
         conn.execute("UPDATE pending_change SET status='confirmed', "

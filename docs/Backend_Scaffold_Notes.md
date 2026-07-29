@@ -406,6 +406,22 @@ Postgres does not index the referencing side of a FK automatically, so eleven
 supporting indexes went in with them; without those, every parent delete is a
 sequential scan of the child.
 
+**Applied out of band is not the same as declared in code.** The constraints and
+those indexes were first executed straight against the live project, while
+`init_db()` only ever ran `CREATE TABLE IF NOT EXISTS` — a no-op on tables that
+already exist. Code and production were therefore two independent sources of
+truth, and the suite could not see the gap because every test run builds a fresh
+database. Both halves now live in `app/db.py`: `FOREIGN_KEYS` (the eleven
+relations as data, named to match what is already on Supabase) plus
+`FK_INDEX_DDL`, and `_ensure_foreign_keys()` adds anything missing from an
+*existing* Postgres database on startup. Verified against the live project: all
+eleven constraints and all eleven indexes already match, so the migration is a
+no-op there and reproduces the same schema on a fresh one. SQLite has no
+`ALTER TABLE ADD CONSTRAINT`, and needs none — it is the test backend and its
+databases are always new. `tests/test_foreign_keys.py` now ties each
+`ON DELETE` action to its own `REFERENCES <parent>` clause; the previous
+substring check passed even when two actions on the same table were swapped.
+
 ### Node is no longer installed on this machine ⚠️
 
 `frontend/node_modules` is present (465 MB) and `~/.npmrc` still carries the F1

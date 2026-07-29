@@ -8,7 +8,8 @@ from ..audit import audit
 from ..db import get_conn
 from ..engine_adapter import score_batch
 from ..security import UPLOAD_ROLES, any_role, require_role
-from ..services import build_export, derive_status, latest_reviews
+from ..services import (AmbiguousItem, build_export, derive_status,
+                        latest_reviews, resolve_rec)
 
 router = APIRouter()
 
@@ -140,12 +141,14 @@ def list_recommendations(
 
 @router.get("/recommendations/{item_id}")
 def get_recommendation(item_id: str, batch_id: int,
+                       stockroom_id: str | None = None,
                        actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
-        r = conn.execute(
-            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
-            (batch_id, item_id)).fetchone()
+        try:
+            r = resolve_rec(conn, batch_id, item_id, stockroom_id)
+        except AmbiguousItem as e:
+            raise HTTPException(409, str(e))
         if r is None:
             raise HTTPException(404, f"item {item_id} not scored in batch {batch_id}")
         reviews = latest_reviews(conn, batch_id)

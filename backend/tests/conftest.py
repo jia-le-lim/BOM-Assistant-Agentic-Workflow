@@ -1,5 +1,6 @@
 import csv
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +8,13 @@ import pytest
 
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
+
+# Before any `app.*` import, not in a fixture. app.config runs _load_dotenv() at
+# import time -- which is collection time, before db_file's monkeypatch.delenv
+# can act -- so backend/.env would put DATABASE_URL back and point the suite at
+# the real Supabase project. _load_dotenv() skips the file when this is set.
+os.environ["BOM_ALLOW_SQLITE"] = "1"
+os.environ.pop("DATABASE_URL", None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 

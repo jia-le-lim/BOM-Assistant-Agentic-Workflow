@@ -15,6 +15,11 @@ def _load_dotenv() -> None:
     `$env:DATABASE_URL=...` or a CI secret overrides the file rather than being
     silently replaced by it.
     """
+    # The test suite opts into SQLite before importing this module. Reading the
+    # file there would hand back the DATABASE_URL it deliberately cleared, and
+    # the suite would run against the real Supabase project.
+    if os.environ.get("BOM_ALLOW_SQLITE") == "1":
+        return
     path = BACKEND_DIR / ".env"
     if not path.exists():
         return
@@ -59,7 +64,21 @@ def database_url() -> str:
 
 
 def is_postgres() -> bool:
-    return database_url().startswith(("postgres://", "postgresql://"))
+    return database_url().startswith(("postgres://", "postgresql://")) or use_rest()
+
+
+def use_rest() -> bool:
+    """Supabase over HTTPS rather than a Postgres socket.
+
+    Preferred when configured: it needs no database password and no proxy
+    tunnel, which is the whole reason it exists. DATABASE_URL still wins if
+    both are set -- a direct connection keeps real transactions, which the REST
+    transport cannot (see rest_conn's module docstring).
+    """
+    if database_url():
+        return False
+    from .rest_conn import configured
+    return configured()
 
 
 # Set by tests/conftest.py only. Without it, an unset DATABASE_URL is a hard
@@ -78,9 +97,14 @@ def require_database() -> None:
     if is_postgres() or allow_sqlite():
         return
     raise DatabaseNotConfigured(
-        "DATABASE_URL is not set, so there is no database to talk to.\n"
+        "No database configured. Set EITHER:\n"
         "\n"
-        "The application runs on Supabase Postgres; SQLite is test-only.\n"
+        "  A. SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY -- Supabase over HTTPS.\n"
+        "     No database password, no proxy tunnel. Note that this transport\n"
+        "     has no multi-statement transactions (app/rest_conn.py).\n"
+        "  B. DATABASE_URL -- a direct Postgres connection, which does.\n"
+        "\n"
+        "SQLite remains test-only.\n"
         "  1. Copy backend/.env.example to backend/.env\n"
         "  2. Put the project's database password in DATABASE_URL\n"
         "     (Supabase Dashboard > Project Settings > Database)\n"

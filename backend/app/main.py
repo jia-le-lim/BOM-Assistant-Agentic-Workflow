@@ -4,6 +4,8 @@ The engine calculates. NYRA explains. The engineer approves.
 WINGS updates only after approval.
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from .db import init_db
@@ -13,9 +15,23 @@ from .routers import chat, export, recommend, review, rules_config, upload
 API_VERSION = "0.2.0-agent"
 
 
-def create_app() -> FastAPI:
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Schema work happens on startup, not on import.
+
+    `app = create_app()` at the bottom of this module runs on any `import
+    app.main` -- a doc generator, an editor autoimport, a stray script. With
+    init_db() called directly, that import opened a connection and issued DDL;
+    on a developer machine with backend/.env present it issued it against the
+    real Supabase project.
+    """
     init_db()
+    yield
+
+
+def create_app() -> FastAPI:
     app = FastAPI(
+        lifespan=_lifespan,
         title="BOM Review Assistant API",
         version=API_VERSION,
         description="Decision-support backend for WINGS stocking-parameter review. "
@@ -36,12 +52,14 @@ def create_app() -> FastAPI:
         provider in CI and against Supabase with the internal endpoint in
         production, and confusing the two is an easy mistake to make.
         """
-        from .config import is_postgres
+        from .config import is_postgres, use_rest
         from .memory import enabled as mem0_enabled
 
         provider = get_provider()
         return {"status": "ok", "api_version": API_VERSION,
-                "database": "supabase-postgres" if is_postgres() else "sqlite (test-only)",
+                "database": "supabase-rest" if use_rest()
+                            else "supabase-postgres" if is_postgres()
+                            else "sqlite (test-only)",
                 "llm_provider": provider.name, "llm_model": provider.model,
                 "mem0_enabled": mem0_enabled()}
 

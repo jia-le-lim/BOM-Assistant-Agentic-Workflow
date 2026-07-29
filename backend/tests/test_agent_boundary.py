@@ -234,6 +234,34 @@ def test_mem0_disabled_by_default(client, synth_csv):
     assert "mem0" not in sys.modules, "mem0 must not be imported when disabled"
 
 
+def test_redaction_covers_what_actually_leaves_the_process(
+        client, synth_csv, db_file, monkeypatch):
+    """LLM_REDACT_PROMPTS has to mask the tool RESULT, not just the arguments.
+
+    The result string becomes a `tool` message and goes to the provider
+    verbatim, so with an external endpoint it is the only thing standing
+    between PRD 5.1 fields and a third party.
+    """
+    from app.agent.tools import ToolContext, dispatch
+    from app.db import get_conn
+
+    b = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        ctx = ToolContext(conn=conn, actor={"user": "alice", "role": "engineer"},
+                          batch_id=b, question="context for item 100005")
+
+        monkeypatch.setenv("LLM_REDACT_PROMPTS", "1")
+        masked = dispatch(ctx, "get_current_values", {"item_id": "100005"})
+        assert '"stockroom_id": "[redacted]"' in masked, masked
+
+        monkeypatch.setenv("LLM_REDACT_PROMPTS", "0")
+        plain = dispatch(ctx, "get_current_values", {"item_id": "100005"})
+        assert '"stockroom_id": "24"' in plain, plain
+    finally:
+        conn.close()
+
+
 def test_health_reports_wiring(client):
     """/health must make it obvious which backend a process is on -- the same
     image runs on SQLite under test and Supabase in production."""
