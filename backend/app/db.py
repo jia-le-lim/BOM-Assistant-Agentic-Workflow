@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS batches (
 );
 
 CREATE TABLE IF NOT EXISTS bom_rows (
-  batch_id INTEGER NOT NULL,
+  batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   module TEXT,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS bom_rows (
 );
 
 CREATE TABLE IF NOT EXISTS recommendation_result (
-  batch_id INTEGER NOT NULL,
+  batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   new_max INTEGER, new_rop INTEGER, new_min INTEGER,
@@ -75,12 +75,14 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd REAL,
   model_version TEXT, rule_version TEXT,
   scored_at TEXT DEFAULT (datetime('now')),
-  PRIMARY KEY (batch_id, item_id, stockroom_id)
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES bom_rows(batch_id, item_id, stockroom_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS review_history (
   review_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch_id INTEGER NOT NULL,
+  batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE RESTRICT,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   reviewer TEXT, role TEXT,
@@ -92,7 +94,10 @@ CREATE TABLE IF NOT EXISTS review_history (
   requires_senior_approval INTEGER DEFAULT 0,
   senior_approved_by TEXT, senior_approved_at TEXT,
   rule_version TEXT, model_version TEXT,
-  reviewed_at TEXT DEFAULT (datetime('now'))
+  reviewed_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS rule_config (
@@ -126,7 +131,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 -- it becomes one only when a human confirms it into review_history.
 CREATE TABLE IF NOT EXISTS pending_change (
   pending_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch_id INTEGER,
+  batch_id INTEGER REFERENCES batches(batch_id) ON DELETE RESTRICT,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   proposed_max INTEGER, proposed_rop INTEGER, proposed_min INTEGER,
@@ -137,6 +142,7 @@ CREATE TABLE IF NOT EXISTS pending_change (
   created_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   confirmed_review_id INTEGER
+    REFERENCES review_history(review_id) ON DELETE RESTRICT
 );
 
 -- Verbatim conversation log. The future ML label corpus
@@ -145,7 +151,7 @@ CREATE TABLE IF NOT EXISTS pending_change (
 CREATE TABLE IF NOT EXISTS conversation_turn (
   turn_id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT,
-  batch_id INTEGER,
+  batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
   user TEXT, role TEXT,
   question TEXT NOT NULL, answer TEXT,
   tool_calls TEXT,
@@ -157,14 +163,18 @@ CREATE TABLE IF NOT EXISTS conversation_turn (
 -- the part population: an item discussed in January may be absent in February
 -- and return in March. Keying on item_id (not batch_id) is what carries that
 -- context forward.
+-- Both parents are SET NULL, never CASCADE: a note must outlive the batch and
+-- the conversation it came from. That is the whole point of keying on item_id
+-- -- the roster rotates, so the note has to survive the roster.
 CREATE TABLE IF NOT EXISTS item_note (
   note_id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL,
   author TEXT,
-  origin_batch_id INTEGER,
-  origin_turn_id INTEGER,
+  origin_batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
+  origin_turn_id INTEGER
+    REFERENCES conversation_turn(turn_id) ON DELETE SET NULL,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -173,7 +183,7 @@ CREATE TABLE IF NOT EXISTS item_note (
 -- auditable from the first one rather than retrofitted (see app/scoring.py).
 CREATE TABLE IF NOT EXISTS model_prediction_log (
   prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch_id INTEGER NOT NULL,
+  batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   model_version TEXT NOT NULL,
   prediction REAL,
@@ -209,7 +219,7 @@ CREATE TABLE IF NOT EXISTS batches (
 );
 
 CREATE TABLE IF NOT EXISTS bom_rows (
-  batch_id BIGINT NOT NULL,
+  batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   module TEXT,
@@ -220,7 +230,7 @@ CREATE TABLE IF NOT EXISTS bom_rows (
 );
 
 CREATE TABLE IF NOT EXISTS recommendation_result (
-  batch_id BIGINT NOT NULL,
+  batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   new_max INTEGER, new_rop INTEGER, new_min INTEGER,
@@ -229,12 +239,14 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd DOUBLE PRECISION,
   model_version TEXT, rule_version TEXT,
   scored_at TEXT DEFAULT {PG_NOW},
-  PRIMARY KEY (batch_id, item_id, stockroom_id)
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES bom_rows(batch_id, item_id, stockroom_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS review_history (
   review_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  batch_id BIGINT NOT NULL,
+  batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE RESTRICT,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   reviewer TEXT, role TEXT,
@@ -246,7 +258,10 @@ CREATE TABLE IF NOT EXISTS review_history (
   requires_senior_approval INTEGER DEFAULT 0,
   senior_approved_by TEXT, senior_approved_at TEXT,
   rule_version TEXT, model_version TEXT,
-  reviewed_at TEXT DEFAULT {PG_NOW}
+  reviewed_at TEXT DEFAULT {PG_NOW},
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS rule_config (
@@ -277,7 +292,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE TABLE IF NOT EXISTS pending_change (
   pending_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  batch_id BIGINT,
+  batch_id BIGINT REFERENCES batches(batch_id) ON DELETE RESTRICT,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   proposed_max INTEGER, proposed_rop INTEGER, proposed_min INTEGER,
@@ -288,12 +303,13 @@ CREATE TABLE IF NOT EXISTS pending_change (
   created_by TEXT,
   created_at TEXT DEFAULT {PG_NOW},
   confirmed_review_id BIGINT
+    REFERENCES review_history(review_id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS conversation_turn (
   turn_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   session_id TEXT,
-  batch_id BIGINT,
+  batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
   "user" TEXT, role TEXT,
   question TEXT NOT NULL, answer TEXT,
   tool_calls TEXT,
@@ -301,21 +317,25 @@ CREATE TABLE IF NOT EXISTS conversation_turn (
   ts TEXT DEFAULT {PG_NOW}
 );
 
+-- Both parents are SET NULL, never CASCADE: a note must outlive the batch and
+-- the conversation it came from. That is the whole point of keying on item_id
+-- -- the roster rotates, so the note has to survive the roster.
 CREATE TABLE IF NOT EXISTS item_note (
   note_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   item_id TEXT NOT NULL,
   stockroom_id TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL,
   author TEXT,
-  origin_batch_id BIGINT,
-  origin_turn_id BIGINT,
+  origin_batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
+  origin_turn_id BIGINT
+    REFERENCES conversation_turn(turn_id) ON DELETE SET NULL,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT DEFAULT {PG_NOW}
 );
 
 CREATE TABLE IF NOT EXISTS model_prediction_log (
   prediction_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  batch_id BIGINT NOT NULL,
+  batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
   model_version TEXT NOT NULL,
   prediction DOUBLE PRECISION,

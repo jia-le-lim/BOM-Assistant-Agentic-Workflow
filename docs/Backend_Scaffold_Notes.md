@@ -6,7 +6,7 @@
 | Date | 28 July 2026, updated 29 July 2026 (§7) |
 | Backend | `backend/` — FastAPI 0.140.7, Python 3.12.10, **Supabase Postgres** (SQLite is test-only, §F9) |
 | Engine | `analysis/engine/engine.py` `rule_version 0.2.0-tcb` (unchanged — the backend never re-implements rules) |
-| Test status | **66/66 passing** offline + live HTTP smoke test on the real Jan'26 file |
+| Test status | **73/73 passing** offline + live HTTP smoke test on the real Jan'26 file |
 
 ---
 
@@ -354,6 +354,57 @@ Two guards make the split hold:
 
 `/health` reports `supabase-postgres` or `sqlite (test-only)` so it is never
 ambiguous which backend a running process is on.
+
+### F10 — the schema had no foreign keys at all 🐛
+
+Discovered while mapping the relations: the constraint catalogue was **empty**.
+Fourteen relations the code joins on, zero declared. The original SQLite
+scaffold had none, and the Postgres port mirrored its shape for dialect parity —
+so the omission travelled with it. Nothing stopped
+`pending_change.confirmed_review_id` pointing at a review that did not exist, and
+deleting a batch would have silently stranded its rows.
+
+Eleven are now declared and enforced on both backends. Three stay soft
+**deliberately**, and should not be "fixed" later:
+
+| Link | Why it must not be a key |
+|---|---|
+| `recommendation_result.rule_version → rule_config` | An immutable stamp of the version active when the row was written. A FK invites an update; the audit trail depends on it not changing (PRD §10 determinism). |
+| `bom_rows.machine_type ⊃ machine_criticality_config.pattern` | Substring match, not equality — one pattern covers many machines. Not expressible as a key. |
+| `audit_log.entity + entity_id` | Polymorphic across six tables. One FK cannot express it, and splitting per target defeats having a single chronological trail. |
+
+**`ON DELETE` is chosen per relation, not uniformly** — each choice encodes a
+rule about the system:
+
+- `CASCADE` on `bom_rows`, `recommendation_result`, `model_prediction_log` —
+  derived data, reproducible by re-running ingest and score.
+- `RESTRICT` on `review_history` and `pending_change` — the audit trail.
+  Deleting a batch that carries decisions now **fails loudly** instead of
+  shedding them.
+- `SET NULL` on `conversation_turn.batch_id` and `item_note.origin_*` —
+  provenance only. An `item_note` must outlive its batch; surviving roster
+  rotation is the entire reason that table is keyed on `item_id`.
+
+**Order of work mattered here.** The composite
+`recommendation_result → bom_rows` link was the one at real risk: ingestion
+writes `item_id` from the *stripped* record while the engine reads it back out of
+the JSON payload, and suffixes duplicate keys as `item#dup<n>`. A whitespace
+disagreement would have converted a silent mismatch into a failed batch run the
+day the constraint landed. `scripts/check_referential_integrity.py` runs the real
+Jan'26 workbook through ingest → score → review → chat and counts orphans for
+every proposed relation; it reported zero across 2,768 scored rows before
+anything was applied. Keep using it before adding constraints.
+
+Delete semantics were then executed against the live database inside a
+transaction and rolled back, rather than inferred from the DDL —
+`review_history_batch_fk` correctly refused the batch delete. Seven regression
+tests in `tests/test_foreign_keys.py` hold the same behaviour on SQLite, plus a
+parity assertion that every constraint exists in *both* DDL blocks with the same
+`ON DELETE` action — the F7 failure mode applied to constraints.
+
+Postgres does not index the referencing side of a FK automatically, so eleven
+supporting indexes went in with them; without those, every parent delete is a
+sequential scan of the child.
 
 ### Node is no longer installed on this machine ⚠️
 

@@ -34,8 +34,11 @@ straight at the pooler. Details in Backend_Scaffold_Notes.md §F6.
 
 ```powershell
 cd backend
-..\.venv\Scripts\python.exe -m pytest tests -q      # 66 tests, fully offline
+..\.venv\Scripts\python.exe -m pytest tests -q      # 73 tests, fully offline
 ..\.venv\Scripts\python.exe scripts\e2e_smoke.py    # live HTTP workflow (server up)
+
+# before adding or changing any foreign key, prove it holds on real data first:
+..\.venv\Scripts\python.exe scripts\check_referential_integrity.py
 ```
 
 **SQLite survives only as the test backend.** `tests/conftest.py` opts in via
@@ -104,6 +107,29 @@ and also the ML label corpus: Feature_Selection §12.6 calls for mining engineer
 free text as *labels* (as features they leak — OOF AUC 0.987 / 0.923), and the
 Jan'26 slice is one month with 97.5% of decisions from a single reviewer.
 
+## Referential integrity
+
+Eleven relations are declared foreign keys, enforced on both backends. `ON DELETE`
+is chosen per relation because each choice encodes a rule:
+
+- **`CASCADE`** — `bom_rows`, `recommendation_result`, `model_prediction_log`.
+  Derived data, reproducible by re-running ingest and score.
+- **`RESTRICT`** — `review_history`, `pending_change`. Deleting a batch that
+  carries decisions fails loudly rather than shedding them.
+- **`SET NULL`** — `conversation_turn.batch_id`, `item_note.origin_*`. Provenance
+  only. An `item_note` must outlive its batch — surviving roster rotation is the
+  whole reason that table is keyed on `item_id`.
+
+Three links stay soft on purpose and should not be "fixed": `rule_version` is an
+immutable stamp (a FK would invite an update and break the audit trail),
+`machine_criticality_config.pattern` is a substring match, and `audit_log` is
+polymorphic across six tables.
+
+Before changing any constraint, run `scripts/check_referential_integrity.py` —
+it drives the real Jan'26 workbook through ingest, score, review and chat, then
+counts orphans for every relation. A constraint added blind can turn a silent
+key mismatch into a failed batch run.
+
 ## Memory layer
 
 Two stores, one boundary:
@@ -149,9 +175,11 @@ backend/
     llm/               provider seam: protocol, nyra, echo (offline stub)
     agent/             tools, bounded loop, system prompt
     routers/           upload, recommend, review, rules_config, export, chat
-  tests/               66 tests: workflow, boundary, schema parity, SQL dialect
+  tests/               73 tests: workflow, boundary, foreign keys, schema
+                       parity, SQL dialect
   scripts/
     e2e_smoke.py       live HTTP workflow driver, real Jan'26 file
     proxy_tunnel.py    CONNECT tunnel so psycopg can reach Supabase here
+    check_referential_integrity.py  orphan check before touching constraints
   data/                SQLite DB — test artifacts only (gitignored)
 ```
