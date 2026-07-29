@@ -1,4 +1,4 @@
-﻿annotated-doc==0.0.4
+annotated-doc==0.0.4
 annotated-types==0.8.0
 anyio==4.14.2
 certifi==2026.7.22
@@ -26,3 +26,20 @@ typing-inspection==0.4.2
 typing_extensions==4.16.0
 tzdata==2026.3
 uvicorn==0.51.0
+
+# --- Supabase / Postgres -----------------------------------------------
+# Only needed when DATABASE_URL points at Postgres. The default target is
+# SQLite, so dev and CI run without this and without network access.
+psycopg[binary]==3.3.4
+
+# --- LLM ---------------------------------------------------------------
+# Used only by app/llm/nyra.py, and only when LLM_BASE_URL is set. Unset, the
+# app runs on EchoProvider with no network calls at all.
+openai==2.50.0
+
+# --- Optional: mem0 recall layer ---------------------------------------
+# NOT installed by default. MEM0_ENABLED=0 is the default and the suite must
+# pass with these absent. Install only when turning the recall layer on, and
+# only where direct Postgres egress exists (see docs/Backend_Scaffold_Notes.md
+# F3 -- on a dev machine that means running scripts/proxy_tunnel.py).
+#   pip install mem0ai==2.0.14

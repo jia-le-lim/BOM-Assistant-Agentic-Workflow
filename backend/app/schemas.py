@@ -32,6 +32,22 @@ class ConfigUpdateRequest(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     batch_id: int | None = None
+    session_id: str | None = None
+
+
+class ConfirmPendingRequest(BaseModel):
+    """Turning a staged proposal into a real review decision.
+
+    The engineer may correct the values at the point of confirming -- the agent
+    parsed them from prose, so this is the moment a human takes ownership.
+    """
+    pending_id: int
+    decision: Literal["override", "accept", "reject"] = "override"
+    final_max: int | None = Field(default=None, ge=0)
+    final_rop: int | None = Field(default=None, ge=0)
+    final_min: int | None = Field(default=None, ge=0)
+    comment: str = ""
+    justification: str = ""
 
 
 class CriticalityRequest(BaseModel):

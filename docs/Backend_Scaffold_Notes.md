@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Document type | Engineering notes (problems faced + decisions taken) |
-| Date | 28 July 2026 |
-| Scaffold | `backend/` — FastAPI 0.140.7, Python 3.12.10, SQLite |
+| Date | 28 July 2026, updated 29 July 2026 (§7) |
+| Backend | `backend/` — FastAPI 0.140.7, Python 3.12.10, **Supabase Postgres** (SQLite is test-only, §F9) |
 | Engine | `analysis/engine/engine.py` `rule_version 0.2.0-tcb` (unchanged — the backend never re-implements rules) |
-| Test status | **17/17 passing** (16 synthetic + 1 real-file E2E) + live HTTP smoke test |
+| Test status | **66/66 passing** offline + live HTTP smoke test on the real Jan'26 file |
 
 ---
 
@@ -95,9 +95,9 @@ The default sort does this, but the UI must not let bulk-accept flatten it.
 
 | PRD says | Scaffold does | Why |
 |---|---|---|
-| §4 SQL data mart | SQLite file (`backend/data/`) | Local scaffold; DDL is portable, no ORM lock-in |
+| §4 SQL data mart | ~~SQLite file~~ → **Supabase Postgres** (29 Jul 2026) | Resolved. SQLite remains only as the offline test backend; the app refuses to start without `DATABASE_URL` (§F9) |
 | §5.3 `item_master` / `inventory_snapshot` / `consumption_snapshot` | Single `bom_rows` (key cols + full-row JSON payload) | Source is one 116-col workbook; normalization adds cost now, value only when WINGS/SFM connectors exist. Engine gets full input fidelity |
-| §5.3 `model_prediction_log` | Not created | No ML yet (Phase 4) |
+| §5.3 `model_prediction_log` | Created, empty | Table exists so predictions are auditable from the first one; no model is trained yet (`app/scoring.py`) |
 | §10 Intel SSO / Entra ID | `X-User`/`X-Role` header stub | **Not authentication.** Route authorization, audit attribution and approval flow are real and tested; identity is a placeholder. Must be replaced before deployment |
 | §7 `POST /chat` via NYRA | Deterministic intent parser | Read-only by construction; answers "I don't know" when no tool matches (PRD §8 hard control). LLM layer slots in behind the same tool surface |
 | §7 Excel upload | CSV only | Avoids an openpyxl dependency through the offline-pip pipe; convert upstream |
@@ -246,6 +246,124 @@ Fixed with `allowedDevOrigins: ["127.0.0.1", "localhost"]` in `next.config.ts`
 the UI was completely non-functional — because they exercised the proxy, not the
 browser. Only rendering the pages in a real browser caught it. That is why
 `scripts/screenshot.mjs` is part of the test suite, not a nicety.
+
+---
+
+## 7. Supabase migration (29 Jul 2026)
+
+Project `bom-review-assistant` / `qiwdjbsrtxeorzpcqmxy`, region `ap-southeast-1`
+(nearest to Kulim), Postgres 17. All 11 tables created, RLS enabled with **no
+policies** on every one — deliberate default-deny, since the backend connects
+as the owner and enforces its own RBAC in `app/security.py`. `REVOKE ALL … FROM
+anon, authenticated` on top, so a leaked publishable key reaches nothing. The
+`rls_enabled_no_policy` advisor lints are therefore expected, not defects.
+
+### F6 — the proxy DOES allow CONNECT to arbitrary ports ✅ better than feared
+
+F1 established that raw TCP fails outright and everything must traverse
+`proxy-png.intel.com:912`. Since libpq has no HTTP-proxy support, the working
+assumption was that Postgres would be unreachable from a developer machine and
+we would be stuck on PostgREST.
+
+Measured instead:
+
+| Path | Result |
+|---|---|
+| `db.<ref>.supabase.co:5432` raw TCP | `getaddrinfo failed` — Supabase now provisions direct connections IPv6-only |
+| `aws-1-ap-southeast-1.pooler.supabase.com:5432` / `:6543` raw TCP | timeout |
+| `<ref>.supabase.co:443` raw TCP | timeout (control — confirms F1 still holds) |
+| **CONNECT to pooler `:5432` and `:6543` via the proxy** | **`HTTP/1.1 200 Connection established`** |
+| PostgREST over HTTPS via the proxy | HTTP 200 from GoTrue, `cf-ray … -KUL` |
+
+So the proxy tunnels *any* port, not just 443. `backend/scripts/proxy_tunnel.py`
+terminates that locally: point `DATABASE_URL` at `127.0.0.1` and psycopg works
+from this machine with full SQL. Verified end to end with a Postgres SSLRequest
+through the tunnel — server answered `S`.
+
+Also checked: **no corporate TLS interception.** Inside the CONNECT tunnel the
+certificate is `subject=supabase.co`, `issuer=Google Trust Services WE1`, so the
+proxy sees ciphertext only. Relevant to the PRD 5.1 sensitivity question.
+
+`api.openai.com:443` also tunnels, so an external LLM endpoint is technically
+reachable if governance ever permits one.
+
+### F7 — two SQL-translation bugs the SQLite suite could not catch 🐛
+
+`app/db.py` translates SQLite-flavoured SQL to Postgres. Both bugs below passed
+the entire test suite, because on SQLite the translation is a no-op — they were
+found by dumping the translated SQL and executing it against the live database.
+`tests/test_sql_translation.py` now covers both.
+
+1. **`datetime('now')` was never substituted.** It *contains* a string literal,
+   so the literal-preserving pass split the token in half and the replacement
+   never matched. Postgres has no `datetime()`; every write touching it would
+   have failed. Fix: substitute the fixed token *before* the literal pass.
+
+2. **Bare `user` was left unquoted** — the dangerous one. `audit_log` and
+   `conversation_turn` have a column named `user`, which is reserved in
+   Postgres, where bare `user` parses as `CURRENT_USER`. It does not error; it
+   silently returns the wrong value. Measured on the live database:
+
+   ```sql
+   SELECT DISTINCT "user", user FROM audit_log;
+   -- "user" -> 'alice'      (the column, correct)
+   --  user  -> 'postgres'   (the database role, silently wrong)
+   ```
+
+   Every audit read would have attributed actions to the DB role. Fix: quote
+   every bare occurrence, with lookarounds sparing `modified_user`, `user_id`,
+   `users` and already-quoted `"user"`.
+
+**Generalisable lesson:** a dual-dialect data layer whose tests only run against
+the *default* dialect is untested on the other one. The parity test
+(`test_schema_parity.py`) and the translation test exist for that reason, and
+the translated SQL was executed against the real instance before being trusted.
+
+### F8 — timestamps kept as TEXT on both dialects (deliberate)
+
+`TIMESTAMPTZ` is better Postgres practice, but psycopg would then return
+`datetime` objects where SQLite returns `str`, diverging every JSON response
+between dev and production. Both sides therefore store TEXT formatted
+`YYYY-MM-DD HH:MM:SS` UTC — Postgres via
+`to_char((now() at time zone 'utc'), …)`. Verified byte-identical in format to
+SQLite's `datetime('now')`. Worth converting once the port is proven, as one
+change on its own.
+
+### F9 — SQLite demoted to test-only (29 Jul 2026, owner decision)
+
+The application now runs on Supabase Postgres and **refuses to start without
+`DATABASE_URL`**. The failure this prevents is specific: a server that boots
+fine, looks healthy, and records an engineer's approved changes into a local
+file that no one else can see and no export job reads.
+
+SQLite survives as the *test* backend only, on the owner's instruction to leave
+the suite as it was. That keeps 66 tests offline and secret-free — which matters
+here more than usual, since every connection must traverse the proxy and CI
+would otherwise need the database password.
+
+Two guards make the split hold:
+
+- `tests/conftest.py` sets `BOM_ALLOW_SQLITE=1` **and clears `DATABASE_URL`**.
+  Without the second half, a developer with `backend/.env` populated would have
+  the suite silently run against the live Supabase project.
+- `config.py` resolves the database target at **call time**, not import time.
+  A module-level `DATABASE_URL` constant is captured before pytest's monkeypatch
+  runs, so the clearing above would have had no effect. `db_path()` already
+  worked this way; `database_url()` / `is_postgres()` / `allow_sqlite()` now
+  match it.
+
+`/health` reports `supabase-postgres` or `sqlite (test-only)` so it is never
+ambiguous which backend a running process is on.
+
+### Node is no longer installed on this machine ⚠️
+
+`frontend/node_modules` is present (465 MB) and `~/.npmrc` still carries the F1
+proxy config, but there is no `node.exe` anywhere on the box. The frontend
+changes in this round are therefore **unverified**: `npx tsc --noEmit`,
+`npm run build`, `scripts/e2e_console.mjs` (33 checks) and
+`scripts/screenshot.mjs` could not be run. Given F5 — where all 33 API checks
+passed while the UI was entirely broken — the frontend should be treated as
+unproven until Node is reinstalled and those four commands pass.
 
 ### F6 — the console needed endpoints the backend did not have
 

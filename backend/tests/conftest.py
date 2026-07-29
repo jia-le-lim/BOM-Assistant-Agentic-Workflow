@@ -19,7 +19,21 @@ AUDITOR = {"X-User": "aud", "X-Role": "auditor"}
 
 @pytest.fixture()
 def db_file(tmp_path, monkeypatch):
+    """SQLite is the TEST backend only.
+
+    The application itself runs on Supabase Postgres and refuses to start
+    without DATABASE_URL (config.require_database). Tests opt out explicitly
+    via BOM_ALLOW_SQLITE so the suite stays offline and needs no secrets --
+    every connection on this network must traverse an HTTP proxy, so a
+    network-dependent suite would be unrunnable here.
+
+    DATABASE_URL is cleared as well: a developer with backend/.env populated
+    would otherwise have their real Supabase project silently used as the test
+    database.
+    """
     p = tmp_path / "test.db"
+    monkeypatch.setenv("BOM_ALLOW_SQLITE", "1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("BOM_DB_PATH", str(p))
     return p
 

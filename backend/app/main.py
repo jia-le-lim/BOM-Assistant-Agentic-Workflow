@@ -7,9 +7,10 @@ WINGS updates only after approval.
 from fastapi import FastAPI
 
 from .db import init_db
+from .llm import get_provider
 from .routers import chat, export, recommend, review, rules_config, upload
 
-API_VERSION = "0.1.0-scaffold"
+API_VERSION = "0.2.0-agent"
 
 
 def create_app() -> FastAPI:
@@ -29,7 +30,20 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["ops"])
     def health():
-        return {"status": "ok", "api_version": API_VERSION}
+        """Which backend and which LLM this process is actually wired to.
+
+        Worth surfacing: the same image runs against SQLite with a stub
+        provider in CI and against Supabase with the internal endpoint in
+        production, and confusing the two is an easy mistake to make.
+        """
+        from .config import is_postgres
+        from .memory import enabled as mem0_enabled
+
+        provider = get_provider()
+        return {"status": "ok", "api_version": API_VERSION,
+                "database": "supabase-postgres" if is_postgres() else "sqlite (test-only)",
+                "llm_provider": provider.name, "llm_model": provider.model,
+                "mem0_enabled": mem0_enabled()}
 
     return app
 

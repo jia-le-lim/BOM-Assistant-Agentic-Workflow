@@ -99,4 +99,47 @@ export interface ChatResponse {
   answer: string;
   sources: Record<string, unknown>[];
   batch_id: number | null;
+  session_id: string;
+  turn_id: number;
+}
+
+/**
+ * A change the agent parsed out of chat and STAGED. It is not a decision:
+ * nothing here is visible to the WINGS export until a human confirms it, at
+ * which point it goes through the same review path as a console decision.
+ */
+export interface PendingChange {
+  pending_id: number;
+  batch_id: number | null;
+  item_id: string;
+  stockroom_id: string;
+  proposed_max: number | null;
+  proposed_rop: number | null;
+  proposed_min: number | null;
+  rationale: string | null;
+  /** The engineer's own words, stored unmodified. */
+  source_utterance: string;
+  /** provider:model that parsed it — provenance for the audit trail. */
+  parsed_by: string | null;
+  status: "pending" | "confirmed" | "discarded" | "superseded";
+  created_by: string | null;
+  created_at: string;
+  confirmed_review_id: number | null;
+}
+
+export interface PendingChangePage {
+  pending: PendingChange[];
+  count: number;
+}
+
+export interface ConfirmPendingResult {
+  review_id: number;
+  item_id: string;
+  pending_id: number;
+  decision: string;
+  final_max: number;
+  final_rop: number;
+  final_min: number;
+  requires_senior_approval: boolean;
+  status: Status;
 }

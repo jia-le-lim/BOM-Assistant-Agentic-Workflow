@@ -84,6 +84,48 @@ def main() -> int:
     unknown = c.post("/chat", json={"question": "predict next month demand"},
                      headers=ENG).json()
     print(f"chat guard: {unknown['answer'][:80]}")
+
+    # --- the agent write path -------------------------------------------
+    # A third item, untouched by the reviews above, so the staging ->
+    # confirm -> approve -> export chain is observed in isolation.
+    i3 = q["items"][2]
+    item = i3["item_id"]
+
+    vague = c.post("/chat", json={"question": f"bump item {item} up a bit"},
+                   headers=ENG).json()
+    staged_vague = [s for s in vague["sources"] if s.get("type") == "pending_change"]
+    print(f"chat vague: staged={len(staged_vague)} (must be 0) "
+          f"| {vague['answer'][:70]}")
+
+    said = f"we burned three last quarter, set item {item} max to 3"
+    prop = c.post("/chat", json={"question": said}, headers=ENG).json()
+    tray = c.get("/pending-changes?status=pending", headers=ENG).json()
+    print(f"chat propose: {prop['answer'][:110]}")
+    print(f"  tray: {tray['count']} staged")
+
+    before = c.get(f"/export/wings?batch_id={b}", headers=ENG).text
+    print(f"  export sees it before confirm: {item in before}  (must be False)")
+
+    pid = tray["pending"][0]["pending_id"]
+    conf = c.post(f"/review/{item}/confirm-pending",
+                  json={"pending_id": pid, "decision": "override",
+                        "final_max": 3, "final_rop": 2, "final_min": 1},
+                  headers=ENG).json()
+    print(f"  confirm -> review #{conf['review_id']} status={conf['status']}")
+
+    mid = c.get(f"/export/wings?batch_id={b}", headers=ENG).text
+    print(f"  export sees it after confirm, before approval: {item in mid}"
+          f"  (must be False -- override needs a second person)")
+
+    c.post(f"/review/{item}/approve?batch_id={b}", headers=SENIOR)
+    after = c.get(f"/export/wings?batch_id={b}", headers=ENG)
+    print(f"  export after senior approval: {item in after.text}  (must be True)"
+          f"  rows={after.headers['X-Rows-Exported']}")
+
+    hist = c.get(f"/history/{item}", headers=ENG).json()["reviews"][0]
+    print(f"  recorded as: reviewer={hist['reviewer']} decision={hist['decision']} "
+          f"final_max={hist['final_max']} rule={hist['rule_version']}")
+
     print("\nSMOKE TEST COMPLETE")
     return 0
 

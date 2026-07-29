@@ -12,11 +12,36 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
 from ..db import get_conn
-from ..schemas import ReviewRequest
+from ..schemas import ConfirmPendingRequest, ReviewRequest
 from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
 from ..services import current_values, derive_status, latest_reviews
 
 router = APIRouter()
+
+
+def _record_review(conn, actor, batch_id, rec, decision, final,
+                   comment, justification):
+    """The single path into review_history.
+
+    Both the console and a confirmed chat proposal come through here, so a
+    chat-originated decision is indistinguishable downstream: same approval
+    gate, same audit trail, same export path. Nothing else may INSERT into
+    review_history.
+    """
+    cur = current_values(conn, batch_id, rec["item_id"], rec["stockroom_id"])
+    eng = (rec["new_max"], rec["new_rop"], rec["new_min"])
+    requires_senior = int(decision == "override" or rec["risk_level"] == "High")
+    review_id = conn.insert_returning(
+        "INSERT INTO review_history (batch_id, item_id, stockroom_id, reviewer, role, "
+        "decision, current_max, current_rop, current_min, engine_max, engine_rop, "
+        "engine_min, final_max, final_rop, final_min, comment, justification, "
+        "requires_senior_approval, rule_version, model_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (batch_id, rec["item_id"], rec["stockroom_id"], actor["user"], actor["role"],
+         decision, *cur, *eng, *final, comment, justification,
+         requires_senior, rec["rule_version"], rec["model_version"]),
+        "review_history")
+    return review_id, cur, eng, requires_senior
 
 
 @router.post("/review/{item_id}")
@@ -39,18 +64,9 @@ def submit_review(item_id: str, batch_id: int, body: ReviewRequest,
         else:
             final = (body.final_max, body.final_rop, body.final_min)
 
-        requires_senior = int(body.decision == "override" or rec["risk_level"] == "High")
-
-        cursor = conn.execute(
-            "INSERT INTO review_history (batch_id, item_id, stockroom_id, reviewer, role, "
-            "decision, current_max, current_rop, current_min, engine_max, engine_rop, "
-            "engine_min, final_max, final_rop, final_min, comment, justification, "
-            "requires_senior_approval, rule_version, model_version) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (batch_id, rec["item_id"], rec["stockroom_id"], actor["user"], actor["role"],
-             body.decision, *cur, *eng, *final, body.comment, body.justification,
-             requires_senior, rec["rule_version"], rec["model_version"]))
-        review_id = cursor.lastrowid
+        review_id, cur, eng, requires_senior = _record_review(
+            conn, actor, batch_id, rec, body.decision, final,
+            body.comment, body.justification)
         audit(conn, actor, "POST", f"/review/{item_id}", "review", review_id,
               {"decision": body.decision, "final": final,
                "requires_senior_approval": bool(requires_senior)})
@@ -60,6 +76,97 @@ def submit_review(item_id: str, batch_id: int, body: ReviewRequest,
                 "final_max": final[0], "final_rop": final[1], "final_min": final[2],
                 "requires_senior_approval": bool(requires_senior),
                 "status": "awaiting_senior" if requires_senior else "reviewed"}
+    finally:
+        conn.close()
+
+
+@router.post("/review/{item_id}/confirm-pending")
+def confirm_pending(item_id: str, body: ConfirmPendingRequest,
+                    actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    """Turn an agent-staged proposal into a real review decision.
+
+    This is the only bridge out of `pending_change`, and it is a human action.
+    Until it runs, a chat utterance has produced exactly one thing: a staged
+    row that no export path can see.
+    """
+    conn = get_conn()
+    try:
+        p = conn.execute("SELECT * FROM pending_change WHERE pending_id=?",
+                         (body.pending_id,)).fetchone()
+        if p is None:
+            raise HTTPException(404, f"no pending change {body.pending_id}")
+        if p["status"] != "pending":
+            raise HTTPException(409, f"pending change {body.pending_id} is "
+                                     f"already {p['status']}")
+        if p["item_id"] != item_id:
+            raise HTTPException(400, f"pending change {body.pending_id} is for "
+                                     f"item {p['item_id']}, not {item_id}")
+
+        rec = conn.execute(
+            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
+            (p["batch_id"], item_id)).fetchone()
+        if rec is None:
+            raise HTTPException(404, f"item {item_id} not scored in batch "
+                                     f"{p['batch_id']}")
+
+        cur = current_values(conn, p["batch_id"], rec["item_id"], rec["stockroom_id"])
+        # The confirming engineer's numbers win over the agent's parse; the
+        # staged values are only the default.
+        staged = (p["proposed_max"], p["proposed_rop"], p["proposed_min"])
+        entered = (body.final_max, body.final_rop, body.final_min)
+        final = tuple(e if e is not None else (s if s is not None else c)
+                      for e, s, c in zip(entered, staged, cur))
+
+        # The console enforces this via ReviewRequest's validator. Here the
+        # values are merged from three sources, so the invariant has to be
+        # checked on the result -- a proposal that only set `max` can otherwise
+        # land below the item's existing ROP.
+        if not (final[0] >= final[1] >= final[2]):
+            raise HTTPException(
+                400, f"must satisfy max >= rop >= min; merging your values with "
+                     f"the staged proposal and current levels gave "
+                     f"max={final[0]}, rop={final[1]}, min={final[2]}. "
+                     f"State all three explicitly.")
+
+        review_id, cur, eng, requires_senior = _record_review(
+            conn, actor, p["batch_id"], rec, body.decision, final,
+            body.comment or p["rationale"] or "",
+            body.justification or "confirmed from chat proposal")
+
+        conn.execute(
+            "UPDATE pending_change SET status='confirmed', confirmed_review_id=? "
+            "WHERE pending_id=?", (review_id, body.pending_id))
+        audit(conn, actor, "POST", f"/review/{item_id}/confirm-pending",
+              "review", review_id,
+              {"pending_id": body.pending_id, "decision": body.decision,
+               "final": final, "staged": staged,
+               "requires_senior_approval": bool(requires_senior)})
+        conn.commit()
+        return {"review_id": review_id, "item_id": item_id,
+                "pending_id": body.pending_id, "decision": body.decision,
+                "final_max": final[0], "final_rop": final[1],
+                "final_min": final[2],
+                "requires_senior_approval": bool(requires_senior),
+                "status": "awaiting_senior" if requires_senior else "reviewed"}
+    finally:
+        conn.close()
+
+
+@router.post("/review/{item_id}/discard-pending")
+def discard_pending(item_id: str, pending_id: int,
+                    actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    conn = get_conn()
+    try:
+        p = conn.execute("SELECT * FROM pending_change WHERE pending_id=?",
+                         (pending_id,)).fetchone()
+        if p is None or p["status"] != "pending":
+            raise HTTPException(404, f"no open pending change {pending_id}")
+        conn.execute("UPDATE pending_change SET status='discarded' "
+                     "WHERE pending_id=?", (pending_id,))
+        audit(conn, actor, "POST", f"/review/{item_id}/discard-pending",
+              "pending_change", pending_id, {"discarded": True})
+        conn.commit()
+        return {"pending_id": pending_id, "status": "discarded"}
     finally:
         conn.close()
 

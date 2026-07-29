@@ -14,7 +14,7 @@ still score but force review_required = Y -- the engine handles those itself.
 
 import io
 import json
-import sqlite3
+from .db import Conn
 
 import numpy as np
 import pandas as pd
@@ -71,7 +71,7 @@ def quarantine_mask(df: pd.DataFrame) -> pd.Series:
     return reason
 
 
-def ingest(conn: sqlite3.Connection, content: bytes, label: str, filename: str,
+def ingest(conn: Conn, content: bytes, label: str, filename: str,
            module_filter: str | None, user: str) -> dict:
     try:
         df = pd.read_csv(io.BytesIO(content), dtype=str,
@@ -95,12 +95,12 @@ def ingest(conn: sqlite3.Connection, content: bytes, label: str, filename: str,
     reason = quarantine_mask(df)
     n_quar = int((reason != "").sum())
 
-    cur = conn.execute(
+    batch_id = conn.insert_returning(
         "INSERT INTO batches (label, source_filename, uploaded_by, module_filter, "
         "row_count, quarantined_count) VALUES (?,?,?,?,?,?)",
         (label, filename, user, module_filter or "ALL", len(df), n_quar),
+        "batches",
     )
-    batch_id = cur.lastrowid
 
     rows = []
     seen = set()

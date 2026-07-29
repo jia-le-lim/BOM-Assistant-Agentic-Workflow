@@ -8,19 +8,18 @@ around it -- it never re-implements rules.
 
 import hashlib
 import json
-import sqlite3
 import sys
 
 import pandas as pd
 
 from .config import ENGINE_DIR
-from .db import active_config
+from .db import Conn, active_config
 
 sys.path.insert(0, str(ENGINE_DIR))
 import engine  # noqa: E402  (analysis/engine/engine.py)
 
 
-def load_batch_df(conn: sqlite3.Connection, batch_id: int) -> pd.DataFrame:
+def load_batch_df(conn: Conn, batch_id: int) -> pd.DataFrame:
     rows = conn.execute(
         "SELECT payload FROM bom_rows WHERE batch_id=? AND quarantined=0", (batch_id,)
     ).fetchall()
@@ -29,7 +28,7 @@ def load_batch_df(conn: sqlite3.Connection, batch_id: int) -> pd.DataFrame:
     return pd.DataFrame([json.loads(r["payload"]) for r in rows])
 
 
-def score_batch(conn: sqlite3.Connection, batch_id: int) -> dict:
+def score_batch(conn: Conn, batch_id: int) -> dict:
     df = load_batch_df(conn, batch_id)
     if df.empty:
         raise ValueError(f"Batch {batch_id} has no scoreable rows")

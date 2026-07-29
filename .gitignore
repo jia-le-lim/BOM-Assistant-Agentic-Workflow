@@ -12,6 +12,16 @@ analysis/output/
 backend/data/
 *.db
 
+# Secrets. backend/.env.example is the committed template; the filled copy
+# holds the Supabase database password and the LLM API key.
+.env
+.env.*
+!.env.example
+!backend/.env.example
+
+# Trained model artifacts (not yet produced; see backend/app/scoring.py)
+backend/models/
+
 # Frontend
 frontend/node_modules/
 frontend/.next/

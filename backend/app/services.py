@@ -1,14 +1,15 @@
 """Shared workflow logic: review status derivation and WINGS export assembly."""
 
 import json
-import sqlite3
+from typing import Any
 
 from .config import REQUIRE_REVIEW_FOR_ALL_CHANGES
+from .db import Conn
 
 
-def latest_reviews(conn: sqlite3.Connection, batch_id: int) -> dict:
+def latest_reviews(conn: Conn, batch_id: int) -> dict:
     """Latest review per (item_id, stockroom_id) for a batch."""
-    out: dict[tuple, sqlite3.Row] = {}
+    out: dict[tuple, Any] = {}
     for r in conn.execute(
         "SELECT * FROM review_history WHERE batch_id=? ORDER BY review_id", (batch_id,)
     ):
@@ -16,7 +17,7 @@ def latest_reviews(conn: sqlite3.Connection, batch_id: int) -> dict:
     return out
 
 
-def derive_status(rec: sqlite3.Row, review: sqlite3.Row | None) -> str:
+def derive_status(rec: Any, review: Any | None) -> str:
     """Workflow state of one recommendation row.
 
     auto_cleared     engine says no change and no risk flag -- no human needed
@@ -36,7 +37,7 @@ def derive_status(rec: sqlite3.Row, review: sqlite3.Row | None) -> str:
     return "auto_cleared"
 
 
-def current_values(conn: sqlite3.Connection, batch_id: int, item_id: str,
+def current_values(conn: Conn, batch_id: int, item_id: str,
                    stockroom_id: str) -> tuple[int, int, int]:
     row = conn.execute(
         "SELECT payload FROM bom_rows WHERE batch_id=? AND item_id=? AND stockroom_id=?",
@@ -54,7 +55,7 @@ def current_values(conn: sqlite3.Connection, batch_id: int, item_id: str,
     return as_int(p.get("max_qty")), as_int(p.get("rop_qty")), as_int(p.get("min_qty"))
 
 
-def build_export(conn: sqlite3.Connection, batch_id: int) -> dict:
+def build_export(conn: Conn, batch_id: int) -> dict:
     """WINGS update rows: only reviewed-final rows whose values actually change.
 
     PRD section 11 Phase 2: file generated only after approval. Auto-cleared rows
