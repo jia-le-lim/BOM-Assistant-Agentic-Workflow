@@ -1,5 +1,6 @@
 import csv
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +8,14 @@ import pytest
 
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
+
+# Establish the offline test boundary before pytest imports any test modules.
+# test_schema_parity imports app.db during collection, which is earlier than
+# fixtures and would otherwise load the ignored real-runtime backend/.env.
+os.environ["BOM_ALLOW_SQLITE"] = "1"
+os.environ["DATABASE_URL"] = ""
+os.environ["LLM_BASE_URL"] = ""
+os.environ["MEM0_ENABLED"] = "0"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -33,8 +42,14 @@ def db_file(tmp_path, monkeypatch):
     """
     p = tmp_path / "test.db"
     monkeypatch.setenv("BOM_ALLOW_SQLITE", "1")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    # Keep an explicit empty value so config._load_dotenv() cannot repopulate
+    # the real/placeholder DATABASE_URL from the ignored backend/.env.
+    monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("BOM_DB_PATH", str(p))
+    # A developer may have the ignored backend/.env configured for the real
+    # LLM + mem0. Tests must remain offline and must never touch either service.
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("MEM0_ENABLED", "0")
     return p
 
 

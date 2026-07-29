@@ -26,11 +26,13 @@ Off by default because:
 from __future__ import annotations
 
 import os
+import tempfile
 
 from .redact import redact_for_memory
 
 _client = None
 _unavailable = False
+_runtime_dir = None
 
 
 def enabled() -> bool:
@@ -39,16 +41,27 @@ def enabled() -> bool:
 
 def _get_client():
     """Lazy: mem0ai is never imported unless explicitly switched on."""
-    global _client, _unavailable
+    global _client, _runtime_dir, _unavailable
     if _client is not None or _unavailable:
         return _client
     if not enabled():
         return None
     try:
+        # mem0 OSS always creates a small filesystem config directory when it
+        # is imported. Keep that package-internal metadata ephemeral; actual
+        # searchable memories live in Supabase through the pgvector store.
+        if not os.environ.get("MEM0_DIR"):
+            _runtime_dir = tempfile.TemporaryDirectory(prefix="bom-mem0-")
+            os.environ["MEM0_DIR"] = _runtime_dir.name
+
         from mem0 import Memory
 
         dsn = os.environ.get("MEM0_DATABASE_URL") or os.environ.get("DATABASE_URL")
         cfg = {
+            # mem0 2.0.x only supports SQLite for its auxiliary change history.
+            # This advisory layer does not need persistent local history, so
+            # keep it process-local rather than writing history.db to disk.
+            "history_db_path": ":memory:",
             "vector_store": {
                 "provider": "pgvector",
                 "config": {"connection_string": dsn,
