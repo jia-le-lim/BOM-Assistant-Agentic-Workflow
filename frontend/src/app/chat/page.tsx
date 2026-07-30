@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi } from "@/lib/api";
 import { can } from "@/lib/session";
@@ -10,6 +11,7 @@ import type {
   UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
+import { ChatAnswer } from "@/components/ChatAnswer";
 import { SuggestionCards } from "@/components/SuggestionCards";
 
 interface Turn {
@@ -24,8 +26,47 @@ function sourceLabel(s: Record<string, unknown>): string {
   const t = String(s.type ?? "source");
   if (t === "mem0") return `recalled context (not a record) ×${s.count ?? 0}`;
   if (t === "pending_change") return `staged proposal #${s.pending_id}`;
-  if (s.item_id) return `${t} · ${s.item_id}`;
-  return t;
+  const label = t.replaceAll("_", " ");
+  if (s.item_id) return `${label} · ${s.item_id}`;
+  return label;
+}
+
+function sourceHref(s: Record<string, unknown>): string | null {
+  if (!s.batch_id) return null;
+  if (s.item_id) return `/batches/${s.batch_id}/items/${s.item_id}`;
+  return `/batches/${s.batch_id}`;
+}
+
+function formatTimestamp(value: string): string {
+  return value.replace("T", " ").replace(/:\d{2}(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?$/, "");
+}
+
+function SendIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" />
+    </svg>
+  );
+}
+
+function AttachIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+      <path d="m20.5 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.7 9.7a2 2 0 0 1-2.8-2.8l8.9-8.9" />
+    </svg>
+  );
+}
+
+function SourceIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5Z" />
+      <path d="M4 5.5v16M8 7h8M8 11h6" />
+    </svg>
+  );
 }
 
 /* useSearchParams needs a Suspense boundary to prerender (Next 16). */
@@ -44,11 +85,16 @@ function Chat() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [pending, setPending] = useState<PendingChange[]>([]);
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const session = useRef<string | undefined>(undefined);
+  const conversationVersion = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
+  const latestTurn = useRef<HTMLElement>(null);
+  const messagesEnd = useRef<HTMLDivElement>(null);
+  const previousTurnCount = useRef(0);
 
   // Mirrors backend REVIEW_ROLES / UPLOAD_ROLES; the backend enforces regardless.
   const canReview = can.review(role);
@@ -61,36 +107,83 @@ function Chat() {
     } catch { /* tray is secondary; never block the conversation on it */ }
   }, [call]);
 
-  useEffect(() => { void refreshPending(); }, [refreshPending]);
+  useEffect(() => {
+    let active = true;
+    call<PendingChangePage>("pending-changes?status=pending")
+      .then((result) => { if (active) setPending(result.pending); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [call]);
 
-  // Reopening a recent ask PREFILLS it. Re-sending "set item X max to 3" on a
-  // navigation would stage a second proposal the engineer never asked for.
-  // Adjusted during render rather than in an effect (the ?q= change and the
-  // input value are one update, not two renders).
+  // Reopening a recent ask prefills it. Re-sending a mutation on navigation
+  // could stage a duplicate proposal, so only an explicit submit sends it.
+  const navigationKey = params.toString();
   const qParam = params.get("q");
-  const [seenQParam, setSeenQParam] = useState<string | null>(null);
-  if (qParam !== seenQParam) {
-    setSeenQParam(qParam);
-    if (qParam) setQ(qParam);
-  }
+  const newParam = params.get("new");
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      if (newParam) {
+        conversationVersion.current += 1;
+        session.current = undefined;
+        setTurns([]); setQ(""); setSending(null); setBusy(false);
+        setErr(null); setNote(null);
+      } else if (qParam) {
+        setQ(qParam);
+        composer.current?.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [navigationKey, newParam, qParam]);
+
+  useEffect(() => {
+    const input = composer.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  }, [q]);
+
+  useEffect(() => {
+    const completedTurn = turns.length > previousTurnCount.current;
+    previousTurnCount.current = turns.length;
+    if (!completedTurn && !sending) return;
+    const frame = window.requestAnimationFrame(() => {
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const target = completedTurn ? latestTurn.current : messagesEnd.current;
+      target?.scrollIntoView({
+        behavior: reduced ? "auto" : "smooth",
+        block: completedTurn ? "start" : "end",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [turns.length, sending]);
 
   async function ask(question: string) {
-    if (!question.trim()) return;
-    setBusy(true); setErr(null); setNote(null);
+    const cleanQuestion = question.trim();
+    if (!cleanQuestion || busy) return;
+    const requestVersion = conversationVersion.current;
+    setBusy(true); setSending(cleanQuestion); setQ(""); setErr(null); setNote(null);
     try {
       const r = await call<ChatResponse>("chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, session_id: session.current }),
+        body: JSON.stringify({ question: cleanQuestion, session_id: session.current }),
       });
+      if (requestVersion !== conversationVersion.current) return;
       session.current = r.session_id;
       const staged = r.sources.some((s) => s.type === "pending_change");
-      setTurns((t) => [...t, { q: question, a: r.answer, sources: r.sources, staged }]);
-      rememberAsk(question);
-      setQ("");
+      setTurns((t) => [...t, { q: cleanQuestion, a: r.answer, sources: r.sources, staged }]);
+      rememberAsk(cleanQuestion);
       if (staged) await refreshPending();
-    } catch (e) { setErr((e as Error).message); }
-    finally { setBusy(false); }
+    } catch (e) {
+      if (requestVersion === conversationVersion.current) {
+        setQ((current) => current || cleanQuestion);
+        setErr((e as Error).message);
+      }
+    } finally {
+      if (requestVersion === conversationVersion.current) {
+        setBusy(false); setSending(null);
+      }
+    }
   }
 
   /** A card that needs an argument hands the stem over rather than sending it. */
@@ -136,8 +229,10 @@ function Chat() {
   }
 
   function newChat() {
+    conversationVersion.current += 1;
     session.current = undefined;
-    setTurns([]); setQ(""); setErr(null); setNote(null);
+    setTurns([]); setQ(""); setSending(null); setBusy(false);
+    setErr(null); setNote(null);
     composer.current?.focus();
   }
 
@@ -175,161 +270,232 @@ function Chat() {
     finally { setBusy(false); }
   }
 
-  const empty = turns.length === 0;
+  const empty = turns.length === 0 && !sending;
 
   return (
-    <div className="flex flex-col gap-5 max-w-3xl mx-auto w-full">
+    <div className={`chat-page ${empty ? "is-empty" : "has-turns"}`}>
       {empty ? (
-        <header className="pt-8 pb-1 text-center">
-          <span className="orb" aria-hidden />
-          <h1 className="text-2xl font-semibold tracking-tight mt-5">
-            <span style={{ color: "var(--text-secondary)" }}>Hello, {user}.</span>{" "}
+        <header className="chat-hero">
+          <span className="orb" aria-hidden><span /></span>
+          <p className="chat-eyebrow">Grounded review assistant</p>
+          <h1>
+            <span>Hello, {user}.</span>{" "}
             What are we reviewing?
           </h1>
-          <p className="text-sm mt-2 mx-auto max-w-xl" style={{ color: "var(--text-secondary)" }}>
-            Explains what the engine decided, with its sources. It never calculates
-            Min/Max/ROP itself and never writes to WINGS — tell it a change and it
-            records your words as a proposal for you to confirm.
+          <p className="chat-intro">
+            Ask why an item was flagged, trace its review history, or stage a change
+            in your own words. Every answer stays tied to recorded BOM data.
           </p>
+          <div className="chat-assurance">
+            <span aria-hidden />
+            The engine calculates · you approve · WINGS updates after approval
+          </div>
         </header>
       ) : (
-        <div className="flex items-center justify-between gap-2 pt-1">
-          <h2 className="text-sm font-medium">Review conversation</h2>
-          <div className="flex gap-2">
-            <button type="button" className="btn text-xs" onClick={exportChat}>
-              Export chat
+        <header className="chat-header">
+          <div>
+            <p className="chat-eyebrow">NYRA assistant</p>
+            <h1>Review conversation</h1>
+            <p>
+              {sending
+                ? "Checking the recorded sources…"
+                : `${turns.length} completed ${turns.length === 1 ? "turn" : "turns"}`}
+            </p>
+          </div>
+          <div className="chat-header-actions">
+            <button type="button" className="btn" onClick={exportChat}
+                    disabled={turns.length === 0}>
+              Export
             </button>
-            <button type="button" className="btn text-xs" onClick={newChat} disabled={busy}>
+            <button type="button" className="btn" onClick={newChat} disabled={busy}>
               New chat
             </button>
           </div>
-        </div>
+        </header>
       )}
 
       {err && <Banner kind="error">{err}</Banner>}
       {note && <Banner kind="info">{note}</Banner>}
 
       {pending.length > 0 && (
-        <div className="card p-4">
-          <div className="text-sm font-medium mb-1">
-            Staged changes · {pending.length}
-          </div>
-          <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-            Not applied. Nothing here reaches a WINGS export until you confirm it.
-          </p>
-          <div className="flex flex-col gap-3">
+        <details className="card pending-tray" open>
+          <summary>
+            <span className="pending-icon" aria-hidden>!</span>
+            <span className="pending-summary-copy">
+              <strong>Staged changes</strong>
+              <span>Review before anything enters the approval path.</span>
+            </span>
+            <span className="pending-count">{pending.length}</span>
+          </summary>
+          <div className="pending-list">
             {pending.map((p) => (
-              <div key={p.pending_id} className="flex flex-col gap-2 p-3"
-                   style={{ border: "1px solid var(--gridline)", borderRadius: 6 }}>
-                <div className="text-sm">
+              <article key={p.pending_id} className="pending-item">
+                <div className="pending-item-head">
                   <strong>{p.item_id}</strong>
-                  {p.proposed_max !== null && <> · max → {p.proposed_max}</>}
-                  {p.proposed_rop !== null && <> · rop → {p.proposed_rop}</>}
-                  {p.proposed_min !== null && <> · min → {p.proposed_min}</>}
+                  <span>Proposal #{p.pending_id}</span>
                 </div>
-                <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                  “{p.source_utterance}”
+                <div className="pending-values tnum">
+                  {p.proposed_max !== null && <span>Max <strong>{p.proposed_max}</strong></span>}
+                  {p.proposed_rop !== null && <span>ROP <strong>{p.proposed_rop}</strong></span>}
+                  {p.proposed_min !== null && <span>Min <strong>{p.proposed_min}</strong></span>}
                 </div>
-                <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  staged by {p.created_by} · parsed by {p.parsed_by || "unknown"} · {p.created_at}
+                <blockquote>“{p.source_utterance}”</blockquote>
+                <div className="pending-meta">
+                  Staged by {p.created_by || "unknown"} · {formatTimestamp(p.created_at)} ·
+                  parsed by {p.parsed_by || "unknown"}
                 </div>
-                <div className="flex gap-2">
-                  <button className="btn btn-primary text-xs" disabled={busy || !canReview}
+                <div className="pending-actions">
+                  <button type="button" className="btn btn-primary" disabled={busy || !canReview}
                           onClick={() => confirm(p)}>
-                    Confirm
+                    Confirm change
                   </button>
-                  <button className="btn text-xs" disabled={busy || !canReview}
+                  <button type="button" className="btn" disabled={busy || !canReview}
                           onClick={() => discard(p)}>
                     Discard
                   </button>
-                  <a className="btn text-xs"
-                     href={`/batches/${p.batch_id}/items/${p.item_id}`}>
-                    Open in review
-                  </a>
+                  {p.batch_id !== null && (
+                    <Link className="btn" href={`/batches/${p.batch_id}/items/${p.item_id}`}>
+                      Open item
+                    </Link>
+                  )}
                 </div>
                 {!canReview && (
-                  <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                    Your role cannot confirm changes.
-                  </div>
+                  <p className="pending-role-note">Your role cannot confirm changes.</p>
                 )}
-              </div>
+              </article>
             ))}
           </div>
-        </div>
+        </details>
       )}
 
-      <form className="composer"
-            onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
+      {!empty && (
+        <section className="chat-transcript" aria-label="Conversation" aria-live="polite"
+                 aria-relevant="additions" aria-busy={Boolean(sending)}>
+          {turns.map((turn, index) => (
+            <article key={index} ref={index === turns.length - 1 ? latestTurn : undefined}
+                     className="chat-turn turn-in">
+              <div className="chat-row chat-row-user">
+                <div className="chat-bubble chat-bubble-user">{turn.q}</div>
+                <span className="chat-avatar chat-avatar-user" aria-hidden>
+                  {user.slice(0, 1).toUpperCase()}
+                </span>
+              </div>
+              <div className="chat-row chat-row-assistant">
+                <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
+                <div className="chat-response">
+                  <div className="chat-speaker">NYRA</div>
+                  <ChatAnswer>{turn.a}</ChatAnswer>
+                  {turn.staged && (
+                    <div className="staged-notice">
+                      <span aria-hidden>!</span>
+                      Staged only — confirm the proposal above to record a decision.
+                    </div>
+                  )}
+                  {turn.sources.length > 0 && (
+                    <div className="chat-sources" aria-label="Answer sources">
+                      <span className="chat-sources-label">Sources</span>
+                      {turn.sources.map((source, sourceIndex) => {
+                        const href = sourceHref(source);
+                        const contents = <><SourceIcon />{sourceLabel(source)}</>;
+                        return href ? (
+                          <Link key={sourceIndex} className="source-pill" href={href}>
+                            {contents}
+                          </Link>
+                        ) : (
+                          <span key={sourceIndex} className="source-pill">{contents}</span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </article>
+          ))}
+
+          {sending && (
+            <article className="chat-turn turn-in">
+              <div className="chat-row chat-row-user">
+                <div className="chat-bubble chat-bubble-user is-pending">{sending}</div>
+                <span className="chat-avatar chat-avatar-user" aria-hidden>
+                  {user.slice(0, 1).toUpperCase()}
+                </span>
+              </div>
+              <div className="chat-row chat-row-assistant">
+                <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
+                <div className="chat-response chat-thinking" role="status">
+                  <span className="chat-speaker">NYRA</span>
+                  <span className="typing-dots" aria-hidden><i /><i /><i /></span>
+                  <span className="sr-only">NYRA is checking the recorded sources.</span>
+                </div>
+              </div>
+            </article>
+          )}
+          <div ref={messagesEnd} className="messages-end" aria-hidden />
+        </section>
+      )}
+
+      <form className={`composer ${empty ? "composer-empty" : "composer-sticky"}`}
+            onSubmit={(event) => { event.preventDefault(); void ask(q); }}>
         <label htmlFor="ask" className="sr-only">Ask about a recommendation</label>
         <textarea
           id="ask"
           ref={composer}
-          rows={2}
+          rows={1}
           className="composer-input"
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          aria-describedby="composer-help"
+          onChange={(event) => setQ(event.target.value)}
           placeholder="Ask about an item, or state a change in your own words…"
-          onKeyDown={(e) => {
-            // Enter sends; Shift+Enter is a newline. A proposal is often two
-            // sentences, and losing it to a stray Enter is worse than the extra key.
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void ask(q); }
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void ask(q);
+            }
           }}
         />
-        <div className="flex items-center justify-between gap-3 px-1 pb-0.5">
-          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-            {canReview
-              ? "Proposals are staged, never applied. Enter to send."
-              : `Read-only as ${role}. Enter to send.`}
+        <div className="composer-footer">
+          <span id="composer-help" className="composer-hint">
+            {sending
+              ? "Checking recorded sources…"
+              : canReview
+                ? "Proposals are staged, never applied · Enter to send"
+                : `Read-only as ${role} · Enter to send`}
           </span>
-          <div className="flex items-center gap-2">
+          <div className="composer-actions">
             {canUpload && (
               <>
                 <input ref={filePicker} type="file" accept=".csv,text/csv" className="hidden"
-                       onChange={(e) => {
-                         const f = e.target.files?.[0];
-                         e.target.value = "";        // same file twice must re-fire
-                         if (f) void attach(f);
+                       onChange={(event) => {
+                         const file = event.target.files?.[0];
+                         event.target.value = "";
+                         if (file) void attach(file);
                        }} />
-                <button type="button" className="btn text-xs whitespace-nowrap" disabled={busy}
+                <button type="button" className="btn composer-attach" disabled={busy}
                         title="Upload a BOM extract (.csv) as a new batch"
                         onClick={() => filePicker.current?.click()}>
-                  Attach CSV
+                  <AttachIcon />
+                  <span>Attach CSV</span>
                 </button>
               </>
             )}
-            <button className="btn btn-primary text-sm" disabled={busy || !q.trim()}>
-              {busy ? "Asking…" : "Ask"}
+            <button className="btn btn-primary composer-send" disabled={busy || !q.trim()}>
+              <span>{sending ? "Working" : "Send"}</span>
+              <SendIcon />
             </button>
           </div>
         </div>
       </form>
 
       {empty && (
-        <SuggestionCards onSend={(p) => void ask(p)} onFill={fill}
-                         canReview={canReview} disabled={busy} />
-      )}
-
-      <div className="flex flex-col gap-4">
-        {turns.map((t, i) => (
-          <div key={i} className="card p-4 turn-in">
-            <div className="text-sm font-medium mb-2">{t.q}</div>
-            <p className="text-sm whitespace-pre-wrap" style={{ color: "var(--text-secondary)" }}>{t.a}</p>
-            {t.staged && (
-              <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-                Staged only — confirm it above to make it a decision.
-              </p>
-            )}
-            {t.sources.length > 0 && (
-              <div className="mt-3 pt-3 text-xs" style={{ borderTop: "1px solid var(--gridline)" }}>
-                <span style={{ color: "var(--text-muted)" }}>Sources: </span>
-                {t.sources.map((s, j) => (
-                  <code key={j} className="mr-2">{sourceLabel(s)}</code>
-                ))}
-              </div>
-            )}
+        <section className="chat-suggestions" aria-label="Suggested prompts">
+          <div className="suggestions-heading">
+            <span>Start with a workflow</span>
+            <span>Uses the latest scored batch</span>
           </div>
-        ))}
-      </div>
+          <SuggestionCards onSend={(prompt) => void ask(prompt)} onFill={fill}
+                           canReview={canReview} disabled={busy} />
+        </section>
+      )}
     </div>
   );
 }

@@ -87,21 +87,22 @@ export function SuggestionCards({ onSend, onFill, canReview, disabled }: {
           <li key={s.id} className="flex" style={{ ["--i" as string]: i }}>
             <button
               type="button"
-              className="card card-action w-full h-full text-left p-3.5 flex gap-3 items-start"
+              className="card card-action suggestion-card w-full h-full text-left"
               disabled={denied || disabled}
               aria-label={`${s.title}. ${why}`}
               onClick={() => (s.fills ? onFill(s.prompt) : onSend(s.prompt))}
             >
-              <span className="mt-0.5 shrink-0" style={{ color: "var(--seq)" }}>
+              <span className="suggestion-icon">
                 <Glyph name={s.id} />
               </span>
-              <span className="min-w-0">
+              <span className="suggestion-copy">
                 <span className="block text-sm font-medium">{s.title}</span>
                 <span className="block text-xs mt-1 leading-snug"
                       style={{ color: "var(--text-secondary)" }}>
                   {why}
                 </span>
               </span>
+              <span className="suggestion-arrow" aria-hidden>→</span>
             </button>
           </li>
         );
