@@ -45,4 +45,4 @@ openai==2.50.0
 # pass with these absent. Install only when turning the recall layer on, and
 # only where direct Postgres egress exists (see docs/Backend_Scaffold_Notes.md
 # F3 -- on a dev machine that means running scripts/proxy_tunnel.py).
-#   pip install mem0ai==2.0.14
+#   pip install -r backend/requirements-mem0.txt

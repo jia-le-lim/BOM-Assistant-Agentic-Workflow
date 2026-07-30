@@ -59,6 +59,12 @@ work around a config error.
 | `LLM_REDACT_PROMPTS` | off (endpoint is internal) | mask PRD §5.1 sensitive fields |
 | `BOM_ALLOW_SQLITE` | — | test-only escape hatch, set by conftest |
 
+To turn the optional mem0 recall layer on, install `backend/requirements-mem0.txt`,
+set `MEM0_ENABLED=1`, and provide a **direct Postgres** URL via `MEM0_DATABASE_URL`
+(or `DATABASE_URL`). Supabase REST keys (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`)
+are not enough for mem0. Ensure pgvector is enabled on the target database
+(`CREATE EXTENSION IF NOT EXISTS vector;`).
+
 ## Endpoints (PRD §7)
 
 | Endpoint | Role(s) | Purpose |
@@ -146,6 +152,28 @@ context carries forward.
 
 Nothing from mem0 is authoritative — `recall_context` labels every hit
 `authoritative: false` and the tool layer refuses to base a proposal on one.
+
+### mem0 API
+
+The memory store is per-user and opt-in. These endpoints never affect WINGS
+exports or review history — they only support advisory recall.
+
+```powershell
+# store a preference
+Invoke-RestMethod http://127.0.0.1:8011/memory `
+  -Method Post `
+  -Headers @{ "X-User"="alice"; "X-Role"="engineer" } `
+  -ContentType "application/json" `
+  -Body '{"text":"I don''t stock Phoenix consumables under $50"}'
+
+# search
+Invoke-RestMethod "http://127.0.0.1:8011/memory/search?q=Phoenix" `
+  -Headers @{ "X-User"="alice"; "X-Role"="engineer" }
+
+# status + active probe
+Invoke-RestMethod "http://127.0.0.1:8011/memory/status?probe=1" `
+  -Headers @{ "X-User"="alice"; "X-Role"="engineer" }
+```
 
 ## Workflow states
 
