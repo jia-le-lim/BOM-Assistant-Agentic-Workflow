@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ..llm import Message, get_provider
 from ..redact import redact_for_prompt
@@ -31,6 +32,7 @@ from . import tools as T
 from .prompts import DONT_KNOW, SYSTEM
 
 MAX_TOOL_CALLS = 5
+AgentEventSink = Callable[[dict], None]
 
 
 @dataclass
@@ -44,9 +46,33 @@ class AgentState:
     calls_made: int = 0
 
 
+def _emit(sink: AgentEventSink | None, event: dict) -> None:
+    if sink is not None:
+        sink(event)
+
+
+def _tool_outcome(result: str) -> tuple[str, str]:
+    try:
+        payload = json.loads(result)
+    except json.JSONDecodeError:
+        return "error", "The tool returned an unreadable response."
+    if not isinstance(payload, dict):
+        return "ok", "Retrieved a result."
+    if payload.get("error"):
+        return "error", str(payload["error"])
+    if payload.get("_empty"):
+        return "empty", "No matching records were found."
+    for key in ("items", "reviews", "notes", "results"):
+        if isinstance(payload.get(key), list):
+            count = len(payload[key])
+            return "ok", f"Retrieved {count} matching record{'s' if count != 1 else ''}."
+    return "ok", "Retrieved a matching record."
+
+
 def run_agent(conn, question: str, batch_id: int | None, actor: dict,
               session_id: str | None = None,
-              allow_writes: bool = True) -> dict:
+              allow_writes: bool = True,
+              on_event: AgentEventSink | None = None) -> dict:
     provider = get_provider()
     state = AgentState(question=question, batch_id=batch_id, actor=actor,
                        session_id=session_id or str(uuid.uuid4()))
@@ -58,23 +84,69 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
                       Message(role="user", content=question)]
     specs = T.specs(allow_writes=allow_writes)
     answer = ""
+    model_attempt = 0
+
+    _emit(on_event, {
+        "type": "request",
+        "query": question,
+        "batch_id": batch_id,
+        "provider": provider.name,
+        "model": provider.model,
+    })
 
     while state.calls_made <= MAX_TOOL_CALLS:
         # Past the cap, drop the tools so the model has to answer with what it
         # already has rather than looping.
         offered = specs if state.calls_made < MAX_TOOL_CALLS else []
+        model_attempt += 1
+        phase = ("Selecting the right data source"
+                 if state.calls_made == 0
+                 else "Composing an answer from retrieved records")
+        _emit(on_event, {
+            "type": "model_start",
+            "attempt": model_attempt,
+            "phase": phase,
+            "provider": provider.name,
+            "model": provider.model,
+        })
         resp = provider.chat(state.messages, offered)
 
         if not resp.tool_calls:
             answer = (resp.content or "").strip()
+            _emit(on_event, {
+                "type": "model_complete",
+                "attempt": model_attempt,
+                "summary": "Response ready",
+            })
             break
+
+        _emit(on_event, {
+            "type": "model_complete",
+            "attempt": model_attempt,
+            "summary": f"Requested {len(resp.tool_calls)} data "
+                       f"source{'s' if len(resp.tool_calls) != 1 else ''}",
+        })
 
         state.messages.append(Message(role="assistant", content=resp.content,
                                       tool_calls=resp.tool_calls))
         for call in resp.tool_calls:
             state.calls_made += 1
             args = redact_for_prompt(call.arguments) or {}
+            _emit(on_event, {
+                "type": "tool_start",
+                "sequence": state.calls_made,
+                "name": call.name,
+                "args": args,
+            })
             result = T.dispatch(ctx, call.name, call.arguments)
+            status, summary = _tool_outcome(result)
+            _emit(on_event, {
+                "type": "tool_result",
+                "sequence": state.calls_made,
+                "name": call.name,
+                "status": status,
+                "summary": summary,
+            })
             state.tool_calls.append({
                 "name": call.name,
                 "args": args,
@@ -87,8 +159,20 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
     # PRD section 8 hard control: no retrieved source -> say so. The model does
     # not get to decide this; an empty tool result set means "I don't know"
     # regardless of what it wanted to say.
-    if not ctx.sources or not answer:
+    used_fallback = not ctx.sources or not answer
+    if used_fallback:
+        reason = ("No authoritative data source matched this query."
+                  if not ctx.sources
+                  else "The model returned no usable answer from the retrieved records.")
+        _emit(on_event, {"type": "fallback", "reason": reason})
         answer = answer if (answer and ctx.sources) else DONT_KNOW
+
+    _emit(on_event, {
+        "type": "agent_complete",
+        "source_count": len(ctx.sources),
+        "tool_count": len(state.tool_calls),
+        "fallback": used_fallback,
+    })
 
     return {
         "answer": answer,

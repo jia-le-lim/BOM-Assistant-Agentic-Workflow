@@ -3,15 +3,17 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi } from "@/lib/api";
+import { ApiError, useApi } from "@/lib/api";
 import { can } from "@/lib/session";
 import { rememberAsk } from "@/lib/history";
 import type {
-  ChatResponse, ConfirmPendingResult, PendingChange, PendingChangePage,
-  UploadSummary,
+  ChatResponse, ChatStreamComplete, ChatStreamEvent, ConfirmPendingResult,
+  PendingChange, PendingChangePage, UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
+import { AgentActivity } from "@/components/AgentActivity";
+import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
 import { SuggestionCards } from "@/components/SuggestionCards";
 
 interface Turn {
@@ -19,6 +21,8 @@ interface Turn {
   a: string;
   sources: Record<string, unknown>[];
   staged: boolean;
+  trace: AgentTrace;
+  error?: string;
 }
 
 /** Non-authoritative sources are rendered as such — see memory.py. */
@@ -39,6 +43,118 @@ function sourceHref(s: Record<string, unknown>): string | null {
 
 function formatTimestamp(value: string): string {
   return value.replace("T", " ").replace(/:\d{2}(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?$/, "");
+}
+
+function toolLabel(name: string) {
+  return name.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function upsertTraceStep(trace: AgentTrace, step: AgentTraceStep): AgentTrace {
+  const exists = trace.steps.some((candidate) => candidate.id === step.id);
+  return {
+    ...trace,
+    steps: exists
+      ? trace.steps.map((candidate) => candidate.id === step.id
+        ? { ...candidate, ...step }
+        : candidate)
+      : [...trace.steps, step],
+  };
+}
+
+function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace {
+  if (event.type === "request") {
+    return upsertTraceStep({
+      ...trace,
+      provider: event.provider,
+      model: event.model,
+      batchId: event.batch_id,
+    }, {
+      id: "request",
+      label: "Request accepted",
+      detail: event.batch_id ? `Using scored batch ${event.batch_id}` : "No scored batch selected",
+      result: `${event.provider} · ${event.model}`,
+      status: "done",
+    });
+  }
+  if (event.type === "model_start") {
+    return upsertTraceStep({ ...trace, provider: event.provider, model: event.model }, {
+      id: `model-${event.attempt}`,
+      label: event.phase,
+      detail: `${event.provider} · ${event.model}`,
+      status: "running",
+    });
+  }
+  if (event.type === "model_complete") {
+    const current = trace.steps.find((step) => step.id === `model-${event.attempt}`);
+    return upsertTraceStep(trace, {
+      id: `model-${event.attempt}`,
+      label: current?.label ?? `Model call ${event.attempt}`,
+      detail: current?.detail,
+      result: event.summary,
+      status: "done",
+    });
+  }
+  if (event.type === "tool_start") {
+    return upsertTraceStep(trace, {
+      id: `tool-${event.sequence}`,
+      label: `Query ${toolLabel(event.name)}`,
+      detail: JSON.stringify(event.args),
+      status: "running",
+      technical: true,
+    });
+  }
+  if (event.type === "tool_result") {
+    const current = trace.steps.find((step) => step.id === `tool-${event.sequence}`);
+    return upsertTraceStep(trace, {
+      id: `tool-${event.sequence}`,
+      label: current?.label ?? `Query ${toolLabel(event.name)}`,
+      detail: current?.detail,
+      result: event.summary,
+      status: event.status === "ok" ? "done" : event.status === "empty" ? "warning" : "error",
+      technical: true,
+    });
+  }
+  if (event.type === "fallback") {
+    return upsertTraceStep({ ...trace, fallback: true }, {
+      id: "fallback",
+      label: "Grounded fallback",
+      detail: event.reason,
+      status: "warning",
+    });
+  }
+  if (event.type === "agent_complete") {
+    return upsertTraceStep({ ...trace, fallback: event.fallback }, {
+      id: "grounding",
+      label: "Grounding check",
+      result: `${event.source_count} authoritative source${event.source_count === 1 ? "" : "s"} · `
+            + `${event.tool_count} tool call${event.tool_count === 1 ? "" : "s"}`,
+      status: event.fallback ? "warning" : "done",
+    });
+  }
+  if (event.type === "answer_start") {
+    return upsertTraceStep(trace, {
+      id: "answer",
+      label: "Streaming grounded answer",
+      status: "running",
+    });
+  }
+  if (event.type === "complete") {
+    return upsertTraceStep({ ...trace, provider: event.provider, model: event.model }, {
+      id: "answer",
+      label: "Answer delivered",
+      status: "done",
+    });
+  }
+  if (event.type === "error") {
+    return upsertTraceStep(trace, {
+      id: "error",
+      label: `Failed during ${event.stage}`,
+      detail: `${event.error_type}: ${event.message}`,
+      status: "error",
+      technical: true,
+    });
+  }
+  return trace;
 }
 
 function SendIcon() {
@@ -79,13 +195,15 @@ export default function ChatPage() {
 }
 
 function Chat() {
-  const { call, role, user } = useApi();
+  const { call, stream, role, user } = useApi();
   const params = useSearchParams();
   const [q, setQ] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [pending, setPending] = useState<PendingChange[]>([]);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState<string | null>(null);
+  const [activeTrace, setActiveTrace] = useState<AgentTrace | null>(null);
+  const [streamedAnswer, setStreamedAnswer] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const session = useRef<string | undefined>(undefined);
@@ -95,6 +213,7 @@ function Chat() {
   const latestTurn = useRef<HTMLElement>(null);
   const messagesEnd = useRef<HTMLDivElement>(null);
   const previousTurnCount = useRef(0);
+  const activeTraceRef = useRef<AgentTrace | null>(null);
 
   // Mirrors backend REVIEW_ROLES / UPLOAD_ROLES; the backend enforces regardless.
   const canReview = can.review(role);
@@ -126,6 +245,8 @@ function Chat() {
         conversationVersion.current += 1;
         session.current = undefined;
         setTurns([]); setQ(""); setSending(null); setBusy(false);
+        setActiveTrace(null); setStreamedAnswer("");
+        activeTraceRef.current = null;
         setErr(null); setNote(null);
       } else if (qParam) {
         setQ(qParam);
@@ -155,33 +276,116 @@ function Chat() {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [turns.length, sending]);
+  }, [turns.length, sending, streamedAnswer.length, activeTrace?.steps.length]);
 
   async function ask(question: string) {
     const cleanQuestion = question.trim();
     if (!cleanQuestion || busy) return;
     const requestVersion = conversationVersion.current;
+    const initialTrace: AgentTrace = {
+      query: cleanQuestion,
+      steps: [{
+        id: "request",
+        label: "Connecting to agent stream",
+        status: "running",
+      }],
+    };
+    activeTraceRef.current = initialTrace;
+    setActiveTrace(initialTrace);
+    setStreamedAnswer("");
     setBusy(true); setSending(cleanQuestion); setQ(""); setErr(null); setNote(null);
-    try {
-      const r = await call<ChatResponse>("chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: cleanQuestion, session_id: session.current }),
-      });
+    let completed: ChatStreamComplete | null = null;
+    let streamFailure = "";
+
+    const handleEvent = (event: ChatStreamEvent): void | Promise<void> => {
       if (requestVersion !== conversationVersion.current) return;
-      session.current = r.session_id;
-      const staged = r.sources.some((s) => s.type === "pending_change");
-      setTurns((t) => [...t, { q: cleanQuestion, a: r.answer, sources: r.sources, staged }]);
+      if (event.type === "answer_delta") {
+        setStreamedAnswer((current) => current + event.delta);
+        return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+      const nextTrace = applyTraceEvent(activeTraceRef.current ?? initialTrace, event);
+      activeTraceRef.current = nextTrace;
+      setActiveTrace(nextTrace);
+      if (event.type === "complete") {
+        completed = event;
+        setStreamedAnswer(event.answer);
+      } else if (event.type === "error") {
+        streamFailure = event.message;
+      }
+    };
+
+    const request = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: cleanQuestion, session_id: session.current }),
+    };
+
+    try {
+      try {
+        await stream<ChatStreamEvent>("chat/stream", request, handleEvent);
+      } catch (error) {
+        if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) throw error;
+        handleEvent({
+          type: "fallback",
+          reason: "Live progress is unavailable on this backend; using the standard response path.",
+        });
+        const response = await call<ChatResponse>("chat", request);
+        const fallbackComplete: ChatStreamComplete = {
+          ...response,
+          type: "complete",
+          provider: "standard endpoint",
+          model: "non-streaming response",
+          tool_calls: [],
+        };
+        completed = fallbackComplete;
+        handleEvent(fallbackComplete);
+      }
+      if (requestVersion !== conversationVersion.current) return;
+      if (streamFailure) throw new Error(streamFailure);
+      if (!completed) throw new Error("The agent stream ended before returning a result.");
+
+      const result = completed as ChatStreamComplete;
+      session.current = result.session_id;
+      const staged = result.sources.some((source) => source.type === "pending_change");
+      const finalTrace = activeTraceRef.current ?? initialTrace;
+      setTurns((current) => [...current, {
+        q: cleanQuestion,
+        a: result.answer,
+        sources: result.sources,
+        staged,
+        trace: finalTrace,
+      }]);
       rememberAsk(cleanQuestion);
       if (staged) await refreshPending();
-    } catch (e) {
+    } catch (error) {
       if (requestVersion === conversationVersion.current) {
+        const message = (error as Error).message;
+        let failedTrace = activeTraceRef.current ?? initialTrace;
+        if (!failedTrace.steps.some((step) => step.status === "error")) {
+          failedTrace = applyTraceEvent(failedTrace, {
+            type: "error",
+            stage: "stream",
+            status: 500,
+            error_type: (error as Error).name || "Error",
+            message,
+          });
+          activeTraceRef.current = failedTrace;
+        }
+        setTurns((current) => [...current, {
+          q: cleanQuestion,
+          a: "",
+          sources: [],
+          staged: false,
+          trace: failedTrace,
+          error: message,
+        }]);
         setQ((current) => current || cleanQuestion);
-        setErr((e as Error).message);
+        setErr(message);
       }
     } finally {
       if (requestVersion === conversationVersion.current) {
-        setBusy(false); setSending(null);
+        setBusy(false); setSending(null); setActiveTrace(null); setStreamedAnswer("");
+        activeTraceRef.current = null;
       }
     }
   }
@@ -215,7 +419,12 @@ function Chat() {
   function exportChat() {
     const md = turns.map((t) => {
       const src = t.sources.map(sourceLabel).join(", ") || "none";
-      return `## ${t.q}\n\n${t.a}\n\n_Sources: ${src}_`
+      const activity = t.trace.steps.map((step) =>
+        `- [${step.status}] ${step.label}${step.result ? ` — ${step.result}` : ""}`
+      ).join("\n");
+      const answer = t.error ? `_Failed: ${t.error}_` : t.a;
+      return `## ${t.q}\n\n${answer}\n\n<details><summary>Agent activity</summary>\n\n`
+             + `${activity}\n\n</details>\n\n_Sources: ${src}_`
              + (t.staged ? "\n\n_Staged only — not a decision._" : "");
     }).join("\n\n---\n\n");
     const head = `# BOM review conversation\n\n_${user} · ${role} · exported `
@@ -232,6 +441,8 @@ function Chat() {
     conversationVersion.current += 1;
     session.current = undefined;
     setTurns([]); setQ(""); setSending(null); setBusy(false);
+    setActiveTrace(null); setStreamedAnswer("");
+    activeTraceRef.current = null;
     setErr(null); setNote(null);
     composer.current?.focus();
   }
@@ -271,6 +482,9 @@ function Chat() {
   }
 
   const empty = turns.length === 0 && !sending;
+  const completedTurns = turns.filter((turn) => !turn.error).length;
+  const failedTurns = turns.length - completedTurns;
+  const runningStep = activeTrace?.steps.findLast((step) => step.status === "running");
 
   return (
     <div className={`chat-page ${empty ? "is-empty" : "has-turns"}`}>
@@ -298,8 +512,9 @@ function Chat() {
             <h1>Review conversation</h1>
             <p>
               {sending
-                ? "Checking the recorded sources…"
-                : `${turns.length} completed ${turns.length === 1 ? "turn" : "turns"}`}
+                ? runningStep?.label ?? "Connecting to the agent…"
+                : `${completedTurns} completed ${completedTurns === 1 ? "turn" : "turns"}`
+                  + (failedTurns ? ` · ${failedTurns} failed` : "")}
             </p>
           </div>
           <div className="chat-header-actions">
@@ -384,7 +599,14 @@ function Chat() {
                 <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
                 <div className="chat-response">
                   <div className="chat-speaker">NYRA</div>
-                  <ChatAnswer>{turn.a}</ChatAnswer>
+                  {turn.a && <ChatAnswer>{turn.a}</ChatAnswer>}
+                  {turn.error && (
+                    <div className="chat-run-error" role="alert">
+                      <strong>The agent could not complete this request.</strong>
+                      <span>{turn.error}</span>
+                    </div>
+                  )}
+                  <AgentActivity trace={turn.trace} />
                   {turn.staged && (
                     <div className="staged-notice">
                       <span aria-hidden>!</span>
@@ -424,8 +646,16 @@ function Chat() {
                 <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
                 <div className="chat-response chat-thinking" role="status">
                   <span className="chat-speaker">NYRA</span>
-                  <span className="typing-dots" aria-hidden><i /><i /><i /></span>
-                  <span className="sr-only">NYRA is checking the recorded sources.</span>
+                  {activeTrace && <AgentActivity trace={activeTrace} live />}
+                  {streamedAnswer ? (
+                    <div className="streaming-answer">
+                      <ChatAnswer>{streamedAnswer}</ChatAnswer>
+                      <span className="stream-caret" aria-hidden />
+                    </div>
+                  ) : !activeTrace ? (
+                    <span className="typing-dots" aria-hidden><i /><i /><i /></span>
+                  ) : null}
+                  <span className="sr-only">NYRA is showing live execution progress.</span>
                 </div>
               </div>
             </article>
@@ -456,7 +686,7 @@ function Chat() {
         <div className="composer-footer">
           <span id="composer-help" className="composer-hint">
             {sending
-              ? "Checking recorded sources…"
+              ? runningStep?.label ?? "Connecting to the agent…"
               : canReview
                 ? "Proposals are staged, never applied · Enter to send"
                 : `Read-only as ${role} · Enter to send`}

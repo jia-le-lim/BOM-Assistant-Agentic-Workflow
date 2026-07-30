@@ -9,6 +9,7 @@ explicit tests rather than being implied by the happy path.
   6. mem0 stays off and uninvoked by default
 """
 
+import json
 import sqlite3
 
 import pytest
@@ -174,6 +175,40 @@ def test_no_source_means_dont_know(client, synth_csv):
                     headers=VIEWER).json()
     assert "I don't know" in r["answer"]
     assert r["sources"] == []
+
+
+def _stream_events(client, question, headers):
+    with client.stream("POST", "/chat/stream",
+                       json={"question": question}, headers=headers) as response:
+        assert response.status_code == 200, response.text
+        return [json.loads(line) for line in response.iter_lines() if line]
+
+
+def test_chat_stream_exposes_grounded_progress(client, synth_csv, db_file):
+    scored_batch(client, synth_csv)
+    events = _stream_events(client, "why item 100007?", VIEWER)
+    kinds = [event["type"] for event in events]
+
+    assert kinds[0] == "request"
+    assert "model_start" in kinds
+    assert any(event.get("name") == "get_recommendation"
+               for event in events if event["type"] == "tool_start")
+    assert any(event.get("status") == "ok"
+               for event in events if event["type"] == "tool_result")
+    assert "answer_delta" in kinds
+    assert kinds[-1] == "complete"
+    assert "100007" in events[-1]["answer"]
+    assert rows(db_file, "SELECT COUNT(*) FROM conversation_turn")[0][0] == 1
+
+
+def test_chat_stream_reports_fallback_reason(client, synth_csv):
+    scored_batch(client, synth_csv)
+    events = _stream_events(client, "what is the meaning of life", VIEWER)
+
+    fallback = next(event for event in events if event["type"] == "fallback")
+    assert "No authoritative data source" in fallback["reason"]
+    assert "I don't know" in events[-1]["answer"]
+    assert events[-1]["sources"] == []
 
 
 # -- 5: read-only roles never see the write tool ---------------------------

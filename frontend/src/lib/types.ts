@@ -103,6 +103,36 @@ export interface ChatResponse {
   turn_id: number;
 }
 
+export interface ChatStreamComplete extends ChatResponse {
+  type: "complete";
+  provider: string;
+  model: string;
+  tool_calls: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    ok: boolean;
+  }>;
+}
+
+export type ChatStreamEvent =
+  | { type: "request"; query: string; batch_id: number | null;
+      provider: string; model: string }
+  | { type: "model_start"; attempt: number; phase: string;
+      provider: string; model: string }
+  | { type: "model_complete"; attempt: number; summary: string }
+  | { type: "tool_start"; sequence: number; name: string;
+      args: Record<string, unknown> }
+  | { type: "tool_result"; sequence: number; name: string;
+      status: "ok" | "empty" | "error"; summary: string }
+  | { type: "fallback"; reason: string }
+  | { type: "agent_complete"; source_count: number; tool_count: number;
+      fallback: boolean }
+  | { type: "answer_start" }
+  | { type: "answer_delta"; delta: string }
+  | ChatStreamComplete
+  | { type: "error"; stage: string; status: number;
+      error_type: string; message: string };
+
 /**
  * A change the agent parsed out of chat and STAGED. It is not a decision:
  * nothing here is visible to the WINGS export until a human confirms it, at
