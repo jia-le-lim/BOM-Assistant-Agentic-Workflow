@@ -35,10 +35,15 @@ async function forward(req: NextRequest, path: string[]) {
     const res = await fetch(target, init);
     const body = await res.arrayBuffer();
     const out = new Headers();
-    for (const k of ["content-type", "content-disposition", "x-rows-exported",
-                     "x-pending-review", "x-awaiting-senior"]) {
-      const v = res.headers.get(k);
-      if (v) out.set(k, v);
+    // By prefix, not by name. The backend's X- headers are export counts the
+    // console renders; an allowlist of literal names has to be edited in
+    // lockstep with every new one, and when it is not, the count silently
+    // arrives as null rather than failing.
+    for (const [k, v] of res.headers) {
+      if (k === "content-type" || k === "content-disposition"
+          || k.startsWith("x-")) {
+        out.set(k, v);
+      }
     }
     return new Response(body, { status: res.status, headers: out });
   } catch {

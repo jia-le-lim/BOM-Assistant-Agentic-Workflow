@@ -77,9 +77,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     finally { setBusy(false); }
   }
 
-  async function download() {
+  /** csv = the update rows only; xlsx = the whole workbook, cells already filled. */
+  async function download(format: "csv" | "xlsx") {
     setErr(null);
-    const res = await raw(`export/wings?batch_id=${batchId}`);
+    const path = format === "xlsx" ? "export/wings.xlsx" : "export/wings";
+    const res = await raw(`${path}?batch_id=${batchId}`);
     if (!res.ok) {
       setErr(`Export failed: ${(await res.json()).detail}`);
       return;
@@ -87,11 +89,18 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `wings_update_batch${batchId}.csv`; a.click();
+    a.href = url; a.download = `wings_update_batch${batchId}.${format}`; a.click();
     URL.revokeObjectURL(url);
-    setNote(`Exported ${res.headers.get("x-rows-exported")} approved rows. ` +
-            `${res.headers.get("x-pending-review")} still pending review, ` +
-            `${res.headers.get("x-awaiting-senior")} awaiting senior approval — excluded.`);
+
+    const pending = res.headers.get("x-pending-review");
+    const senior = res.headers.get("x-awaiting-senior");
+    setNote(format === "xlsx"
+      ? `Workbook written: ${res.headers.get("x-rows-updated")} rows carry new `
+        + `values, ${res.headers.get("x-rows-acknowledged")} reviewed with no `
+        + `change. ${pending} pending review and ${senior} awaiting senior `
+        + `approval were left blank.`
+      : `Exported ${res.headers.get("x-rows-exported")} approved rows. `
+        + `${pending} still pending review, ${senior} awaiting senior approval — excluded.`);
   }
 
   const statuses = (summary?.statuses ?? {}) as Record<Status, number>;
@@ -118,8 +127,15 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                   disabled={busy || !can.upload(role)}>
             {busy ? "Scoring…" : isScored ? "Re-run engine" : "Run engine"}
           </button>
-          <button className="btn" onClick={download} disabled={!isScored || !can.export(role)}>
-            Export WINGS file
+          <button className="btn btn-primary" onClick={() => download("xlsx")}
+                  disabled={!isScored || !can.export(role)}
+                  title="The monthly workbook with approved values already in their cells">
+            Export workbook
+          </button>
+          <button className="btn" onClick={() => download("csv")}
+                  disabled={!isScored || !can.export(role)}
+                  title="Just the changed rows, as CSV">
+            Export update rows (CSV)
           </button>
         </div>
       </div>
