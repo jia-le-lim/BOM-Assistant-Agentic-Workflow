@@ -300,42 +300,54 @@ _STOCK = {"type": "string",
 REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
     "get_recommendation": (ToolSpec(
         "get_recommendation",
-        "What the engine recommended for one item, with its reason code and "
-        "explanation. Use this to answer 'why' questions.",
+        "What the engine recommends CHANGING an item to, with reason code, "
+        "risk level, confidence and USD exposure. Use for 'why', 'what does "
+        "the engine say', 'should this change'. NOT for the item's present "
+        "stock levels -- that is get_current_values.",
         {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
                                           "stockroom_id": _STOCK},
          "required": ["item_id"]}), get_recommendation),
 
     "get_current_values": (ToolSpec(
         "get_current_values",
-        "The item's current Max/ROP/Min as loaded from the source workbook.",
+        "The item's PRESENT Max/ROP/Min as loaded from the source workbook. "
+        "Use for 'what is it now', 'current max'. NOT for what the engine "
+        "recommends -- that is get_recommendation.",
         {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
                                           "stockroom_id": _STOCK},
          "required": ["item_id"]}), get_current_values),
 
     "get_item_history": (ToolSpec(
         "get_item_history",
-        "Past review decisions for an item across all batches.",
+        "Past review DECISIONS for an item across all batches. Use for 'what "
+        "was decided before'. NOT for free-text notes -- that is "
+        "get_item_notes.",
         {"type": "object", "properties": {"item_id": _ITEM},
          "required": ["item_id"]}), get_item_history),
 
     "get_item_notes": (ToolSpec(
         "get_item_notes",
-        "Engineer notes previously recorded against this item. These carry "
-        "across months even when the item is absent from the current roster.",
+        "Engineer notes previously recorded against this item. Use for 'what "
+        "was said about', 'any notes'. These carry across months even when the "
+        "item is absent from the current roster.",
         {"type": "object", "properties": {"item_id": _ITEM},
          "required": ["item_id"]}), get_item_notes),
 
     "top_exposure": (ToolSpec(
         "top_exposure",
-        "Highest-value items still requiring review, ranked by USD exposure.",
+        "The N HIGHEST-USD items still requiring review, ranked. Use only when "
+        "the question is about value at risk or 'what should I look at first'. "
+        "For any other filter or listing use list_review_queue.",
         {"type": "object",
          "properties": {"n": {"type": "integer", "description": "1-25"},
                         "batch_id": _BATCH}}), top_exposure),
 
     "list_review_queue": (ToolSpec(
         "list_review_queue",
-        "Filterable list of scored items and their workflow status.",
+        "LIST or COUNT scored items, optionally filtered by risk_level, action "
+        "or reason_code, with workflow status. Use for 'show the queue', "
+        "'which items are High risk', 'how many Decrease items'. NOT for "
+        "whole-batch totals -- that is batch_summary.",
         {"type": "object", "properties": {
             "batch_id": _BATCH,
             "risk_level": {"type": "string", "enum": ["Low", "Medium", "High"]},
@@ -346,12 +358,15 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
 
     "batch_summary": (ToolSpec(
         "batch_summary",
-        "Counts and pending exposure for a batch.",
+        "WHOLE-BATCH counts by status and total pending USD exposure. Use for "
+        "'how is the batch doing'. NOT for a filtered subset or a per-item "
+        "list -- that is list_review_queue.",
         {"type": "object", "properties": {"batch_id": _BATCH}}), batch_summary),
 
     "explain_rules": (ToolSpec(
         "explain_rules",
-        "The active rule thresholds and rule_version the engine is using.",
+        "The active rule thresholds and rule_version the engine is using. Use "
+        "for 'what thresholds', 'which rules', 'how is this configured'.",
         {"type": "object", "properties": {}}), explain_rules),
 
     "recall_context": (ToolSpec(
