@@ -8,12 +8,13 @@ import { can } from "@/lib/session";
 import { notifyChatHistoryChanged } from "@/lib/history";
 import type {
   ChatHistoryTurn, ChatResponse, ChatSession, ChatStreamComplete, ChatStreamEvent,
-  ConfirmPendingResult, PendingChange, PendingChangePage, UploadSummary,
+  ConfirmPendingResult, NextStepPrediction, PendingChange, PendingChangePage, UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
 import { AgentActivity, AgentToolCalls } from "@/components/AgentActivity";
 import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
+import { NextStepSuggestions } from "@/components/NextStepSuggestions";
 import { SuggestionCards } from "@/components/SuggestionCards";
 
 interface Turn {
@@ -22,6 +23,7 @@ interface Turn {
   sources: Record<string, unknown>[];
   staged: boolean;
   trace: AgentTrace;
+  nextSteps?: NextStepPrediction;
   error?: string;
 }
 
@@ -142,6 +144,33 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
       id: "answer",
       label: "Streaming grounded answer",
       status: "running",
+    });
+  }
+  if (event.type === "prediction_start") {
+    return upsertTraceStep(trace, {
+      id: "prediction",
+      label: "Predicting likely next steps",
+      detail: `${event.provider} · ${event.model}`,
+      status: "running",
+    });
+  }
+  if (event.type === "prediction_complete") {
+    return upsertTraceStep(trace, {
+      id: "prediction",
+      label: "Predicted likely next steps",
+      result: event.suggestions.length
+        ? `${event.suggestions.length} suggestions generated from the first request`
+        : "No grounded follow-up suggestion was generated",
+      status: event.suggestions.length ? "done" : "warning",
+    });
+  }
+  if (event.type === "prediction_error") {
+    return upsertTraceStep(trace, {
+      id: "prediction",
+      label: "Next-step prediction unavailable",
+      detail: event.message,
+      status: "warning",
+      technical: true,
     });
   }
   if (event.type === "complete") {
@@ -267,6 +296,7 @@ function Chat() {
   const [sending, setSending] = useState<string | null>(null);
   const [activeTrace, setActiveTrace] = useState<AgentTrace | null>(null);
   const [streamedAnswer, setStreamedAnswer] = useState("");
+  const [activePrediction, setActivePrediction] = useState<NextStepPrediction | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -278,6 +308,7 @@ function Chat() {
   const messagesEnd = useRef<HTMLDivElement>(null);
   const previousTurnCount = useRef(0);
   const activeTraceRef = useRef<AgentTrace | null>(null);
+  const activePredictionRef = useRef<NextStepPrediction | null>(null);
 
   // Mirrors backend REVIEW_ROLES / UPLOAD_ROLES; the backend enforces regardless.
   const canReview = can.review(role);
@@ -313,6 +344,7 @@ function Chat() {
         setTurns([]); setQ(""); setSending(null); setBusy(false);
         setLoadingHistory(false);
         setActiveTrace(null); setStreamedAnswer("");
+        setActivePrediction(null); activePredictionRef.current = null;
         activeTraceRef.current = null;
         setErr(null); setNote(null);
       } else if (sessionParam) {
@@ -322,6 +354,7 @@ function Chat() {
         setTurns([]); setQ(""); setSending(null); setBusy(false);
         setLoadingHistory(true);
         setActiveTrace(null); setStreamedAnswer("");
+        setActivePrediction(null); activePredictionRef.current = null;
         activeTraceRef.current = null;
         setErr(null); setNote(null);
         call<ChatSession>(`chat/sessions/${encodeURIComponent(sessionParam)}`)
@@ -385,6 +418,7 @@ function Chat() {
     activeTraceRef.current = initialTrace;
     setActiveTrace(initialTrace);
     setStreamedAnswer("");
+    setActivePrediction(null); activePredictionRef.current = null;
     setBusy(true); setSending(cleanQuestion); setQ(""); setErr(null); setNote(null);
     let completed: ChatStreamComplete | null = null;
     let streamFailure = "";
@@ -398,9 +432,17 @@ function Chat() {
       const nextTrace = applyTraceEvent(activeTraceRef.current ?? initialTrace, event);
       activeTraceRef.current = nextTrace;
       setActiveTrace(nextTrace);
-      if (event.type === "complete") {
+      if (event.type === "prediction_complete") {
+        const prediction = { intent: event.intent, suggestions: event.suggestions };
+        activePredictionRef.current = prediction;
+        setActivePrediction(prediction);
+      } else if (event.type === "complete") {
         completed = event;
         setStreamedAnswer(event.answer);
+        if (event.next_steps) {
+          activePredictionRef.current = event.next_steps;
+          setActivePrediction(event.next_steps);
+        }
       } else if (event.type === "error") {
         streamFailure = event.message;
       }
@@ -440,12 +482,14 @@ function Chat() {
       session.current = result.session_id;
       const staged = result.sources.some((source) => source.type === "pending_change");
       const finalTrace = activeTraceRef.current ?? initialTrace;
+      const nextSteps = result.next_steps ?? activePredictionRef.current ?? undefined;
       setTurns((current) => [...current, {
         q: cleanQuestion,
         a: result.answer,
         sources: result.sources,
         staged,
         trace: finalTrace,
+        nextSteps,
       }]);
       notifyChatHistoryChanged();
       if (staged) await refreshPending();
@@ -477,6 +521,7 @@ function Chat() {
     } finally {
       if (requestVersion === conversationVersion.current) {
         setBusy(false); setSending(null); setActiveTrace(null); setStreamedAnswer("");
+        setActivePrediction(null); activePredictionRef.current = null;
         activeTraceRef.current = null;
       }
     }
@@ -535,6 +580,7 @@ function Chat() {
     setTurns([]); setQ(""); setSending(null); setBusy(false);
     setLoadingHistory(false);
     setActiveTrace(null); setStreamedAnswer("");
+    setActivePrediction(null); activePredictionRef.current = null;
     activeTraceRef.current = null;
     setErr(null); setNote(null);
     composer.current?.focus();
@@ -701,6 +747,10 @@ function Chat() {
                 <div className="chat-response">
                   <div className="chat-speaker">NYRA</div>
                   {turn.a && <ChatAnswer>{turn.a}</ChatAnswer>}
+                  {index === turns.length - 1 && turn.nextSteps && (
+                    <NextStepSuggestions prediction={turn.nextSteps} disabled={busy}
+                                         onSelect={(prompt) => void ask(prompt)} />
+                  )}
                   <AgentToolCalls trace={turn.trace} />
                   {turn.error && (
                     <div className="chat-run-error" role="alert">
@@ -758,6 +808,10 @@ function Chat() {
                   ) : !activeTrace ? (
                     <span className="typing-dots" aria-hidden><i /><i /><i /></span>
                   ) : null}
+                  {activePrediction && (
+                    <NextStepSuggestions prediction={activePrediction} disabled
+                                         onSelect={() => undefined} />
+                  )}
                   <span className="sr-only">NYRA is showing live execution progress.</span>
                 </div>
               </div>

@@ -23,7 +23,9 @@ from threading import Thread
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from ..agent import tools as agent_tools
 from ..agent.loop import log_turn, run_agent
+from ..agent.suggestions import predict_next_steps
 from ..audit import audit
 from ..db import get_conn
 from ..schemas import ChatRequest
@@ -68,11 +70,29 @@ def _record_turn(conn, result: dict, actor: dict, question: str,
     return turn_id
 
 
+def _is_first_turn(conn, session_id: str | None, user: str | None) -> bool:
+    if not session_id:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM conversation_turn WHERE session_id=? AND user=? LIMIT 1",
+        (session_id, user),
+    ).fetchone() is None
+
+
+def _predict_next_steps(question: str, answer: str) -> dict:
+    return predict_next_steps(
+        question,
+        answer,
+        agent_tools.specs(allow_writes=False),
+    )
+
+
 @router.post("/chat")
 def chat(body: ChatRequest, actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         batch_id = _resolve_batch(conn, body.batch_id)
+        first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
         # Staging a proposal is a review action. Viewers and auditors get the
         # read-only tool surface, so the write tool is not even offered to the
         # model for them.
@@ -85,11 +105,19 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
 
         turn_id = _record_turn(conn, result, actor, body.question.strip(), batch_id)
 
+        next_steps = None
+        if first_turn:
+            try:
+                next_steps = _predict_next_steps(body.question.strip(), result["answer"])
+            except Exception:
+                next_steps = None
+
         return {"answer": result["answer"],
                 "sources": result["sources"],
                 "batch_id": batch_id,
                 "session_id": result["session_id"],
-                "turn_id": turn_id}
+                "turn_id": turn_id,
+                "next_steps": next_steps}
     finally:
         conn.close()
 
@@ -148,6 +176,7 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
         try:
             conn = get_conn()
             batch_id = _resolve_batch(conn, body.batch_id)
+            first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
             allow_writes = actor.get("role") in REVIEW_ROLES
             result = run_agent(
                 conn, question=question, batch_id=batch_id, actor=actor,
@@ -161,6 +190,22 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
             for offset in range(0, len(answer), 56):
                 emit({"type": "answer_delta",
                       "delta": answer[offset:offset + 56]})
+            next_steps = None
+            if first_turn:
+                emit({
+                    "type": "prediction_start",
+                    "provider": result["provider"],
+                    "model": result["model"],
+                })
+                try:
+                    next_steps = _predict_next_steps(question, answer)
+                    emit({"type": "prediction_complete", **next_steps})
+                except Exception as prediction_exc:
+                    emit({
+                        "type": "prediction_error",
+                        "message": (str(prediction_exc)
+                                    or type(prediction_exc).__name__)[:300],
+                    })
             emit({
                 "type": "complete",
                 "answer": answer,
@@ -171,6 +216,7 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
                 "provider": result["provider"],
                 "model": result["model"],
                 "tool_calls": result["tool_calls"],
+                "next_steps": next_steps,
             })
         except Exception as exc:
             if conn is not None:

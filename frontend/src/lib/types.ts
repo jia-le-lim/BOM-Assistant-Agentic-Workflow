@@ -110,6 +110,17 @@ export interface ChatResponse {
   batch_id: number | null;
   session_id: string;
   turn_id: number;
+  next_steps?: NextStepPrediction | null;
+}
+
+export interface NextStepSuggestion {
+  label: string;
+  prompt: string;
+}
+
+export interface NextStepPrediction {
+  intent: string;
+  suggestions: NextStepSuggestion[];
 }
 
 export interface ChatSessionSummary {
@@ -170,6 +181,9 @@ export type ChatStreamEvent =
       fallback: boolean }
   | { type: "answer_start" }
   | { type: "answer_delta"; delta: string }
+  | { type: "prediction_start"; provider: string; model: string }
+  | ({ type: "prediction_complete" } & NextStepPrediction)
+  | { type: "prediction_error"; message: string }
   | ChatStreamComplete
   | { type: "error"; stage: string; status: number;
       error_type: string; message: string };

@@ -595,6 +595,47 @@ body {
   font-size: 0.65rem; line-height: 1;
 }
 a.source-pill:hover { border-color: var(--seq); color: var(--text-primary); }
+.next-step-suggestions {
+  margin-top: 0.9rem; padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--seq) 32%, var(--border));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--seq-soft) 22%, var(--page));
+  animation: rise-in 0.2s ease-out both;
+}
+.next-step-heading { display: flex; align-items: flex-start; gap: 0.55rem; }
+.next-step-spark {
+  width: 24px; height: 24px; flex: 0 0 auto;
+  display: grid; place-items: center; border-radius: 8px;
+  background: var(--seq); color: #fff; font-size: 0.72rem;
+}
+.next-step-heading > div { min-width: 0; display: flex; flex-direction: column; gap: 0.08rem; }
+.next-step-heading strong { color: var(--text-primary); font-size: 0.73rem; font-weight: 650; }
+.next-step-heading span { color: var(--text-muted); font-size: 0.64rem; line-height: 1.4; }
+.next-step-options { display: grid; gap: 0.4rem; margin-top: 0.65rem; }
+.next-step-options button {
+  display: flex; align-items: center; gap: 0.65rem; width: 100%;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-1); color: var(--text-secondary);
+  text-align: left; font: inherit; cursor: pointer;
+  transition: border-color 0.14s, background 0.14s, transform 0.14s;
+}
+.next-step-options button:hover:not(:disabled) {
+  border-color: var(--seq); background: var(--page); transform: translateY(-1px);
+}
+.next-step-options button:disabled { opacity: 0.58; cursor: wait; }
+.next-step-options button > span:first-child {
+  min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 0.08rem;
+}
+.next-step-options button strong { color: var(--text-primary); font-size: 0.7rem; font-weight: 650; }
+.next-step-options button small {
+  overflow: hidden; color: var(--text-muted); font-size: 0.62rem;
+  white-space: nowrap; text-overflow: ellipsis;
+}
+.next-step-options button > span:last-child { color: var(--seq); font-size: 0.75rem; }
+.next-step-suggestions > p {
+  margin: 0.5rem 0 0; color: var(--text-muted); font-size: 0.58rem; line-height: 1.35;
+}
 .agent-tools {
   margin-top: 0.8rem;
   overflow: hidden;
@@ -903,7 +944,8 @@ a.source-pill:hover { border-color: var(--seq); color: var(--text-primary); }
 
 @media (prefers-reduced-motion: reduce) {
   .stagger-in > *, .turn-in { animation: none; }
-  .typing-dots i, .agent-activity-state, .agent-step-marker, .stream-caret { animation: none; }
+  .typing-dots i, .agent-activity-state, .agent-step-marker, .stream-caret,
+  .next-step-suggestions { animation: none; }
   .card-action:hover:not(:disabled) { transform: none; }
   * { transition-duration: 0.01ms !important; }
 }

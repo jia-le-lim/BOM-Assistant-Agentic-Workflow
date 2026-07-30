@@ -177,9 +177,9 @@ def test_no_source_means_dont_know(client, synth_csv):
     assert r["sources"] == []
 
 
-def _stream_events(client, question, headers):
+def _stream_events(client, question, headers, **extra):
     with client.stream("POST", "/chat/stream",
-                       json={"question": question}, headers=headers) as response:
+                       json={"question": question, **extra}, headers=headers) as response:
         assert response.status_code == 200, response.text
         return [json.loads(line) for line in response.iter_lines() if line]
 
@@ -209,6 +209,36 @@ def test_chat_stream_reports_fallback_reason(client, synth_csv):
     assert "No authoritative data source" in fallback["reason"]
     assert "I don't know" in events[-1]["answer"]
     assert events[-1]["sources"] == []
+
+
+def test_only_first_turn_streams_model_generated_next_steps(
+        client, synth_csv, monkeypatch):
+    scored_batch(client, synth_csv)
+    prediction = {
+        "intent": "Inspect the highest-exposure records",
+        "suggestions": [
+            {"label": "Filter high risk", "prompt": "Show high-risk review items"},
+            {"label": "Summarize batch", "prompt": "Summarize the current batch"},
+        ],
+    }
+    monkeypatch.setattr(
+        "app.routers.chat._predict_next_steps", lambda _question, _answer: prediction)
+
+    first = _stream_events(client, "top exposure items", ENG)
+    kinds = [event["type"] for event in first]
+    assert "prediction_start" in kinds
+    assert next(event for event in first
+                if event["type"] == "prediction_complete")["suggestions"] == prediction["suggestions"]
+    assert first[-1]["next_steps"] == prediction
+
+    second = _stream_events(
+        client,
+        prediction["suggestions"][0]["prompt"],
+        ENG,
+        session_id=first[-1]["session_id"],
+    )
+    assert not any(event["type"].startswith("prediction_") for event in second)
+    assert second[-1]["next_steps"] is None
 
 
 def test_chat_history_restores_complete_user_session(client):
