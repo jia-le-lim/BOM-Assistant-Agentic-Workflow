@@ -14,44 +14,70 @@ from ..audit import audit
 from ..db import get_conn
 from ..schemas import ConfirmPendingRequest, ReviewRequest
 from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
-from ..services import current_values, derive_status, latest_reviews
+from ..services import AmbiguousItem, current_values, resolve_rec
 
 router = APIRouter()
 
 
+_REVIEW_INSERT = (
+    "INSERT INTO review_history (batch_id, item_id, stockroom_id, reviewer, role, "
+    "decision, current_max, current_rop, current_min, engine_max, engine_rop, "
+    "engine_min, final_max, final_rop, final_min, comment, justification, "
+    "requires_senior_approval, rule_version, model_version) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+
+
 def _record_review(conn, actor, batch_id, rec, decision, final,
-                   comment, justification):
+                   comment, justification, link_pending: int | None = None):
     """The single path into review_history.
 
     Both the console and a confirmed chat proposal come through here, so a
     chat-originated decision is indistinguishable downstream: same approval
     gate, same audit trail, same export path. Nothing else may INSERT into
     review_history.
+
+    `link_pending` is the pending_change this review confirms. On Postgres the
+    two writes are ONE statement, via a data-modifying CTE: the Supabase REST
+    transport gives every call its own transaction, so as two statements a
+    failure in between would record the decision while leaving the proposal
+    open for someone to confirm a second time. SQLite has no data-modifying
+    CTEs -- but it is the test backend and does have real transactions, so it
+    keeps the two-statement form.
     """
     cur = current_values(conn, batch_id, rec["item_id"], rec["stockroom_id"])
     eng = (rec["new_max"], rec["new_rop"], rec["new_min"])
     requires_senior = int(decision == "override" or rec["risk_level"] == "High")
-    review_id = conn.insert_returning(
-        "INSERT INTO review_history (batch_id, item_id, stockroom_id, reviewer, role, "
-        "decision, current_max, current_rop, current_min, engine_max, engine_rop, "
-        "engine_min, final_max, final_rop, final_min, comment, justification, "
-        "requires_senior_approval, rule_version, model_version) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (batch_id, rec["item_id"], rec["stockroom_id"], actor["user"], actor["role"],
-         decision, *cur, *eng, *final, comment, justification,
-         requires_senior, rec["rule_version"], rec["model_version"]),
-        "review_history")
+    params = (batch_id, rec["item_id"], rec["stockroom_id"], actor["user"],
+              actor["role"], decision, *cur, *eng, *final, comment, justification,
+              requires_senior, rec["rule_version"], rec["model_version"])
+
+    if link_pending is not None and conn.is_postgres:
+        row = conn.execute(
+            f"WITH r AS ({_REVIEW_INSERT} RETURNING review_id) "
+            "UPDATE pending_change SET status='confirmed', "
+            "confirmed_review_id=(SELECT review_id FROM r) "
+            "WHERE pending_id=? RETURNING confirmed_review_id AS review_id",
+            (*params, link_pending)).fetchone()
+        return int(row["review_id"]), cur, eng, requires_senior
+
+    review_id = conn.insert_returning(_REVIEW_INSERT, params, "review_history")
+    if link_pending is not None:
+        conn.execute("UPDATE pending_change SET status='confirmed', "
+                     "confirmed_review_id=? WHERE pending_id=?",
+                     (review_id, link_pending))
     return review_id, cur, eng, requires_senior
 
 
 @router.post("/review/{item_id}")
 def submit_review(item_id: str, batch_id: int, body: ReviewRequest,
+                  stockroom_id: str | None = None,
                   actor: dict = Depends(require_role(*REVIEW_ROLES))):
     conn = get_conn()
     try:
-        rec = conn.execute(
-            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
-            (batch_id, item_id)).fetchone()
+        try:
+            rec = resolve_rec(conn, batch_id, item_id, stockroom_id)
+        except AmbiguousItem as e:
+            raise HTTPException(409, str(e))
         if rec is None:
             raise HTTPException(404, f"item {item_id} not scored in batch {batch_id}")
 
@@ -72,7 +98,7 @@ def submit_review(item_id: str, batch_id: int, body: ReviewRequest,
                "requires_senior_approval": bool(requires_senior)})
         conn.commit()
         return {"review_id": review_id, "item_id": rec["item_id"],
-                "decision": body.decision,
+                "stockroom_id": rec["stockroom_id"], "decision": body.decision,
                 "final_max": final[0], "final_rop": final[1], "final_min": final[2],
                 "requires_senior_approval": bool(requires_senior),
                 "status": "awaiting_senior" if requires_senior else "reviewed"}
@@ -102,9 +128,14 @@ def confirm_pending(item_id: str, body: ConfirmPendingRequest,
             raise HTTPException(400, f"pending change {body.pending_id} is for "
                                      f"item {p['item_id']}, not {item_id}")
 
-        rec = conn.execute(
-            "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
-            (p["batch_id"], item_id)).fetchone()
+        # The staged row carries the stockroom, so the confirmation lands on the
+        # same row the proposal was made against. `or None` covers rows staged
+        # before propose_change recorded it: fall back to resolving by item.
+        try:
+            rec = resolve_rec(conn, p["batch_id"], item_id,
+                              p["stockroom_id"] or None)
+        except AmbiguousItem as e:
+            raise HTTPException(409, str(e))
         if rec is None:
             raise HTTPException(404, f"item {item_id} not scored in batch "
                                      f"{p['batch_id']}")
@@ -131,11 +162,9 @@ def confirm_pending(item_id: str, body: ConfirmPendingRequest,
         review_id, cur, eng, requires_senior = _record_review(
             conn, actor, p["batch_id"], rec, body.decision, final,
             body.comment or p["rationale"] or "",
-            body.justification or "confirmed from chat proposal")
+            body.justification or "confirmed from chat proposal",
+            link_pending=body.pending_id)
 
-        conn.execute(
-            "UPDATE pending_change SET status='confirmed', confirmed_review_id=? "
-            "WHERE pending_id=?", (review_id, body.pending_id))
         audit(conn, actor, "POST", f"/review/{item_id}/confirm-pending",
               "review", review_id,
               {"pending_id": body.pending_id, "decision": body.decision,
@@ -161,6 +190,12 @@ def discard_pending(item_id: str, pending_id: int,
                          (pending_id,)).fetchone()
         if p is None or p["status"] != "pending":
             raise HTTPException(404, f"no open pending change {pending_id}")
+        # Same ownership check confirm_pending makes. Without it, discarding
+        # under the wrong item_id succeeds and the audit entry names an item
+        # that had nothing to do with the proposal.
+        if p["item_id"] != item_id:
+            raise HTTPException(400, f"pending change {pending_id} is for "
+                                     f"item {p['item_id']}, not {item_id}")
         conn.execute("UPDATE pending_change SET status='discarded' "
                      "WHERE pending_id=?", (pending_id,))
         audit(conn, actor, "POST", f"/review/{item_id}/discard-pending",
@@ -172,13 +207,19 @@ def discard_pending(item_id: str, pending_id: int,
 
 
 @router.post("/review/{item_id}/approve")
-def approve_review(item_id: str, batch_id: int,
+def approve_review(item_id: str, batch_id: int, stockroom_id: str | None = None,
                    actor: dict = Depends(require_role(*APPROVE_ROLES))):
     conn = get_conn()
     try:
-        r = conn.execute(
-            "SELECT * FROM review_history WHERE batch_id=? AND item_id=? "
-            "ORDER BY review_id DESC LIMIT 1", (batch_id, item_id)).fetchone()
+        # Without stockroom_id an item stocked in two stockrooms would approve
+        # whichever review happens to be newer, not the one the senior meant.
+        sql = "SELECT * FROM review_history WHERE batch_id=? AND item_id=?"
+        params = [batch_id, item_id]
+        if stockroom_id is not None:
+            sql += " AND stockroom_id=?"
+            params.append(stockroom_id)
+        r = conn.execute(sql + " ORDER BY review_id DESC LIMIT 1",
+                         params).fetchone()
         if r is None:
             raise HTTPException(404, f"no review found for item {item_id} in batch {batch_id}")
         if not r["requires_senior_approval"]:

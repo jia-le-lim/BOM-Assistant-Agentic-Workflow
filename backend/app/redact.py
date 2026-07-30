@@ -49,9 +49,15 @@ def redact_for_memory(obj: Any) -> Any:
     return _walk(obj, SENSITIVE_COLS | IDENTITY_COLS)
 
 
+def prompt_redaction_on() -> bool:
+    """For text that is assembled rather than walked -- an error message that
+    names a stockroom leaks it just as surely as a field does."""
+    return os.environ.get("LLM_REDACT_PROMPTS", "0") == "1"
+
+
 def redact_for_prompt(obj: Any) -> Any:
     """Off by default -- the approved endpoint is internal (PRD 4.3)."""
-    if os.environ.get("LLM_REDACT_PROMPTS", "0") != "1":
+    if not prompt_redaction_on():
         return obj
     return _walk(obj, SENSITIVE_COLS)
 

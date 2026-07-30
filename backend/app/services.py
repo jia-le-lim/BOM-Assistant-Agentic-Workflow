@@ -17,6 +17,38 @@ def latest_reviews(conn: Conn, batch_id: int) -> dict:
     return out
 
 
+class AmbiguousItem(LookupError):
+    """Item sits in more than one stockroom and the caller did not say which."""
+
+    def __init__(self, item_id: str, stockrooms: list[str]):
+        self.item_id, self.stockrooms = item_id, stockrooms
+        super().__init__(f"item {item_id} is in stockrooms "
+                         f"{', '.join(stockrooms)}; pass stockroom_id")
+
+
+def resolve_rec(conn: Conn, batch_id: int, item_id: str,
+                stockroom_id: str | None = None) -> Any | None:
+    """The one recommendation_result row for an item, or None.
+
+    The PK is (batch_id, item_id, stockroom_id). A two-column lookup with
+    fetchone() silently picks one row for an item stocked in two stockrooms --
+    the Jan'26 extract has such items -- and the other row then has no reachable
+    endpoint at all: permanently pending_review, never exported. Ambiguity is
+    raised, not guessed.
+    """
+    sql = "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?"
+    params: list[Any] = [batch_id, item_id]
+    if stockroom_id is not None:
+        sql += " AND stockroom_id=?"
+        params.append(stockroom_id)
+    rows = conn.execute(sql + " ORDER BY stockroom_id", params).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise AmbiguousItem(item_id, [r["stockroom_id"] for r in rows])
+    return rows[0]
+
+
 def derive_status(rec: Any, review: Any | None) -> str:
     """Workflow state of one recommendation row.
 

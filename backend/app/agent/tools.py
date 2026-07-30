@@ -19,7 +19,9 @@ from typing import Any, Callable
 
 from ..db import Conn, active_config
 from ..llm.provider import ToolSpec
-from ..services import current_values, derive_status, latest_reviews
+from ..redact import prompt_redaction_on, redact_for_prompt
+from ..services import (AmbiguousItem, current_values, derive_status,
+                        latest_reviews, resolve_rec)
 
 INT_RE = re.compile(r"\d+")
 
@@ -44,18 +46,36 @@ EMPTY: dict[str, Any] = {"_empty": True}
 # read tools
 # ---------------------------------------------------------------------------
 
+def _resolve(ctx: ToolContext, bid: int | None, item_id: str,
+             stockroom_id: str | None):
+    """resolve_rec, with ambiguity turned into a question for the model."""
+    try:
+        return resolve_rec(ctx.conn, bid, item_id, stockroom_id)
+    except AmbiguousItem as e:
+        # stockroom_id is on the PRD 5.1 sensitive list, so the ids themselves
+        # stay out of the prompt when redaction is on. The engineer knows their
+        # own stockrooms; the answer comes back in their next message.
+        if prompt_redaction_on():
+            raise ToolError(f"Item {item_id} is stocked in more than one "
+                            f"stockroom. Ask the engineer which one, and pass "
+                            f"it back as stockroom_id.")
+        raise ToolError(f"{e}. Ask the engineer which stockroom they mean.")
+
+
 def get_recommendation(ctx: ToolContext, item_id: str,
-                       batch_id: int | None = None) -> dict:
+                       batch_id: int | None = None,
+                       stockroom_id: str | None = None) -> dict:
     bid = batch_id or ctx.batch_id
-    r = ctx.conn.execute(
-        "SELECT * FROM recommendation_result WHERE batch_id=? AND item_id=?",
-        (bid, item_id)).fetchone()
+    r = _resolve(ctx, bid, item_id, stockroom_id)
     if r is None:
         return EMPTY
     ctx.sources.append({"type": "recommendation_result", "batch_id": bid,
-                        "item_id": item_id, "reason_code": r["reason_code"],
+                        "item_id": item_id,
+                        "stockroom_id": r["stockroom_id"],
+                        "reason_code": r["reason_code"],
                         "rule_version": r["rule_version"]})
-    return {"item_id": r["item_id"], "new_max": r["new_max"],
+    return {"item_id": r["item_id"], "stockroom_id": r["stockroom_id"],
+            "new_max": r["new_max"],
             "new_rop": r["new_rop"], "new_min": r["new_min"],
             "review_required": r["review_required"], "action": r["action"],
             "reason_code": r["reason_code"], "risk_level": r["risk_level"],
@@ -64,15 +84,23 @@ def get_recommendation(ctx: ToolContext, item_id: str,
 
 
 def get_current_values(ctx: ToolContext, item_id: str,
-                       batch_id: int | None = None) -> dict:
+                       batch_id: int | None = None,
+                       stockroom_id: str | None = None) -> dict:
     bid = batch_id or ctx.batch_id
+    # current_values matches stockroom_id exactly, so the hardcoded "" this used
+    # to pass missed every real row -- the tool always answered "I don't know".
+    # Take the stockroom off the scored row instead.
+    rec = _resolve(ctx, bid, item_id, stockroom_id)
+    if rec is None:
+        return EMPTY
     try:
-        mx, rop, mn = current_values(ctx.conn, bid, item_id, "")
+        mx, rop, mn = current_values(ctx.conn, bid, item_id, rec["stockroom_id"])
     except KeyError:
         return EMPTY
-    ctx.sources.append({"type": "bom_rows", "batch_id": bid, "item_id": item_id})
-    return {"item_id": item_id, "current_max": mx, "current_rop": rop,
-            "current_min": mn}
+    ctx.sources.append({"type": "bom_rows", "batch_id": bid, "item_id": item_id,
+                        "stockroom_id": rec["stockroom_id"]})
+    return {"item_id": item_id, "stockroom_id": rec["stockroom_id"],
+            "current_max": mx, "current_rop": rop, "current_min": mn}
 
 
 def get_item_history(ctx: ToolContext, item_id: str) -> dict:
@@ -207,7 +235,8 @@ def propose_change(ctx: ToolContext, item_id: str,
                    proposed_rop: int | None = None,
                    proposed_min: int | None = None,
                    rationale: str = "",
-                   batch_id: int | None = None) -> dict:
+                   batch_id: int | None = None,
+                   stockroom_id: str | None = None) -> dict:
     """Stage what the engineer said. Never decide it.
 
     PRD section 8: the LLM never generates Min/Max/ROP. That is enforced here,
@@ -230,9 +259,8 @@ def propose_change(ctx: ToolContext, item_id: str,
                 f"in the engineer's message. Ask them to state the value "
                 f"explicitly. (The assistant does not calculate stock levels.)")
 
-    if not ctx.conn.execute(
-            "SELECT 1 FROM recommendation_result WHERE batch_id=? AND item_id=?",
-            (bid, item_id)).fetchone():
+    rec = _resolve(ctx, bid, item_id, stockroom_id)
+    if rec is None:
         raise ToolError(f"Item {item_id} is not in scored batch {bid}. The "
                         f"monthly roster rotates, so it may not be in the "
                         f"current extract.")
@@ -242,7 +270,8 @@ def propose_change(ctx: ToolContext, item_id: str,
         "proposed_max, proposed_rop, proposed_min, rationale, "
         "source_utterance, parsed_by, status, created_by) "
         "VALUES (?,?,?,?,?,?,?,?,?,'pending',?)",
-        (bid, item_id, "", proposed_max, proposed_rop, proposed_min,
+        (bid, item_id, rec["stockroom_id"], proposed_max, proposed_rop,
+         proposed_min,
          rationale[:2000], ctx.question[:2000],
          ctx.actor.get("_parsed_by", ""), ctx.actor.get("user")),
         "pending_change")
@@ -250,6 +279,7 @@ def propose_change(ctx: ToolContext, item_id: str,
     ctx.sources.append({"type": "pending_change", "pending_id": pending_id,
                         "item_id": item_id, "status": "pending"})
     return {"pending_id": pending_id, "item_id": item_id,
+            "stockroom_id": rec["stockroom_id"],
             "proposed_max": proposed_max, "proposed_rop": proposed_rop,
             "proposed_min": proposed_min, "status": "pending",
             "note": "staged only; a human must confirm before this can be "
@@ -263,19 +293,24 @@ def propose_change(ctx: ToolContext, item_id: str,
 _ITEM = {"type": "string", "description": "Numeric item/part id"}
 _BATCH = {"type": "integer",
           "description": "Batch id; omit to use the latest scored batch"}
+_STOCK = {"type": "string",
+          "description": "Stockroom id; only needed when one item is stocked "
+                         "in more than one stockroom"}
 
 REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
     "get_recommendation": (ToolSpec(
         "get_recommendation",
         "What the engine recommended for one item, with its reason code and "
         "explanation. Use this to answer 'why' questions.",
-        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH},
+        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
+                                          "stockroom_id": _STOCK},
          "required": ["item_id"]}), get_recommendation),
 
     "get_current_values": (ToolSpec(
         "get_current_values",
         "The item's current Max/ROP/Min as loaded from the source workbook.",
-        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH},
+        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
+                                          "stockroom_id": _STOCK},
          "required": ["item_id"]}), get_current_values),
 
     "get_item_history": (ToolSpec(
@@ -338,7 +373,8 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
             "proposed_min": {"type": "integer"},
             "rationale": {"type": "string",
                           "description": "The engineer's stated reason"},
-            "batch_id": _BATCH},
+            "batch_id": _BATCH,
+            "stockroom_id": _STOCK},
          "required": ["item_id"]}), propose_change),
 }
 
@@ -351,13 +387,20 @@ def specs(allow_writes: bool) -> list[ToolSpec]:
 
 
 def dispatch(ctx: ToolContext, name: str, args: dict) -> str:
-    """Run a tool, always returning a JSON string for the tool message."""
+    """Run a tool, always returning a JSON string for the tool message.
+
+    The result is redacted here, because this string becomes a `tool` message
+    and is sent to the provider verbatim. The loop redacted only the tool
+    *arguments*, and only for its own log -- so with an external endpoint
+    configured, LLM_REDACT_PROMPTS=1 masked nothing that actually left the
+    process.
+    """
     entry = REGISTRY.get(name)
     if entry is None:
         return json.dumps({"error": f"unknown tool {name}"})
     _, fn = entry
     try:
-        return json.dumps(fn(ctx, **args), default=str)
+        return json.dumps(redact_for_prompt(fn(ctx, **args)), default=str)
     except ToolError as e:
         return json.dumps({"error": str(e)})
     except TypeError as e:

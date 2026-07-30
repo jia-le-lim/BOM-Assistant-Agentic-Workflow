@@ -17,6 +17,7 @@ same assertions hold on both backends. Verified identically against the live
 Supabase instance when the constraints were declared.
 """
 
+import re
 import sqlite3
 
 import pytest
@@ -139,26 +140,46 @@ def test_item_note_outlives_its_batch(client, synth_csv, db_file):
 
 def test_every_declared_relation_is_in_both_ddl_blocks():
     """Parity: a constraint added to one dialect only would let the suite pass
-    while production diverges -- the F7 failure mode."""
-    from app.db import POSTGRES_DDL, SQLITE_DDL
+    while production diverges -- the F7 failure mode.
 
-    expected = [
-        ("bom_rows", "batches", "CASCADE"),
-        ("recommendation_result", "batches", "CASCADE"),
-        ("recommendation_result", "bom_rows", "CASCADE"),
-        ("review_history", "batches", "RESTRICT"),
-        ("review_history", "recommendation_result", "RESTRICT"),
-        ("pending_change", "batches", "RESTRICT"),
-        ("pending_change", "review_history", "RESTRICT"),
-        ("conversation_turn", "batches", "SET NULL"),
-        ("item_note", "batches", "SET NULL"),
-        ("item_note", "conversation_turn", "SET NULL"),
-        ("model_prediction_log", "batches", "CASCADE"),
-    ]
-    for ddl, name in ((SQLITE_DDL, "sqlite"), (POSTGRES_DDL, "postgres")):
-        for child, parent, action in expected:
+    Each action is matched to ITS OWN `REFERENCES <parent>` clause. A plain
+    `"ON DELETE RESTRICT" in body` passes on a table with two FKs even when the
+    two actions are swapped -- exactly the drift this test exists to catch.
+    """
+    from app.db import FOREIGN_KEYS, POSTGRES_DDL, SQLITE_DDL
+
+    for ddl, dialect in ((SQLITE_DDL, "sqlite"), (POSTGRES_DDL, "postgres")):
+        for _name, child, _cols, parent, _pcols, action in FOREIGN_KEYS:
             body = ddl.split(f"CREATE TABLE IF NOT EXISTS {child} (")[1].split(");")[0]
-            ref = f"REFERENCES {parent}"
-            assert ref in body, f"{name}: {child} is missing {ref}"
-            assert f"ON DELETE {action}" in body, (
-                f"{name}: {child} -> {parent} should be ON DELETE {action}")
+            m = re.search(
+                rf"REFERENCES\s+{parent}\s*(?:\([^)]*\))?\s*ON DELETE "
+                rf"(CASCADE|RESTRICT|SET NULL)", body)
+            assert m, f"{dialect}: {child} is missing REFERENCES {parent}"
+            assert m.group(1) == action, (
+                f"{dialect}: {child} -> {parent} is ON DELETE {m.group(1)}, "
+                f"expected {action}")
+        # ...and nothing is declared in the DDL that FOREIGN_KEYS does not know
+        # about, or _ensure_foreign_keys() would never apply it to a database
+        # that already exists.
+        assert len(re.findall(r"REFERENCES\s+\w+", ddl)) == len(FOREIGN_KEYS), (
+            f"{dialect}: DDL and FOREIGN_KEYS disagree on how many relations "
+            f"there are")
+
+
+def test_fk_supporting_indexes_are_declared():
+    """Postgres does not index the referencing side of a FK. Without these,
+    every parent delete and every RESTRICT check scans the child table."""
+    from app.db import FK_INDEX_DDL, FOREIGN_KEYS
+
+    # bom_rows and recommendation_result lead their PRIMARY KEY with the FK
+    # columns, so the PK index already serves those two.
+    pk_covered = {("bom_rows", ("batch_id",)),
+                  ("recommendation_result",
+                   ("batch_id", "item_id", "stockroom_id"))}
+    flat = FK_INDEX_DDL.replace("\n", " ")
+    for _name, child, cols, parent, _pcols, _action in FOREIGN_KEYS:
+        if (child, cols) in pk_covered:
+            continue
+        want = f"ON {child}({', '.join(cols)})".replace(" ", "")
+        assert want in flat.replace(" ", ""), (
+            f"no index supporting {child} -> {parent} on {cols}")

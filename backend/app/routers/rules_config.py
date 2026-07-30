@@ -10,7 +10,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
-from ..db import active_config, get_conn
+from ..db import active_config, get_conn, stored_config
 from ..schemas import ConfigUpdateRequest, CriticalityRequest
 from ..security import APPROVE_ROLES, CONFIG_WRITE_ROLES, REVIEW_ROLES, any_role, require_role
 
@@ -49,7 +49,10 @@ def update_rules(body: ConfigUpdateRequest,
                  actor: dict = Depends(require_role(*CONFIG_WRITE_ROLES))):
     conn = get_conn()
     try:
-        cfg = active_config(conn)
+        # stored, not active: active_config() has machine_criticality_config
+        # merged in, and writing that back would freeze a copy of a table an
+        # admin can still edit into this rule_version's immutable stamp.
+        cfg = stored_config(conn)
         if body.rule_version == cfg["rule_version"]:
             raise HTTPException(400, "rule_version must change when config changes "
                                      "(determinism audit trail, PRD section 10)")
@@ -61,11 +64,21 @@ def update_rules(body: ConfigUpdateRequest,
                 raise HTTPException(400, f"{k}: expected {EDITABLE[k]}, got {type(v).__name__}")
 
         new_cfg = {**cfg, **body.updates, "rule_version": body.rule_version}
-        conn.execute("UPDATE rule_config SET active=0")
-        conn.execute(
-            "INSERT INTO rule_config (rule_version, config_json, active, updated_by) "
-            "VALUES (?,?,1,?)",
-            (body.rule_version, json.dumps(new_cfg), actor["user"]))
+        insert = ("INSERT INTO rule_config (rule_version, config_json, active, "
+                  "updated_by) VALUES (?,?,1,?)")
+        row = (body.rule_version, json.dumps(new_cfg), actor["user"])
+        if conn.is_postgres:
+            # Deactivate and insert in ONE statement. Split across two, a
+            # failure in between leaves the table with NO active row, and
+            # active_config() then raises on every request that reads the
+            # rules -- which is all of them. The REST transport commits per
+            # call, so that window is real there.
+            conn.execute(
+                "WITH deact AS (UPDATE rule_config SET active=0 WHERE active=1 "
+                f"RETURNING config_id) {insert} RETURNING config_id", row)
+        else:
+            conn.execute("UPDATE rule_config SET active=0")
+            conn.execute(insert, row)
         audit(conn, actor, "POST", "/config/rules", "rule_config", body.rule_version,
               {"updates": body.updates})
         conn.commit()

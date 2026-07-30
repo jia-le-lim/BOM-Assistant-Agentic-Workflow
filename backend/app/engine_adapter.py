@@ -40,7 +40,22 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     res = engine.run(df, cfg)
 
     stk = df.get("stockroom_id", pd.Series("", index=df.index)).astype(str).str.strip()
-    conn.execute("DELETE FROM recommendation_result WHERE batch_id=?", (batch_id,))
+
+    # review_history -> recommendation_result is ON DELETE RESTRICT by design: a
+    # row an engineer already decided on must not disappear under them. So a
+    # re-score (the /config/rules workflow) replaces only the un-reviewed rows;
+    # a reviewed item keeps the recommendation its reviewer actually saw, which
+    # is also what review_history's engine_* columns record. Deleting the batch
+    # wholesale here used to raise IntegrityError -> HTTP 500.
+    reviewed = {(r["item_id"], r["stockroom_id"]) for r in conn.execute(
+        "SELECT DISTINCT item_id, stockroom_id FROM review_history WHERE batch_id=?",
+        (batch_id,)).fetchall()}
+    conn.execute(
+        "DELETE FROM recommendation_result WHERE batch_id=? AND NOT EXISTS ("
+        " SELECT 1 FROM review_history h"
+        " WHERE h.batch_id=recommendation_result.batch_id"
+        " AND h.item_id=recommendation_result.item_id"
+        " AND h.stockroom_id=recommendation_result.stockroom_id)", (batch_id,))
     # NOTE: not itertuples() -- it renames underscore-prefixed columns
     # (_exposure_usd), which would silently mis-read fields.
     cols = ["item_id", "factory_recommended_new_max", "factory_recommended_new_rop",
@@ -54,6 +69,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
          float(v[10]), str(v[11]), str(v[12]))
         for i, v in enumerate(res[cols].to_numpy())
     ]
+    payload = [p for p in payload if (p[1], p[2]) not in reviewed]
     conn.executemany(
         "INSERT INTO recommendation_result (batch_id, item_id, stockroom_id, new_max, "
         "new_rop, new_min, review_required, action, reason_code, risk_level, confidence, "
@@ -73,6 +89,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     return {
         "batch_id": batch_id,
         "rows_scored": len(res),
+        "rows_preserved": len(reviewed),   # already reviewed; not re-scored
         "review_required_Y": review_y,
         "review_required_N": len(res) - review_y,
         "actions": res.factory_recommendation_action.value_counts().to_dict(),

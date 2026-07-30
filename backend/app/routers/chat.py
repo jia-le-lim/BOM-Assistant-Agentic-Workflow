@@ -16,7 +16,7 @@ accumulates the multi-month, multi-reviewer labels the Jan'26 slice lacks --
 one month, 682 positives, 97.5% from a single reviewer.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..agent.loop import log_turn, run_agent
 from ..audit import audit
@@ -39,6 +39,13 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         batch_id = body.batch_id or _latest_scored_batch(conn)
+        # conversation_turn.batch_id is a real FK now, so an id the caller made
+        # up fails at log_turn with an IntegrityError -- a 500 for what is a bad
+        # request. Reject it here instead.
+        if batch_id is not None and conn.execute(
+                "SELECT batch_id FROM batches WHERE batch_id=?",
+                (batch_id,)).fetchone() is None:
+            raise HTTPException(404, f"no batch {batch_id}")
         # Staging a proposal is a review action. Viewers and auditors get the
         # read-only tool surface, so the write tool is not even offered to the
         # model for them.

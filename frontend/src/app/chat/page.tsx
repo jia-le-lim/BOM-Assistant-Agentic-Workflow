@@ -1,19 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useApi } from "@/lib/api";
 import { can } from "@/lib/session";
+import { rememberAsk } from "@/lib/history";
 import type {
   ChatResponse, ConfirmPendingResult, PendingChange, PendingChangePage,
+  UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
-
-const EXAMPLES = [
-  "why item 500840315?",
-  "history 500840315",
-  "top exposure items",
-  "set item 500840315 max to 3",
-];
+import { SuggestionCards } from "@/components/SuggestionCards";
 
 interface Turn {
   q: string;
@@ -31,8 +28,18 @@ function sourceLabel(s: Record<string, unknown>): string {
   return t;
 }
 
+/* useSearchParams needs a Suspense boundary to prerender (Next 16). */
 export default function ChatPage() {
-  const { call, role } = useApi();
+  return (
+    <Suspense fallback={null}>
+      <Chat />
+    </Suspense>
+  );
+}
+
+function Chat() {
+  const { call, role, user } = useApi();
+  const params = useSearchParams();
   const [q, setQ] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [pending, setPending] = useState<PendingChange[]>([]);
@@ -40,9 +47,12 @@ export default function ChatPage() {
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const session = useRef<string | undefined>(undefined);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
 
-  // Mirrors backend REVIEW_ROLES; the backend enforces it regardless.
+  // Mirrors backend REVIEW_ROLES / UPLOAD_ROLES; the backend enforces regardless.
   const canReview = can.review(role);
+  const canUpload = can.upload(role);
 
   const refreshPending = useCallback(async () => {
     try {
@@ -52,6 +62,17 @@ export default function ChatPage() {
   }, [call]);
 
   useEffect(() => { void refreshPending(); }, [refreshPending]);
+
+  // Reopening a recent ask PREFILLS it. Re-sending "set item X max to 3" on a
+  // navigation would stage a second proposal the engineer never asked for.
+  // Adjusted during render rather than in an effect (the ?q= change and the
+  // input value are one update, not two renders).
+  const qParam = params.get("q");
+  const [seenQParam, setSeenQParam] = useState<string | null>(null);
+  if (qParam !== seenQParam) {
+    setSeenQParam(qParam);
+    if (qParam) setQ(qParam);
+  }
 
   async function ask(question: string) {
     if (!question.trim()) return;
@@ -65,10 +86,59 @@ export default function ChatPage() {
       session.current = r.session_id;
       const staged = r.sources.some((s) => s.type === "pending_change");
       setTurns((t) => [...t, { q: question, a: r.answer, sources: r.sources, staged }]);
+      rememberAsk(question);
       setQ("");
       if (staged) await refreshPending();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
+  }
+
+  /** A card that needs an argument hands the stem over rather than sending it. */
+  function fill(stem: string) {
+    setQ(stem);
+    const el = composer.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(stem.length, stem.length);
+  }
+
+  /** "Attach file" means the one file this product ingests: a BOM extract. */
+  async function attach(file: File) {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("label", file.name.replace(/\.csv$/i, ""));
+      body.append("module_filter", "TCB");
+      const r = await call<UploadSummary>("upload-bom-file", { method: "POST", body });
+      setNote(`Loaded ${r.rows_loaded.toLocaleString()} rows as batch ${r.batch_id}`
+              + (r.rows_quarantined ? `, ${r.rows_quarantined} quarantined.` : ".")
+              + " Score it from Batches to ask about it.");
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  /** The conversation, as a file you can paste into a review note. */
+  function exportChat() {
+    const md = turns.map((t) => {
+      const src = t.sources.map(sourceLabel).join(", ") || "none";
+      return `## ${t.q}\n\n${t.a}\n\n_Sources: ${src}_`
+             + (t.staged ? "\n\n_Staged only — not a decision._" : "");
+    }).join("\n\n---\n\n");
+    const head = `# BOM review conversation\n\n_${user} · ${role} · exported `
+               + `${new Date().toISOString().slice(0, 16).replace("T", " ")}_\n\n`;
+    const url = URL.createObjectURL(new Blob([head + md], { type: "text/markdown" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bom-review-conversation.md";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function newChat() {
+    session.current = undefined;
+    setTurns([]); setQ(""); setErr(null); setNote(null);
+    composer.current?.focus();
   }
 
   async function confirm(p: PendingChange) {
@@ -105,17 +175,36 @@ export default function ChatPage() {
     finally { setBusy(false); }
   }
 
+  const empty = turns.length === 0;
+
   return (
-    <div className="flex flex-col gap-5 max-w-3xl">
-      <div>
-        <h1 className="text-xl font-semibold">Ask about a recommendation</h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-          Explains what the engine decided, with sources. It never calculates
-          Min/Max/ROP itself, and it never writes to WINGS. Tell it a change you
-          want and it records your words as a proposal — you confirm it below,
-          and it then follows the normal approval path.
-        </p>
-      </div>
+    <div className="flex flex-col gap-5 max-w-3xl mx-auto w-full">
+      {empty ? (
+        <header className="pt-8 pb-1 text-center">
+          <span className="orb" aria-hidden />
+          <h1 className="text-2xl font-semibold tracking-tight mt-5">
+            <span style={{ color: "var(--text-secondary)" }}>Hello, {user}.</span>{" "}
+            What are we reviewing?
+          </h1>
+          <p className="text-sm mt-2 mx-auto max-w-xl" style={{ color: "var(--text-secondary)" }}>
+            Explains what the engine decided, with its sources. It never calculates
+            Min/Max/ROP itself and never writes to WINGS — tell it a change and it
+            records your words as a proposal for you to confirm.
+          </p>
+        </header>
+      ) : (
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <h2 className="text-sm font-medium">Review conversation</h2>
+          <div className="flex gap-2">
+            <button type="button" className="btn text-xs" onClick={exportChat}>
+              Export chat
+            </button>
+            <button type="button" className="btn text-xs" onClick={newChat} disabled={busy}>
+              New chat
+            </button>
+          </div>
+        </div>
+      )}
 
       {err && <Banner kind="error">{err}</Banner>}
       {note && <Banner kind="info">{note}</Banner>}
@@ -169,28 +258,62 @@ export default function ChatPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        {EXAMPLES.map((e) => (
-          <button key={e} className="btn text-xs" onClick={() => ask(e)} disabled={busy}>
-            {e}
-          </button>
-        ))}
-      </div>
-
-      <form className="flex gap-2"
+      <form className="composer"
             onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
-        <input className="field flex-1" value={q} onChange={(e) => setQ(e.target.value)}
-               placeholder="e.g. why item 500840315?" />
-        <button className="btn btn-primary" disabled={busy || !q.trim()}>
-          {busy ? "Asking…" : "Ask"}
-        </button>
+        <label htmlFor="ask" className="sr-only">Ask about a recommendation</label>
+        <textarea
+          id="ask"
+          ref={composer}
+          rows={2}
+          className="composer-input"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Ask about an item, or state a change in your own words…"
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter is a newline. A proposal is often two
+            // sentences, and losing it to a stray Enter is worse than the extra key.
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void ask(q); }
+          }}
+        />
+        <div className="flex items-center justify-between gap-3 px-1 pb-0.5">
+          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+            {canReview
+              ? "Proposals are staged, never applied. Enter to send."
+              : `Read-only as ${role}. Enter to send.`}
+          </span>
+          <div className="flex items-center gap-2">
+            {canUpload && (
+              <>
+                <input ref={filePicker} type="file" accept=".csv,text/csv" className="hidden"
+                       onChange={(e) => {
+                         const f = e.target.files?.[0];
+                         e.target.value = "";        // same file twice must re-fire
+                         if (f) void attach(f);
+                       }} />
+                <button type="button" className="btn text-xs whitespace-nowrap" disabled={busy}
+                        title="Upload a BOM extract (.csv) as a new batch"
+                        onClick={() => filePicker.current?.click()}>
+                  Attach CSV
+                </button>
+              </>
+            )}
+            <button className="btn btn-primary text-sm" disabled={busy || !q.trim()}>
+              {busy ? "Asking…" : "Ask"}
+            </button>
+          </div>
+        </div>
       </form>
+
+      {empty && (
+        <SuggestionCards onSend={(p) => void ask(p)} onFill={fill}
+                         canReview={canReview} disabled={busy} />
+      )}
 
       <div className="flex flex-col gap-4">
         {turns.map((t, i) => (
-          <div key={i} className="card p-4">
+          <div key={i} className="card p-4 turn-in">
             <div className="text-sm font-medium mb-2">{t.q}</div>
-            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{t.a}</p>
+            <p className="text-sm whitespace-pre-wrap" style={{ color: "var(--text-secondary)" }}>{t.a}</p>
             {t.staged && (
               <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
                 Staged only — confirm it above to make it a decision.
