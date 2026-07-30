@@ -9,12 +9,22 @@ import pytest
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
-# Before any `app.*` import, not in a fixture. app.config runs _load_dotenv() at
-# import time -- which is collection time, before db_file's monkeypatch.delenv
-# can act -- so backend/.env would put DATABASE_URL back and point the suite at
-# the real Supabase project. _load_dotenv() skips the file when this is set.
+# Establish the offline test boundary here, before any `app.*` import, not in a
+# fixture. app.config runs _load_dotenv() at import time -- which is collection
+# time (test_schema_parity imports app.db), earlier than any fixture -- so the
+# ignored real-runtime backend/.env would put DATABASE_URL back and point the
+# suite at the real Supabase project. _load_dotenv() skips the file entirely
+# when BOM_ALLOW_SQLITE is set; the empty values below are the second line of
+# defence, since the reader only fills keys absent from the environment.
 os.environ["BOM_ALLOW_SQLITE"] = "1"
-os.environ.pop("DATABASE_URL", None)
+os.environ["DATABASE_URL"] = ""
+os.environ["LLM_BASE_URL"] = ""
+os.environ["MEM0_ENABLED"] = "0"
+# The REST transport is a SECOND route to the real project, and it needs no
+# DATABASE_URL: config.use_rest() switches on these alone, so clearing
+# DATABASE_URL is no longer enough to keep the suite offline.
+for _k in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"):
+    os.environ[_k] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -41,8 +51,20 @@ def db_file(tmp_path, monkeypatch):
     """
     p = tmp_path / "test.db"
     monkeypatch.setenv("BOM_ALLOW_SQLITE", "1")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    # Keep an explicit empty value so config._load_dotenv() cannot repopulate
+    # the real/placeholder DATABASE_URL from the ignored backend/.env.
+    monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("BOM_DB_PATH", str(p))
+    # A developer may have the ignored backend/.env configured for the real
+    # LLM + mem0. Tests must remain offline and must never touch either service.
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("MEM0_ENABLED", "0")
+    # Same reason, for the transport that needs no DATABASE_URL at all: with
+    # these set, get_conn() returns a RestConn and every test writes to the real
+    # Supabase project over HTTPS.
+    monkeypatch.setenv("SUPABASE_URL", "")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "")
     return p
 
 
