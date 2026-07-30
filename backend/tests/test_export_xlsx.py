@@ -47,7 +47,7 @@ def test_approved_values_land_in_their_columns(client, synth_csv, db_file):
     # 100005 is the high-risk row: override, then a senior approves it.
     client.post(f"/review/100005?batch_id={b}",
                 json={"decision": "override", "final_max": 7, "final_rop": 4,
-                      "final_min": 2, "justification": "bench spare"},
+                      "final_min": 2, "justification": "Constraint tool"},
                 headers=ENG)
     client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
 
@@ -61,7 +61,7 @@ def test_approved_values_land_in_their_columns(client, synth_csv, db_file):
     assert row["review_acknowledge"] == "Y"
     assert row["modified_user"] == "alice"
     assert row["modified_date"]                       # reviewed_at stamp
-    assert row["justification"] == "bench spare"
+    assert row["justification"] == "Constraint tool"
     assert status[("100005", "24")]["status"] == "reviewed"
     assert r.headers["X-Rows-Updated"] == "1"
 

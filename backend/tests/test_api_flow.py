@@ -116,6 +116,18 @@ def test_history_endpoint(client, synth_csv):
     assert h["reviews"][0]["rule_version"] == "0.2.0-tcb"
 
 
+def test_justification_templates_include_definitions(client):
+    templates = client.get(
+        "/review/justification-templates", headers=VIEWER).json()["templates"]
+    assert len(templates) == 10
+    assert templates[0] == {
+        "justification": "Follow SFM",
+        "definition": "Select if you are adopting the SFM/BRR recommendation.",
+    }
+    assert all(template["justification"] and template["definition"]
+               for template in templates)
+
+
 def test_chat_read_only_tools(client, synth_csv):
     b, _ = scored_batch(client, synth_csv)
     why = client.post("/chat", json={"question": "why item 100007?"},

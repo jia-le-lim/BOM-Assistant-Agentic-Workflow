@@ -4,7 +4,9 @@ import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 import { fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
-import type { ItemDetail, Review } from "@/lib/types";
+import type {
+  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
+} from "@/lib/types";
 import { ActionChip, Banner, ReasonCodes, RiskChip, Spinner, StatusChip } from "@/components/ui";
 
 const CONTEXT_LABELS: Record<string, string> = {
@@ -26,6 +28,7 @@ export default function ItemPage({ params }: {
 
   const [d, setD] = useState<ItemDetail | null>(null);
   const [history, setHistory] = useState<Review[]>([]);
+  const [justificationTemplates, setJustificationTemplates] = useState<JustificationTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -36,18 +39,25 @@ export default function ItemPage({ params }: {
 
   const load = useCallback(async () => {
     try {
-      const detail = await call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`);
+      const [detail, h, templatePage] = await Promise.all([
+        call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`),
+        call<{ reviews: Review[] }>(`history/${itemId}`),
+        call<JustificationTemplatePage>("review/justification-templates"),
+      ]);
       setD(detail);
       setFMax(String(detail.recommendation.new_max));
       setFRop(String(detail.recommendation.new_rop));
       setFMin(String(detail.recommendation.new_min));
-      const h = await call<{ reviews: Review[] }>(`history/${itemId}`);
       setHistory(h.reviews);
+      setJustificationTemplates(templatePage.templates);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
   }, [call, batchId, itemId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void load(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [load]);
 
   async function submit() {
     setBusy(true); setErr(null); setNote(null);
@@ -90,6 +100,8 @@ export default function ItemPage({ params }: {
   const latest = d.latest_review;
   const canApprove = d.status === "awaiting_senior" && can.approve(role)
                      && latest?.reviewer !== user;
+  const selectedTemplate = justificationTemplates.find(
+    (template) => template.justification === justification);
 
   return (
     <div className="flex flex-col gap-5">
@@ -200,12 +212,39 @@ export default function ItemPage({ params }: {
                   <input className="field" value={comment} onChange={(e) => setComment(e.target.value)}
                          placeholder="What you saw" />
                 </label>
-                <label className="flex flex-col gap-1 text-xs">
-                  <span style={{ color: "var(--text-secondary)" }}>Justification</span>
-                  <input className="field" value={justification}
-                         onChange={(e) => setJustification(e.target.value)}
-                         placeholder="e.g. Ad-hoc consumption/Bulk withdraw" />
-                </label>
+                <fieldset className="justification-picker">
+                  <legend>Justification template</legend>
+                  <p>Choose the reason for this row. Hover or focus an option for its definition.</p>
+                  <div className="justification-options">
+                    {justificationTemplates.map((template, index) => {
+                      const definitionId = `justification-definition-${index}`;
+                      const selected = justification === template.justification;
+                      return (
+                        <button key={template.justification} type="button"
+                                className={`justification-option${selected ? " is-selected" : ""}`}
+                                aria-label={template.justification}
+                                aria-describedby={definitionId}
+                                aria-pressed={selected}
+                                disabled={busy}
+                                onClick={() => setJustification(template.justification)}>
+                          <span>{template.justification}</span>
+                          <span className="justification-info" aria-hidden>i</span>
+                          <span id={definitionId} className="justification-tooltip" role="tooltip">
+                            {template.definition}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {selectedTemplate && (
+                    <div className="justification-selected" aria-live="polite">
+                      <strong>{selectedTemplate.justification}</strong>
+                      <span>{selectedTemplate.definition}</span>
+                      <button type="button" onClick={() => setJustification("")}
+                              disabled={busy}>Clear</button>
+                    </div>
+                  )}
+                </fieldset>
 
                 {(decision === "override" || r.risk_level === "High") && (
                   <Banner kind="info">

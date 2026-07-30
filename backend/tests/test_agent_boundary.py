@@ -211,6 +211,38 @@ def test_chat_stream_reports_fallback_reason(client, synth_csv):
     assert events[-1]["sources"] == []
 
 
+def test_chat_history_restores_complete_user_session(client):
+    first = client.post(
+        "/chat", json={"question": "first saved question"}, headers=ENG).json()
+    second = client.post(
+        "/chat",
+        json={"question": "second saved question", "session_id": first["session_id"]},
+        headers=ENG,
+    ).json()
+    client.post(
+        "/chat",
+        json={"question": "another user's question", "session_id": first["session_id"]},
+        headers=VIEWER,
+    )
+
+    sessions = client.get("/chat/sessions", headers=ENG).json()["sessions"]
+    assert sessions == [{
+        "session_id": first["session_id"],
+        "title": "first saved question",
+        "updated_at": sessions[0]["updated_at"],
+        "turn_count": 2,
+    }]
+
+    saved = client.get(
+        f"/chat/sessions/{first['session_id']}", headers=ENG).json()
+    assert saved["session_id"] == second["session_id"]
+    assert [turn["question"] for turn in saved["turns"]] == [
+        "first saved question", "second saved question"]
+    assert all(isinstance(turn["tool_calls"], list) for turn in saved["turns"])
+    assert client.get(
+        f"/chat/sessions/{first['session_id']}", headers=SENIOR).status_code == 404
+
+
 # -- 5: read-only roles never see the write tool ---------------------------
 
 def test_viewer_is_not_offered_the_write_tool(client, synth_csv, db_file):

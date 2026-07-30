@@ -90,6 +90,15 @@ export interface ItemDetail {
   context: Record<string, string | number | null>;
 }
 
+export interface JustificationTemplate {
+  justification: string;
+  definition: string;
+}
+
+export interface JustificationTemplatePage {
+  templates: JustificationTemplate[];
+}
+
 export interface RuleConfig {
   rule_version: string;
   config: Record<string, unknown>;
@@ -101,6 +110,38 @@ export interface ChatResponse {
   batch_id: number | null;
   session_id: string;
   turn_id: number;
+}
+
+export interface ChatSessionSummary {
+  session_id: string;
+  title: string;
+  updated_at: string;
+  turn_count: number;
+}
+
+export interface ChatHistoryTurn {
+  turn_id: number;
+  session_id: string;
+  batch_id: number | null;
+  question: string;
+  answer: string | null;
+  tool_calls: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    ok: boolean;
+  }>;
+  provider: string | null;
+  model: string | null;
+  ts: string;
+}
+
+export interface ChatSession {
+  session_id: string;
+  turns: ChatHistoryTurn[];
+}
+
+export interface ChatSessionPage {
+  sessions: ChatSessionSummary[];
 }
 
 export interface ChatStreamComplete extends ChatResponse {

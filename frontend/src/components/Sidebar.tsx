@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { useApi } from "@/lib/api";
 import { ROLES, useSession } from "@/lib/session";
-import { clearAsks, groupAsks, useAsks } from "@/lib/history";
-import type { Role } from "@/lib/types";
+import { groupChatSessions, subscribeChatHistoryChanged } from "@/lib/history";
+import type { ChatSessionPage, ChatSessionSummary, Role } from "@/lib/types";
 
-/* Workspace rail: identity, destinations, and what you recently asked.
+/* Workspace rail: identity, destinations, and saved conversations.
  * Every entry goes somewhere real -- no decorative navigation. */
 
 const LINKS = [
@@ -48,18 +49,42 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const path = usePathname();
   const router = useRouter();
   const { user, role, setIdentity } = useSession();
-  const asks = useAsks();
+  const { call } = useApi();
   const [filter, setFilter] = useState("");
+  const [history, setHistory] = useState<{
+    owner: string;
+    sessions: ChatSessionSummary[];
+    failed: boolean;
+  } | null>(null);
   // The rail and the drawer both mount a Sidebar below lg, so a literal id
   // would appear twice and every `for=` would point at whichever came first.
   const filterId = useId();
 
-  const needle = filter.trim().toLowerCase();
-  const groups = groupAsks(
-    needle ? asks.filter((a) => a.q.toLowerCase().includes(needle)) : asks);
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      call<ChatSessionPage>("chat/sessions")
+        .then((page) => {
+          if (active) setHistory({ owner: user, sessions: page.sessions, failed: false });
+        })
+        .catch(() => {
+          if (active) setHistory({ owner: user, sessions: [], failed: true });
+        });
+    };
+    load();
+    const unsubscribe = subscribeChatHistoryChanged(load);
+    return () => { active = false; unsubscribe(); };
+  }, [call, user]);
 
-  function openAsk(q: string) {
-    router.push(`/chat?q=${encodeURIComponent(q)}`);
+  const needle = filter.trim().toLowerCase();
+  const loaded = history?.owner === user ? history : null;
+  const sessions = loaded?.sessions ?? [];
+  const groups = groupChatSessions(needle
+    ? sessions.filter((session) => session.title.toLowerCase().includes(needle))
+    : sessions);
+
+  function openSession(sessionId: string) {
+    router.push(`/chat?session=${encodeURIComponent(sessionId)}`);
     onNavigate?.();
   }
 
@@ -79,9 +104,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
         <div className="side-search">
           <span aria-hidden style={{ color: "var(--text-muted)" }}><Icon name="search" /></span>
-          <label htmlFor={filterId} className="sr-only">Search recent asks</label>
+          <label htmlFor={filterId} className="sr-only">Search conversations</label>
           <input id={filterId} className="side-search-input" value={filter}
-                 placeholder="Search recent asks"
+                 placeholder="Search conversations"
                  onChange={(e) => setFilter(e.target.value)} />
         </div>
       </div>
@@ -102,18 +127,26 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <div className="side-history">
         {groups.length === 0 ? (
           <p className="side-empty">
-            {asks.length === 0
-              ? "Questions you ask appear here."
-              : "No recent ask matches that."}
+            {!loaded
+              ? "Loading conversations…"
+              : loaded.failed
+                ? "Could not load conversations."
+                : sessions.length === 0
+                  ? "Your conversations appear here."
+                  : "No conversation matches that."}
           </p>
         ) : (
           groups.map((g) => (
             <section key={g.label}>
               <h2 className="side-group">{g.label}</h2>
-              {g.items.map((a) => (
-                <button key={a.ts} type="button" className="side-ask"
-                        title={a.q} onClick={() => openAsk(a.q)}>
-                  {a.q}
+              {g.items.map((session) => (
+                <button key={session.session_id} type="button" className="side-ask"
+                        title={session.title}
+                        onClick={() => openSession(session.session_id)}>
+                  <span className="side-ask-title">{session.title}</span>
+                  <span className="side-ask-meta">
+                    {session.turn_count} {session.turn_count === 1 ? "turn" : "turns"}
+                  </span>
                 </button>
               ))}
             </section>
@@ -122,11 +155,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <div className="side-foot">
-        {asks.length > 0 && (
-          <button type="button" className="side-clear" onClick={clearAsks}>
-            Clear recent asks
-          </button>
-        )}
         <div className="side-user">
           <span className="side-avatar" aria-hidden>{user.slice(0, 1).toUpperCase()}</span>
           <label className="min-w-0 flex-1">

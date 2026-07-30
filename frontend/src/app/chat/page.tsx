@@ -5,10 +5,10 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ApiError, useApi } from "@/lib/api";
 import { can } from "@/lib/session";
-import { rememberAsk } from "@/lib/history";
+import { notifyChatHistoryChanged } from "@/lib/history";
 import type {
-  ChatResponse, ChatStreamComplete, ChatStreamEvent, ConfirmPendingResult,
-  PendingChange, PendingChangePage, UploadSummary,
+  ChatHistoryTurn, ChatResponse, ChatSession, ChatStreamComplete, ChatStreamEvent,
+  ConfirmPendingResult, PendingChange, PendingChangePage, UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
@@ -183,6 +183,43 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
   return trace;
 }
 
+function restoreTurn(saved: ChatHistoryTurn): Turn {
+  const steps: AgentTraceStep[] = [{
+    id: "request",
+    label: "Saved request",
+    detail: saved.batch_id ? `Used scored batch ${saved.batch_id}` : "No scored batch selected",
+    result: [saved.provider, saved.model].filter(Boolean).join(" · ") || undefined,
+    status: "done",
+  }];
+  saved.tool_calls.forEach((tool, index) => {
+    steps.push({
+      id: `tool-${index + 1}`,
+      label: `Query ${toolLabel(tool.name)}`,
+      detail: JSON.stringify(tool.args ?? {}),
+      result: tool.ok ? "Recorded tool call completed." : "Recorded tool call failed.",
+      status: tool.ok ? "done" : "error",
+      technical: true,
+      kind: "tool",
+      toolName: tool.name,
+      toolArgs: tool.args ?? {},
+    });
+  });
+  steps.push({ id: "answer", label: "Answer delivered", status: "done" });
+  return {
+    q: saved.question,
+    a: saved.answer ?? "",
+    sources: [],
+    staged: false,
+    trace: {
+      query: saved.question,
+      provider: saved.provider ?? undefined,
+      model: saved.model ?? undefined,
+      batchId: saved.batch_id,
+      steps,
+    },
+  };
+}
+
 function SendIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -230,6 +267,7 @@ function Chat() {
   const [sending, setSending] = useState<string | null>(null);
   const [activeTrace, setActiveTrace] = useState<AgentTrace | null>(null);
   const [streamedAnswer, setStreamedAnswer] = useState("");
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const session = useRef<string | undefined>(undefined);
@@ -265,22 +303,50 @@ function Chat() {
   const navigationKey = params.toString();
   const qParam = params.get("q");
   const newParam = params.get("new");
+  const sessionParam = params.get("session");
   useEffect(() => {
+    let active = true;
     const frame = window.requestAnimationFrame(() => {
       if (newParam) {
         conversationVersion.current += 1;
         session.current = undefined;
         setTurns([]); setQ(""); setSending(null); setBusy(false);
+        setLoadingHistory(false);
         setActiveTrace(null); setStreamedAnswer("");
         activeTraceRef.current = null;
         setErr(null); setNote(null);
+      } else if (sessionParam) {
+        const requestVersion = ++conversationVersion.current;
+        session.current = undefined;
+        previousTurnCount.current = 0;
+        setTurns([]); setQ(""); setSending(null); setBusy(false);
+        setLoadingHistory(true);
+        setActiveTrace(null); setStreamedAnswer("");
+        activeTraceRef.current = null;
+        setErr(null); setNote(null);
+        call<ChatSession>(`chat/sessions/${encodeURIComponent(sessionParam)}`)
+          .then((saved) => {
+            if (!active || requestVersion !== conversationVersion.current) return;
+            session.current = saved.session_id;
+            setTurns(saved.turns.map(restoreTurn));
+          })
+          .catch((error) => {
+            if (!active || requestVersion !== conversationVersion.current) return;
+            setErr((error as Error).message);
+          })
+          .finally(() => {
+            if (active && requestVersion === conversationVersion.current) {
+              setLoadingHistory(false);
+            }
+          });
       } else if (qParam) {
+        setLoadingHistory(false);
         setQ(qParam);
         composer.current?.focus();
       }
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [navigationKey, newParam, qParam]);
+    return () => { active = false; window.cancelAnimationFrame(frame); };
+  }, [call, navigationKey, newParam, qParam, sessionParam]);
 
   useEffect(() => {
     const input = composer.current;
@@ -306,7 +372,7 @@ function Chat() {
 
   async function ask(question: string) {
     const cleanQuestion = question.trim();
-    if (!cleanQuestion || busy) return;
+    if (!cleanQuestion || busy || loadingHistory) return;
     const requestVersion = conversationVersion.current;
     const initialTrace: AgentTrace = {
       query: cleanQuestion,
@@ -381,7 +447,7 @@ function Chat() {
         staged,
         trace: finalTrace,
       }]);
-      rememberAsk(cleanQuestion);
+      notifyChatHistoryChanged();
       if (staged) await refreshPending();
     } catch (error) {
       if (requestVersion === conversationVersion.current) {
@@ -467,6 +533,7 @@ function Chat() {
     conversationVersion.current += 1;
     session.current = undefined;
     setTurns([]); setQ(""); setSending(null); setBusy(false);
+    setLoadingHistory(false);
     setActiveTrace(null); setStreamedAnswer("");
     activeTraceRef.current = null;
     setErr(null); setNote(null);
@@ -507,7 +574,7 @@ function Chat() {
     finally { setBusy(false); }
   }
 
-  const empty = turns.length === 0 && !sending;
+  const empty = turns.length === 0 && !sending && !loadingHistory;
   const completedTurns = turns.filter((turn) => !turn.error).length;
   const failedTurns = turns.length - completedTurns;
   const runningStep = activeTrace?.steps.findLast((step) => step.status === "running");
@@ -537,7 +604,9 @@ function Chat() {
             <p className="chat-eyebrow">NYRA assistant</p>
             <h1>Review conversation</h1>
             <p>
-              {sending
+              {loadingHistory
+                ? "Loading saved conversation…"
+                : sending
                 ? runningStep?.label ?? "Connecting to the agent…"
                 : `${completedTurns} completed ${completedTurns === 1 ? "turn" : "turns"}`
                   + (failedTurns ? ` · ${failedTurns} failed` : "")}
@@ -611,7 +680,13 @@ function Chat() {
 
       {!empty && (
         <section className="chat-transcript" aria-label="Conversation" aria-live="polite"
-                 aria-relevant="additions" aria-busy={Boolean(sending)}>
+                 aria-relevant="additions" aria-busy={Boolean(sending || loadingHistory)}>
+          {loadingHistory && (
+            <div className="chat-history-loading" role="status">
+              <span className="typing-dots" aria-hidden><i /><i /><i /></span>
+              Loading the complete conversation…
+            </div>
+          )}
           {turns.map((turn, index) => (
             <article key={index} ref={index === turns.length - 1 ? latestTurn : undefined}
                      className="chat-turn turn-in">
@@ -713,7 +788,9 @@ function Chat() {
         />
         <div className="composer-footer">
           <span id="composer-help" className="composer-hint">
-            {sending
+            {loadingHistory
+              ? "Loading saved conversation…"
+              : sending
               ? runningStep?.label ?? "Connecting to the agent…"
               : canReview
                 ? "Proposals are staged, never applied · Enter to send"
@@ -736,7 +813,8 @@ function Chat() {
                 </button>
               </>
             )}
-            <button className="btn btn-primary composer-send" disabled={busy || !q.trim()}>
+            <button className="btn btn-primary composer-send"
+                    disabled={busy || loadingHistory || !q.trim()}>
               <span>{sending ? "Working" : "Send"}</span>
               <SendIcon />
             </button>
@@ -751,7 +829,7 @@ function Chat() {
             <span>Uses the latest scored batch</span>
           </div>
           <SuggestionCards onSend={(prompt) => void ask(prompt)} onFill={fill}
-                           canReview={canReview} disabled={busy} />
+                           canReview={canReview} disabled={busy || loadingHistory} />
         </section>
       )}
     </div>

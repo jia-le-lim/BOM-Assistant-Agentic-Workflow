@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
 from ..db import get_conn
+from ..justifications import JUSTIFICATION_TEMPLATES
 from ..schemas import ConfirmPendingRequest, ReviewRequest
 from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
 from ..services import AmbiguousItem, current_values, resolve_rec
@@ -25,6 +26,11 @@ _REVIEW_INSERT = (
     "engine_min, final_max, final_rop, final_min, comment, justification, "
     "requires_senior_approval, rule_version, model_version) "
     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+
+
+@router.get("/review/justification-templates")
+def justification_templates(actor: dict = Depends(any_role())):
+    return {"templates": JUSTIFICATION_TEMPLATES}
 
 
 def _record_review(conn, actor, batch_id, rec, decision, final,

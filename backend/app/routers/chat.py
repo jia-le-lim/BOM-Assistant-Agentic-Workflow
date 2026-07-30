@@ -32,6 +32,14 @@ from ..security import REVIEW_ROLES, any_role
 router = APIRouter()
 
 
+def _stored_tool_calls(raw: str | None) -> list[dict]:
+    try:
+        calls = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+
+
 def _latest_scored_batch(conn) -> int | None:
     r = conn.execute(
         "SELECT batch_id FROM batches WHERE status='scored' "
@@ -82,6 +90,47 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
                 "batch_id": batch_id,
                 "session_id": result["session_id"],
                 "turn_id": turn_id}
+    finally:
+        conn.close()
+
+
+@router.get("/chat/sessions")
+def list_chat_sessions(actor: dict = Depends(any_role())):
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT session_id, question AS title, updated_at, turn_count "
+            "FROM (SELECT session_id, question, turn_id, "
+            "MAX(ts) OVER (PARTITION BY session_id) AS updated_at, "
+            "COUNT(*) OVER (PARTITION BY session_id) AS turn_count, "
+            "ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY turn_id) AS position "
+            "FROM conversation_turn WHERE user=? AND session_id IS NOT NULL) saved "
+            "WHERE position=1 ORDER BY updated_at DESC, turn_id DESC LIMIT 40",
+            (actor.get("user"),),
+        ).fetchall()
+        return {"sessions": [dict(row) for row in rows]}
+    finally:
+        conn.close()
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_chat_session(session_id: str, actor: dict = Depends(any_role())):
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT turn_id, session_id, batch_id, question, answer, tool_calls, "
+            "provider, model, ts FROM conversation_turn "
+            "WHERE session_id=? AND user=? ORDER BY turn_id",
+            (session_id, actor.get("user")),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(404, "conversation not found")
+        turns = []
+        for row in rows:
+            turn = dict(row)
+            turn["tool_calls"] = _stored_tool_calls(turn.get("tool_calls"))
+            turns.append(turn)
+        return {"session_id": session_id, "turns": turns}
     finally:
         conn.close()
 
