@@ -7,6 +7,9 @@ export interface AgentTraceStep {
   result?: string;
   status: AgentStepStatus;
   technical?: boolean;
+  kind?: "tool";
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
 }
 
 export interface AgentTrace {
@@ -16,6 +19,42 @@ export interface AgentTrace {
   batchId?: number | null;
   fallback?: boolean;
   steps: AgentTraceStep[];
+}
+
+function toolStatus(step: AgentTraceStep): string {
+  if (step.status === "running") return "Calling";
+  if (step.status === "warning") return "No results";
+  if (step.status === "error") return "Failed";
+  return "Completed";
+}
+
+export function AgentToolCalls({ trace }: { trace: AgentTrace }) {
+  const tools = trace.steps.filter((step) => step.kind === "tool");
+  if (tools.length === 0) return null;
+
+  return (
+    <section className="agent-tools" aria-label="Tools called by the agent">
+      <div className="agent-tools-heading">
+        <strong><span aria-hidden>{"{}"}</span> Tools called</strong>
+        <span>{tools.length}</span>
+      </div>
+      <div className="agent-tool-list">
+        {tools.map((tool) => (
+          <article key={tool.id} className={`agent-tool is-${tool.status}`}>
+            <div className="agent-tool-heading">
+              <code>{tool.toolName ?? tool.label}</code>
+              <span>{toolStatus(tool)}</span>
+            </div>
+            <div className="agent-tool-input">
+              <span>Input</span>
+              <code>{JSON.stringify(tool.toolArgs ?? {})}</code>
+            </div>
+            {tool.result && <p>{tool.result}</p>}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 export function AgentActivity({ trace, live = false }: {

@@ -518,6 +518,58 @@ body {
   font-size: 0.65rem; line-height: 1;
 }
 a.source-pill:hover { border-color: var(--seq); color: var(--text-primary); }
+.agent-tools {
+  margin-top: 0.8rem;
+  overflow: hidden;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-1);
+}
+.agent-tools-heading {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--gridline);
+  color: var(--text-muted); font-size: 0.62rem;
+}
+.agent-tools-heading strong {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  color: var(--text-secondary); font-weight: 650;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.agent-tools-heading strong > span {
+  color: var(--seq); font: 0.68rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.agent-tool-list { display: grid; }
+.agent-tool + .agent-tool { border-top: 1px solid var(--gridline); }
+.agent-tool { padding: 0.55rem 0.6rem; }
+.agent-tool-heading { display: flex; align-items: center; gap: 0.5rem; }
+.agent-tool-heading code {
+  min-width: 0; overflow: hidden; color: var(--text-primary);
+  font: 650 0.68rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: nowrap; text-overflow: ellipsis;
+}
+.agent-tool-heading > span {
+  margin-left: auto; padding: 0.18rem 0.35rem;
+  border-radius: 999px; background: var(--surface-2);
+  color: var(--text-secondary); font-size: 0.58rem; white-space: nowrap;
+}
+.agent-tool.is-running .agent-tool-heading > span { color: var(--seq); }
+.agent-tool.is-warning .agent-tool-heading > span { color: var(--warning); }
+.agent-tool.is-error .agent-tool-heading > span { color: var(--critical); }
+.agent-tool-input {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.4rem;
+  margin-top: 0.35rem; align-items: baseline;
+}
+.agent-tool-input > span {
+  color: var(--text-muted); font-size: 0.58rem; text-transform: uppercase;
+}
+.agent-tool-input code {
+  color: var(--text-secondary);
+  font: 0.62rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.agent-tool > p {
+  margin: 0.3rem 0 0; color: var(--text-muted); font-size: 0.62rem; line-height: 1.4;
+}
 .agent-activity {
   margin-top: 0.8rem;
   overflow: hidden;

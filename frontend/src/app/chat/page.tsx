@@ -12,7 +12,7 @@ import type {
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
-import { AgentActivity } from "@/components/AgentActivity";
+import { AgentActivity, AgentToolCalls } from "@/components/AgentActivity";
 import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
 import { SuggestionCards } from "@/components/SuggestionCards";
 
@@ -101,6 +101,9 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
       detail: JSON.stringify(event.args),
       status: "running",
       technical: true,
+      kind: "tool",
+      toolName: event.name,
+      toolArgs: event.args,
     });
   }
   if (event.type === "tool_result") {
@@ -112,6 +115,9 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
       result: event.summary,
       status: event.status === "ok" ? "done" : event.status === "empty" ? "warning" : "error",
       technical: true,
+      kind: "tool",
+      toolName: current?.toolName ?? event.name,
+      toolArgs: current?.toolArgs,
     });
   }
   if (event.type === "fallback") {
@@ -139,7 +145,27 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
     });
   }
   if (event.type === "complete") {
-    return upsertTraceStep({ ...trace, provider: event.provider, model: event.model }, {
+    let completedTrace: AgentTrace = {
+      ...trace,
+      provider: event.provider,
+      model: event.model,
+    };
+    event.tool_calls.forEach((tool, index) => {
+      const id = `tool-${index + 1}`;
+      const current = completedTrace.steps.find((step) => step.id === id);
+      completedTrace = upsertTraceStep(completedTrace, {
+        id,
+        label: current?.label ?? `Query ${toolLabel(tool.name)}`,
+        detail: current?.detail ?? JSON.stringify(tool.args),
+        result: current?.result ?? (tool.ok ? "Tool call completed." : "Tool call failed."),
+        status: current?.status ?? (tool.ok ? "done" : "error"),
+        technical: true,
+        kind: "tool",
+        toolName: tool.name,
+        toolArgs: tool.args,
+      });
+    });
+    return upsertTraceStep(completedTrace, {
       id: "answer",
       label: "Answer delivered",
       status: "done",
@@ -600,6 +626,7 @@ function Chat() {
                 <div className="chat-response">
                   <div className="chat-speaker">NYRA</div>
                   {turn.a && <ChatAnswer>{turn.a}</ChatAnswer>}
+                  <AgentToolCalls trace={turn.trace} />
                   {turn.error && (
                     <div className="chat-run-error" role="alert">
                       <strong>The agent could not complete this request.</strong>
@@ -646,6 +673,7 @@ function Chat() {
                 <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
                 <div className="chat-response chat-thinking" role="status">
                   <span className="chat-speaker">NYRA</span>
+                  {activeTrace && <AgentToolCalls trace={activeTrace} />}
                   {activeTrace && <AgentActivity trace={activeTrace} live />}
                   {streamedAnswer ? (
                     <div className="streaming-answer">
