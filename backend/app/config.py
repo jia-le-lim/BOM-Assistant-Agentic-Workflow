@@ -99,7 +99,8 @@ def require_database() -> None:
     raise DatabaseNotConfigured(
         "No database configured. Set EITHER:\n"
         "\n"
-        "  A. SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY -- Supabase over HTTPS.\n"
+        "  A. SUPABASE_URL + SUPABASE_SECRET_KEY (or legacy "
+        "SUPABASE_SERVICE_ROLE_KEY) -- Supabase over HTTPS.\n"
         "     No database password, no proxy tunnel. Note that this transport\n"
         "     has no multi-statement transactions (app/rest_conn.py).\n"
         "  B. DATABASE_URL -- a direct Postgres connection, which does.\n"

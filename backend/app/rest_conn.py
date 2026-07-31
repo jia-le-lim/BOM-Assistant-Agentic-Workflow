@@ -144,12 +144,21 @@ class RestConn:
         self._endpoint = url.rstrip("/") + "/rest/v1/rpc/exec_sql"
         # trust_env picks up HTTPS_PROXY -- being able to use it is the whole
         # point of this transport; libpq could not.
+        headers = {
+            "apikey": key,
+            "Content-Type": "application/json",
+        }
+        # Current sb_secret_* keys are opaque API keys, not JWTs. Sending one
+        # as a Bearer token makes the gateway try to parse it as a JWT and
+        # reject the request. Legacy service_role keys remain JWTs and still
+        # need the Authorization header.
+        if not key.startswith("sb_secret_"):
+            headers["Authorization"] = f"Bearer {key}"
+
         self._http = httpx.Client(
             timeout=timeout_s,
             trust_env=True,
-            headers={"apikey": key,
-                     "Authorization": f"Bearer {key}",
-                     "Content-Type": "application/json"},
+            headers=headers,
         )
 
     # -- wire ---------------------------------------------------------------
@@ -220,8 +229,9 @@ def connect() -> RestConn:
     key = _key()
     if not url or not key:
         raise RestError(
-            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are both required for "
-            "the REST transport. The anon key cannot be used: exec_sql is "
+            "SUPABASE_URL and either SUPABASE_SECRET_KEY or "
+            "SUPABASE_SERVICE_ROLE_KEY are required for the REST transport. "
+            "The anon/publishable key cannot be used: exec_sql is "
             "granted to service_role only, because a public key that can run "
             "arbitrary SQL is a public database.")
     return RestConn(url, key, float(os.environ.get("SUPABASE_TIMEOUT_S", "60")))

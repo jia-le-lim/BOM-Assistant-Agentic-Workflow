@@ -54,6 +54,20 @@ def _capture() -> tuple[RestConn, list]:
     return conn, calls
 
 
+def test_secret_key_uses_apikey_header_without_bearer_token():
+    conn = RestConn("https://example.invalid", "sb_secret_test")
+    assert conn._http.headers["apikey"] == "sb_secret_test"
+    assert "authorization" not in conn._http.headers
+    conn.close()
+
+
+def test_legacy_service_role_key_keeps_bearer_token():
+    conn = RestConn("https://example.invalid", "legacy-jwt")
+    assert conn._http.headers["apikey"] == "legacy-jwt"
+    assert conn._http.headers["authorization"] == "Bearer legacy-jwt"
+    conn.close()
+
+
 def test_executemany_sends_one_multi_row_insert():
     conn, calls = _capture()
     rows = [(1, "100005", "24"), (1, "100006", "24")]
