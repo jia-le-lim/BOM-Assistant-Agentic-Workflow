@@ -6,7 +6,10 @@ __pycache__/
 # Analysis intermediates and extracts.
 # These contain unitprice, supplier and engineer-name data that PRD 5.1
 # classifies as sensitive -- keep them out of version control.
-analysis/output/
+
+# Raw monthly BOM workbooks -- 100s of MB of empty-cell bloat and hold sensitive
+# unitprice/supplier/engineer data; also exceed GitHub's 100MB limit. Local only.
+BOM table/*.xlsx
 
 # Backend local database (contains ingested BOM data -- same sensitivity)
 backend/data/
