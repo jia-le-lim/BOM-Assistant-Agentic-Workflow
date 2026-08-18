@@ -25,6 +25,9 @@ os.environ["MEM0_ENABLED"] = "0"
 # DATABASE_URL is no longer enough to keep the suite offline.
 for _k in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"):
     os.environ[_k] = ""
+# The workflow suite was written against the deterministic rule engine; pin it
+# there. The statistical engine (production default) has its own test file.
+os.environ["BOM_ENGINE"] = "rules"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -65,6 +68,7 @@ def db_file(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
     monkeypatch.setenv("SUPABASE_SECRET_KEY", "")
+    monkeypatch.setenv("BOM_ENGINE", "rules")
     return p
 
 

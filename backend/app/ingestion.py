@@ -35,6 +35,34 @@ def _num(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce")
 
 
+def _read_table(content: bytes, filename: str) -> pd.DataFrame:
+    """Parse a BOM review file (CSV or Excel) into all-string columns.
+
+    Excel workbooks may carry banner rows above the header, so the row that
+    contains 'item_id' is auto-detected and used as the header."""
+    name = (filename or "").lower()
+    if name.endswith((".xlsx", ".xls")):
+        try:
+            probe = pd.read_excel(io.BytesIO(content), header=None, nrows=25, dtype=str)
+            hdr = 0
+            for i in range(len(probe)):
+                cells = probe.iloc[i].astype(str).str.strip().str.lower()
+                if cells.eq("item_id").any():
+                    hdr = i
+                    break
+            df = pd.read_excel(io.BytesIO(content), header=hdr, dtype=str)
+            return df.fillna("")
+        except IngestionError:
+            raise
+        except Exception as e:  # noqa: BLE001 - surface as 400, not 500
+            raise IngestionError(f"Could not parse Excel: {e}") from e
+    try:
+        return pd.read_csv(io.BytesIO(content), dtype=str,
+                           encoding="utf-8-sig", keep_default_na=False)
+    except Exception as e:  # noqa: BLE001 - surface as 400, not 500
+        raise IngestionError(f"Could not parse CSV: {e}") from e
+
+
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
     for c in df.columns:
@@ -73,11 +101,7 @@ def quarantine_mask(df: pd.DataFrame) -> pd.Series:
 
 def ingest(conn: Conn, content: bytes, label: str, filename: str,
            module_filter: str | None, user: str) -> dict:
-    try:
-        df = pd.read_csv(io.BytesIO(content), dtype=str,
-                         encoding="utf-8-sig", keep_default_na=False)
-    except Exception as e:  # noqa: BLE001 - surface as 400, not 500
-        raise IngestionError(f"Could not parse CSV: {e}") from e
+    df = _read_table(content, filename)
 
     df = normalize(df)
     missing = [c for c in REQUIRED_COLS if c not in df.columns]

@@ -18,9 +18,8 @@ async def upload_bom_file(
     module_filter: str = Form(default=DEFAULT_MODULE_FILTER),
     actor: dict = Depends(require_role(*UPLOAD_ROLES)),
 ):
-    if not (file.filename or "").lower().endswith(".csv"):
-        raise HTTPException(400, "Only .csv files are accepted in the scaffold "
-                                 "(Excel support: convert to CSV first)")
+    if not (file.filename or "").lower().endswith((".csv", ".xlsx", ".xls")):
+        raise HTTPException(400, "Only .csv, .xlsx or .xls BOM review files are accepted")
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File exceeds upload limit")
