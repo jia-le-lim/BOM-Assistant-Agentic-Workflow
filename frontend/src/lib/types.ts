@@ -55,6 +55,39 @@ export interface Recommendation {
   rule_version: string;
   scored_at: string;
   status: Status;
+  route: string;
+  consumable: string;
+  agreement: "match" | "diverge" | "none" | "";
+}
+
+export interface BatchSummary {
+  batch: {
+    batch_id: number; label: string; status: string; row_count: number;
+    quarantined_count: number; scored_rule_version: string | null;
+  };
+  scored: number;
+  statuses: Record<string, number>;
+  risk_levels: Record<string, number>;
+  actions: Record<string, number>;
+  consumables: Record<string, number>;
+  routes: Record<string, number>;
+  agreements: Record<string, number>;
+  reason_codes: Record<string, number>;
+  exposure_total_usd: number;
+  exposure_pending_usd: number;
+  bulk_acceptable: number;
+  pareto: { items_for_80pct: number; top100_coverage_pct: number };
+  export_ready_rows: number;
+}
+
+export interface BulkReviewResult {
+  batch_id: number;
+  decision: "accept" | "reject";
+  selected: number;
+  reviewed: number;
+  awaiting_senior: number;
+  skipped: number;
+  failed: { item_id: string; error: string }[];
 }
 
 export interface RecommendationPage {

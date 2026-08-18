@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   risk_level TEXT, confidence REAL, explanation TEXT,
   exposure_usd REAL,
   model_version TEXT, rule_version TEXT,
+  route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
   scored_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -306,6 +307,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   risk_level TEXT, confidence DOUBLE PRECISION, explanation TEXT,
   exposure_usd DOUBLE PRECISION,
   model_version TEXT, rule_version TEXT,
+  route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
   scored_at TEXT DEFAULT {PG_NOW},
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -590,6 +592,27 @@ def _ensure_foreign_keys(conn: Conn) -> list[str]:
     return added
 
 
+def _ensure_columns(conn) -> None:
+    """Additive migration for DBs created before a column was added.
+
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so a dev/prod DB
+    that predates route/consumable/agreement on recommendation_result would 500
+    on the next score. These columns are new triage signals; default them empty.
+    """
+    wanted = ("route", "consumable", "agreement")
+    if is_postgres() or use_rest():
+        for col in wanted:
+            conn.execute("ALTER TABLE recommendation_result "
+                         f"ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
+        return
+    existing = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(recommendation_result)")}
+    for col in wanted:
+        if col not in existing:
+            conn.execute("ALTER TABLE recommendation_result "
+                         f"ADD COLUMN {col} TEXT DEFAULT ''")
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
@@ -606,6 +629,7 @@ def init_db() -> None:
             _ensure_foreign_keys(conn)
         else:
             conn._raw.executescript(ddl)
+        _ensure_columns(conn)
         # Seed rule_config from the analysed engine config on first run.
         n = conn.execute("SELECT COUNT(*) c FROM rule_config").fetchone()["c"]
         if n == 0:

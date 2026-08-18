@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
   ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
 } from "@/lib/types";
-import { ActionChip, Banner, ReasonCodes, RiskChip, Spinner, StatusChip } from "@/components/ui";
+import { ActionChip, AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip, Spinner, StatusChip } from "@/components/ui";
 
 const CONTEXT_LABELS: Record<string, string> = {
   item_desc: "Description", machine_type: "Machine type", aging_status: "Aging status",
@@ -25,6 +26,7 @@ export default function ItemPage({ params }: {
   const batchId = Number(id);
   const { call } = useApi();
   const { role, user } = useSession();
+  const router = useRouter();
 
   const [d, setD] = useState<ItemDetail | null>(null);
   const [history, setHistory] = useState<Review[]>([]);
@@ -98,6 +100,9 @@ export default function ItemPage({ params }: {
     min: Number(d.context.min_qty ?? 0),
   };
   const latest = d.latest_review;
+  const benchRaw = d.context.factory_recommended_new_max;
+  const benchMax = benchRaw === null || benchRaw === undefined || benchRaw === ""
+    ? null : Number(benchRaw);
   const canApprove = d.status === "awaiting_senior" && can.approve(role)
                      && latest?.reviewer !== user;
   const selectedTemplate = justificationTemplates.find(
@@ -106,14 +111,16 @@ export default function ItemPage({ params }: {
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <Link href={`/batches/${batchId}`} className="text-xs" style={{ color: "var(--text-muted)" }}>
-          ← Batch #{batchId}
-        </Link>
+        <button onClick={() => router.back()} className="text-xs" style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+          ← Back to items
+        </button>
         <div className="flex flex-wrap items-center gap-3 mt-1">
           <h1 className="text-xl font-semibold font-mono">{r.item_id}</h1>
           <StatusChip status={d.status} />
           <RiskChip level={r.risk_level} />
           <ActionChip action={r.action} />
+          <ConsumableChip value={r.consumable} />
+          <AgreementChip value={r.agreement} />
           <span className="text-sm tnum" style={{ color: "var(--text-secondary)" }}>
             {fmtUsd(r.exposure_usd)} exposure
           </span>
@@ -149,6 +156,14 @@ export default function ItemPage({ params }: {
                     <td className="text-right tnum font-semibold">{r.new_rop}</td>
                     <td className="text-right tnum font-semibold">{r.new_min}</td>
                   </tr>
+                  {benchMax !== null && (
+                    <tr>
+                      <td style={{ color: "var(--text-secondary)" }}>Engineer benchmark</td>
+                      <td className="text-right tnum">{benchMax}</td>
+                      <td className="text-right tnum">{Number(d.context.factory_recommended_new_rop)}</td>
+                      <td className="text-right tnum">{Number(d.context.factory_recommended_new_min)}</td>
+                    </tr>
+                  )}
                   {latest && (
                     <tr>
                       <td style={{ color: "var(--text-secondary)" }}>Engineer final</td>

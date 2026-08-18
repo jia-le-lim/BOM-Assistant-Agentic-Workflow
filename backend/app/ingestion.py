@@ -98,7 +98,7 @@ def quarantine_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def ingest(conn: Conn, content: bytes, label: str, filename: str,
-           module_filter: str | None, user: str) -> dict:
+           module_filter: str | None, user: str, match_mode: str = "exact") -> dict:
     df = _read_table(content, filename)
 
     df = normalize(df)
@@ -107,9 +107,20 @@ def ingest(conn: Conn, content: bytes, label: str, filename: str,
         raise IngestionError(f"Missing required columns: {missing}")
 
     if module_filter and module_filter.upper() != "ALL":
-        if "module" not in df.columns:
-            raise IngestionError("module column missing but module_filter requested")
-        df = df[df["module"] == module_filter].copy()
+        if match_mode == "tag":
+            # Multi-tag rows carry a comma list (e.g. "Module-TCB,Module-Epoxy")
+            # in new_module; a substring match keeps a part in every module it
+            # is tagged with, not just an exact single-module cell.
+            col = "new_module" if "new_module" in df.columns else "module"
+            if col not in df.columns:
+                raise IngestionError("no module/new_module column but module_filter requested")
+            needle = module_filter.strip().lower()
+            mask = df[col].astype(str).str.lower().str.contains(needle, na=False, regex=False)
+            df = df[mask].copy()
+        else:
+            if "module" not in df.columns:
+                raise IngestionError("module column missing but module_filter requested")
+            df = df[df["module"] == module_filter].copy()
     if df.empty:
         raise IngestionError(f"No rows remain after module filter '{module_filter}'")
     df = df.reset_index(drop=True)

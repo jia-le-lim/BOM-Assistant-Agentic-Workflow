@@ -11,10 +11,22 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
 from ..db import active_config, get_conn, stored_config
+from .. import engine_statistical
 from ..schemas import ConfigUpdateRequest, CriticalityRequest
 from ..security import APPROVE_ROLES, CONFIG_WRITE_ROLES, REVIEW_ROLES, any_role, require_role
 
 router = APIRouter()
+
+# Statistical-engine auto-clear knobs (PRD v3 Phase 5). Shown with their engine
+# defaults when a config has not overridden them, so the Config page always
+# reflects the effective policy. All default OFF -- see s15 calibration.
+AUTOCLEAR_DEFAULTS = {
+    "autoclear_noop_abs": engine_statistical.AUTOCLEAR_NOOP_ABS,
+    "autoclear_noop_rel": engine_statistical.AUTOCLEAR_NOOP_REL,
+    "autoclear_immaterial_usd": engine_statistical.AUTOCLEAR_IMMATERIAL_USD,
+    "autoclear_high_value_usd": engine_statistical.AUTOCLEAR_HIGH_VALUE_USD,
+    "autoclear_reliable": engine_statistical.AUTOCLEAR_RELIABLE,
+}
 
 # Keys that may be updated via the API, with their expected types.
 EDITABLE = {
@@ -30,6 +42,11 @@ EDITABLE = {
     "rule9_mode": (str,),
     "autoclear_guard": (bool,),
     "quantity_anchor": (str,),
+    "autoclear_noop_abs": (int, float),
+    "autoclear_noop_rel": (int, float),
+    "autoclear_immaterial_usd": (int, float),
+    "autoclear_high_value_usd": (int, float),
+    "autoclear_reliable": (bool,),
 }
 
 
@@ -38,8 +55,9 @@ def get_rules(actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         cfg = active_config(conn)
+        merged = {**AUTOCLEAR_DEFAULTS, **cfg}   # stored values win over defaults
         return {"rule_version": cfg["rule_version"],
-                "config": {k: v for k, v in cfg.items() if not k.startswith("_")}}
+                "config": {k: v for k, v in merged.items() if not k.startswith("_")}}
     finally:
         conn.close()
 

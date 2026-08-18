@@ -64,25 +64,30 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
         " WHERE h.batch_id=recommendation_result.batch_id"
         " AND h.item_id=recommendation_result.item_id"
         " AND h.stockroom_id=recommendation_result.stockroom_id)", (batch_id,))
+    # Triage signals: the statistical engine emits these; the legacy rule engine
+    # does not, so default them rather than KeyError on a rules re-score.
+    for c in ("route", "consumable", "agreement"):
+        if c not in res.columns:
+            res[c] = ""
     # NOTE: not itertuples() -- it renames underscore-prefixed columns
     # (_exposure_usd), which would silently mis-read fields.
     cols = ["item_id", "factory_recommended_new_max", "factory_recommended_new_rop",
             "factory_recommended_new_min", "review_required",
             "factory_recommendation_action", "reason_code", "risk_level",
             "confidence_score", "explanation", "_exposure_usd",
-            "model_version", "rule_version"]
+            "model_version", "rule_version", "route", "consumable", "agreement"]
     payload = [
         (batch_id, str(v[0]), stk.iloc[i], int(v[1]), int(v[2]), int(v[3]),
          str(v[4]), str(v[5]), str(v[6]), str(v[7]), float(v[8]), str(v[9]),
-         float(v[10]), str(v[11]), str(v[12]))
+         float(v[10]), str(v[11]), str(v[12]), str(v[13]), str(v[14]), str(v[15]))
         for i, v in enumerate(res[cols].to_numpy())
     ]
     payload = [p for p in payload if (p[1], p[2]) not in reviewed]
     conn.executemany(
         "INSERT INTO recommendation_result (batch_id, item_id, stockroom_id, new_max, "
         "new_rop, new_min, review_required, action, reason_code, risk_level, confidence, "
-        "explanation, exposure_usd, model_version, rule_version) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", payload)
+        "explanation, exposure_usd, model_version, rule_version, route, consumable, agreement) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", payload)
     conn.execute(
         "UPDATE batches SET status='scored', scored_rule_version=?, scored_config_hash=?, "
         "scored_at=datetime('now') WHERE batch_id=?",

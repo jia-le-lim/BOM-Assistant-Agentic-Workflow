@@ -17,6 +17,8 @@ export default function BatchesPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [label, setLabel] = useState("Jan26");
   const [moduleFilter, setModuleFilter] = useState("TCB");
+  const [moduleMatch, setModuleMatch] = useState("exact");
+  const [scoreAfter, setScoreAfter] = useState(true);
 
   const load = useCallback(async () => {
     try {
@@ -37,11 +39,20 @@ export default function BatchesPage() {
       fd.append("file", f);
       fd.append("label", label);
       fd.append("module_filter", moduleFilter);
+      fd.append("module_match", moduleMatch);
       const s = await call<UploadSummary>("upload-bom-file", { method: "POST", body: fd });
       const reasons = Object.entries(s.quarantine_reasons)
         .map(([k, v]) => `${k}: ${v}`).join(", ") || "none";
-      setNote(`Batch ${s.batch_id} — ${s.rows_loaded.toLocaleString()} rows loaded, ` +
-              `${s.rows_quarantined} quarantined (${reasons}).`);
+      let msg = `Batch ${s.batch_id} — ${s.rows_loaded.toLocaleString()} rows loaded, ` +
+               `${s.rows_quarantined} quarantined (${reasons}).`;
+      if (scoreAfter) {
+        const run = await call<{ rows_scored: number; review_required_Y: number; review_required_N: number }>(
+          `run-recommendation?batch_id=${s.batch_id}`, { method: "POST" });
+        msg += ` Scored ${run.rows_scored.toLocaleString()} rows — ` +
+               `${run.review_required_Y.toLocaleString()} need review, ` +
+               `${run.review_required_N.toLocaleString()} auto-cleared. Open the batch to triage.`;
+      }
+      setNote(msg);
       if (fileRef.current) fileRef.current.value = "";
       await load();
     } catch (e) { setErr((e as Error).message); }
@@ -78,8 +89,8 @@ export default function BatchesPage() {
         <h2 className="text-sm font-semibold">Upload BOM extract</h2>
         <div className="flex flex-wrap gap-3 items-end">
           <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>CSV file</span>
-            <input ref={fileRef} type="file" accept=".csv" required
+            <span style={{ color: "var(--text-secondary)" }}>File</span>
+            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" required
                    className="field text-xs" disabled={!can.upload(role)} />
           </label>
           <label className="flex flex-col gap-1 text-xs">
@@ -92,12 +103,28 @@ export default function BatchesPage() {
             <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)}
                     className="field" disabled={!can.upload(role)}>
               <option value="TCB">TCB (MVP scope)</option>
+              <option value="Epoxy">Epoxy</option>
               <option value="ALL">All modules</option>
             </select>
           </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span style={{ color: "var(--text-secondary)" }}>Match</span>
+            <select value={moduleMatch} onChange={(e) => setModuleMatch(e.target.value)}
+                    className="field" disabled={!can.upload(role) || moduleFilter === "ALL"}
+                    title="Exact = single-module cell; Multi-tag = row tagged with this module among others">
+              <option value="exact">Exact</option>
+              <option value="tag">Multi-tag</option>
+            </select>
+          </label>
           <button className="btn btn-primary" disabled={busy || !can.upload(role)}>
-            {busy ? "Uploading…" : "Upload & ingest"}
+            {busy ? "Working…" : scoreAfter ? "Upload & score" : "Upload & ingest"}
           </button>
+          <label className="flex items-center gap-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+            <input type="checkbox" checked={scoreAfter}
+                   onChange={(e) => setScoreAfter(e.target.checked)}
+                   disabled={!can.upload(role)} />
+            Run engine now
+          </label>
         </div>
         {!can.upload(role) && (
           <p className="text-xs" style={{ color: "var(--text-muted)" }}>

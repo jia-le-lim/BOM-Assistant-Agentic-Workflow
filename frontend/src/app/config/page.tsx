@@ -18,6 +18,15 @@ const EDITABLE = [
   ["min_protective_stock", "Protective floor (units)", "Applied when the source algorithm says 0 but risk exists"],
 ] as const;
 
+// Statistical-engine auto-clear knobs. All default OFF -- s15 calibration on
+// Jan'26 showed expanding auto-clear lowered agreement with engineers.
+const AUTOCLEAR = [
+  ["autoclear_immaterial_usd", "Immaterial $ floor", "Auto-clear changes below this exposure. 0 = off"],
+  ["autoclear_noop_abs", "No-op tolerance (units)", "Engine within this many units of current = no change. 0 = off"],
+  ["autoclear_noop_rel", "No-op tolerance (fraction)", "…or within this fraction (0.10 = 10%). 0 = off"],
+  ["autoclear_high_value_usd", "High-value gate ($)", "A material change at/above this always reaches a human"],
+] as const;
+
 export default function ConfigPage() {
   const { call } = useApi();
   const { role } = useSession();
@@ -30,6 +39,7 @@ export default function ConfigPage() {
 
   const [pattern, setPattern] = useState("");
   const [crit, setCrit] = useState("High");
+  const [reliableEdit, setReliableEdit] = useState("");
 
   const load = useCallback(async () => {
     try { setCfg(await call<RuleConfig>("config/rules")); setErr(null); }
@@ -41,9 +51,13 @@ export default function ConfigPage() {
   async function save() {
     setBusy(true); setErr(null); setNote(null);
     try {
-      const updates: Record<string, number> = {};
+      const updates: Record<string, number | boolean> = {};
       for (const [k, v] of Object.entries(edits)) {
         if (v !== "" && Number(v) !== Number(cfg?.config[k])) updates[k] = Number(v);
+      }
+      if (reliableEdit !== "" &&
+          (reliableEdit === "true") !== Boolean(cfg?.config.autoclear_reliable)) {
+        updates.autoclear_reliable = reliableEdit === "true";
       }
       if (!Object.keys(updates).length) { setErr("No changes to apply."); return; }
       const r = await call<{ rule_version: string }>("config/rules", {
@@ -52,7 +66,7 @@ export default function ConfigPage() {
       });
       setNote(`Saved as ${r.rule_version}. Re-run the engine on a batch to apply it — ` +
               `existing results keep the version they were scored with.`);
-      setEdits({}); setVersion(""); await load();
+      setEdits({}); setReliableEdit(""); setVersion(""); await load();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -141,6 +155,56 @@ export default function ConfigPage() {
             ? "The version must change whenever config changes — that is what makes a past result reproducible."
             : `Role ${role} cannot edit thresholds. Switch to admin.`}
         </p>
+      </div>
+
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold mb-1">Auto-clear policy (statistical engine)</h2>
+        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+          Auto-clear decides whether a row skips human review — it never changes Min/ROP/Max.
+          Calibrated OFF on Jan&rsquo;26 (expanding it lowered agreement with engineers); tune
+          here and re-check with <code>analysis/s15_autoclear_calibration.py</code> before enabling.
+          Saving uses the same new-version box above.
+        </p>
+        <div className="scroll-x">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead>
+              <tr><th>Setting</th><th className="text-right">Active</th>
+                  <th className="text-right w-32">New value</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              {AUTOCLEAR.map(([key, label, hint]) => (
+                <tr key={key}>
+                  <td>{label}</td>
+                  <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
+                  <td className="text-right">
+                    <input className="field w-28 tnum text-right" type="number" step="any"
+                           disabled={!can.configWrite(role)}
+                           value={edits[key] ?? ""}
+                           placeholder={String(cfg.config[key] ?? "")}
+                           onChange={(e) => setEdits({ ...edits, [key]: e.target.value })} />
+                  </td>
+                  <td className="text-xs" style={{ color: "var(--text-muted)" }}>{hint}</td>
+                </tr>
+              ))}
+              <tr>
+                <td>Reliable-stable lever</td>
+                <td className="text-right tnum">{cfg.config.autoclear_reliable ? "on" : "off"}</td>
+                <td className="text-right">
+                  <select className="field w-28" disabled={!can.configWrite(role)}
+                          value={reliableEdit}
+                          onChange={(e) => setReliableEdit(e.target.value)}>
+                    <option value="">—</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </td>
+                <td className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  Auto-clear regular, stable, moderate-exposure parts. Opt-in — off by default.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card p-5">

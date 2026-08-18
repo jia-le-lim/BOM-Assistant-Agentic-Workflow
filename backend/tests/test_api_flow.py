@@ -176,6 +176,23 @@ def test_config_versioning(client, synth_csv, db_file):
     assert s["rule_version"] == "0.2.1-test"
 
 
+def test_autoclear_knobs_are_editable_config(client):
+    """The statistical-engine auto-clear knobs are versioned config: shown with
+    their (off) defaults and writable by an admin as a new rule_version."""
+    cfg = client.get("/config/rules", headers=VIEWER).json()["config"]
+    assert "autoclear_immaterial_usd" in cfg          # default surfaced
+    assert cfg["autoclear_reliable"] in (False, 0)
+    r = client.post("/config/rules",
+                    json={"rule_version": "ac-1",
+                          "updates": {"autoclear_immaterial_usd": 150,
+                                      "autoclear_reliable": True}},
+                    headers=ADMIN)
+    assert r.status_code == 200, r.text
+    cfg2 = client.get("/config/rules", headers=VIEWER).json()["config"]
+    assert cfg2["autoclear_immaterial_usd"] == 150
+    assert cfg2["autoclear_reliable"] is True
+
+
 def test_criticality_two_person_rule(client, synth_csv):
     scored_batch(client, synth_csv)
     r = client.post("/config/criticality",

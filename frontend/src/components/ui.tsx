@@ -47,6 +47,42 @@ export function ActionChip({ action }: { action: Recommendation["action"] }) {
   );
 }
 
+/* ---------------- PRD v3 statistical signals -------------------------------- */
+
+const CONSUMABLE_META: Record<string, { label: string; color: string }> = {
+  constant: { label: "Constant",  color: "var(--seq)" },
+  sporadic: { label: "Sporadic",  color: "var(--warning)" },
+  dying:    { label: "Dying",     color: "var(--serious)" },
+  none:     { label: "Dormant",   color: "var(--text-muted)" },
+};
+
+export function ConsumableChip({ value }: { value: string }) {
+  const m = CONSUMABLE_META[value] ?? { label: value || "—", color: "var(--text-muted)" };
+  return (
+    <span className="text-[11px] px-1.5 py-0.5 rounded whitespace-nowrap"
+          style={{ background: "var(--seq-soft)", color: m.color }}>
+      {m.label}
+    </span>
+  );
+}
+
+const AGREEMENT_META: Record<string, { label: string; icon: string; color: string }> = {
+  match:   { label: "Matches engineer", icon: "≈", color: "var(--good)" },
+  diverge: { label: "Diverges",         icon: "≠", color: "var(--critical)" },
+};
+
+/** Engine vs the engineer's own factory_recommended_* number (PRD v3 §6). */
+export function AgreementChip({ value }: { value: string }) {
+  const m = AGREEMENT_META[value];
+  if (!m) return null;
+  return (
+    <span className="inline-flex items-center gap-1 text-xs whitespace-nowrap">
+      <span aria-hidden style={{ color: m.color }}>{m.icon}</span>
+      <span style={{ color: "var(--text-secondary)" }}>{m.label}</span>
+    </span>
+  );
+}
+
 export function ReasonCodes({ codes, max = 3 }: { codes: string; max?: number }) {
   const list = codes.split(",").filter(Boolean);
   const shown = list.slice(0, max);

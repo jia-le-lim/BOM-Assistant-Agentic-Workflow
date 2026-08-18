@@ -16,10 +16,13 @@ async def upload_bom_file(
     file: UploadFile = File(...),
     label: str = Form(...),
     module_filter: str = Form(default=DEFAULT_MODULE_FILTER),
+    module_match: str = Form(default="exact"),
     actor: dict = Depends(require_role(*UPLOAD_ROLES)),
 ):
     if not (file.filename or "").lower().endswith((".csv", ".xlsx", ".xls")):
         raise HTTPException(400, "Only .csv, .xlsx or .xls BOM review files are accepted")
+    if module_match not in ("exact", "tag"):
+        raise HTTPException(400, "module_match must be 'exact' or 'tag'")
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File exceeds upload limit")
@@ -28,7 +31,7 @@ async def upload_bom_file(
     try:
         try:
             summary = ingest(conn, content, label, file.filename, module_filter,
-                             actor["user"])
+                             actor["user"], match_mode=module_match)
         except IngestionError as e:
             raise HTTPException(400, str(e)) from e
         audit(conn, actor, "POST", "/upload-bom-file", "batch",

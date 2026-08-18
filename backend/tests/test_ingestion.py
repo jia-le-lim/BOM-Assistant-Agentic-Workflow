@@ -39,6 +39,38 @@ def test_upload_rejects_non_csv(client):
     assert r.status_code == 400
 
 
+def _mt_upload(client, module_filter, module_match):
+    rows = [
+        make_row(item_id="T1", new_modulle="Module-TCB"),
+        make_row(item_id="E1", new_modulle="Module-Epoxy,Module-TCB"),
+        make_row(item_id="W1", new_modulle="Module-Wirebond"),
+    ]
+    return client.post(
+        "/upload-bom-file",
+        files={"file": ("m.csv", rows_to_csv(rows), "text/csv")},
+        data={"label": "mt", "module_filter": module_filter, "module_match": module_match},
+        headers=ENG)
+
+
+def test_multitag_module_match_keeps_rows_tagged_among_others(client):
+    r = _mt_upload(client, "Epoxy", "tag")
+    assert r.status_code == 200, r.text
+    assert r.json()["rows_loaded"] == 1                 # only E1 carries Module-Epoxy
+    r2 = _mt_upload(client, "TCB", "tag")
+    assert r2.json()["rows_loaded"] == 2                # T1 and E1 both carry Module-TCB
+
+
+def test_exact_match_is_the_default_and_uses_the_module_column(client):
+    # make_row sets module="TCB"; exact mode matches that single-module cell.
+    r = _mt_upload(client, "Epoxy", "exact")
+    assert r.status_code == 400                          # no module=="Epoxy" rows
+
+
+def test_module_match_rejects_bad_mode(client):
+    r = _mt_upload(client, "TCB", "sideways")
+    assert r.status_code == 400
+
+
 def test_upload_rejects_missing_columns(client):
     bad = rows_to_csv([{"item_id": "1", "module": "TCB"}])
     r = upload(client, bad)

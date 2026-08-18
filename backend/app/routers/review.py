@@ -13,9 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..audit import audit
 from ..db import get_conn
 from ..justifications import JUSTIFICATION_TEMPLATES
-from ..schemas import ConfirmPendingRequest, ReviewRequest
+from ..schemas import BulkReviewRequest, ConfirmPendingRequest, ReviewRequest
 from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
-from ..services import AmbiguousItem, current_values, resolve_rec
+from ..services import (AmbiguousItem, current_values, derive_status,
+                        latest_reviews, resolve_rec)
 
 router = APIRouter()
 
@@ -72,6 +73,95 @@ def _record_review(conn, actor, batch_id, rec, decision, final,
                      "confirmed_review_id=? WHERE pending_id=?",
                      (review_id, link_pending))
     return review_id, cur, eng, requires_senior
+
+
+def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
+    """Resolve a bulk request to recommendation rows; returns (recs, failures)."""
+    failures: list[dict] = []
+    if req.items:
+        recs = []
+        for it in req.items:
+            try:
+                rec = resolve_rec(conn, req.batch_id, it.item_id, it.stockroom_id)
+            except AmbiguousItem as e:
+                failures.append({"item_id": it.item_id, "error": str(e)})
+                continue
+            if rec is None:
+                failures.append({"item_id": it.item_id, "error": "not scored"})
+            else:
+                recs.append(rec)
+        return recs, failures
+
+    f = req.filters
+    where, params = ["batch_id=?"], [req.batch_id]
+    if f.risk_level:
+        where.append("risk_level=?"); params.append(f.risk_level)
+    if f.action:
+        where.append("action=?"); params.append(f.action)
+    if f.consumable:
+        where.append("consumable=?"); params.append(f.consumable)
+    if f.route:
+        where.append("route=?"); params.append(f.route)
+    if f.agreement:
+        where.append("agreement=?"); params.append(f.agreement)
+    if f.reason_code:
+        where.append("reason_code LIKE ?"); params.append(f"%{f.reason_code}%")
+    if f.min_exposure is not None:
+        where.append("exposure_usd>=?"); params.append(f.min_exposure)
+    if f.min_confidence is not None:
+        where.append("confidence>=?"); params.append(f.min_confidence)
+    if f.exclude_high_risk:
+        where.append("risk_level<>?"); params.append("High")
+    sql = "SELECT * FROM recommendation_result WHERE " + " AND ".join(where)
+    return list(conn.execute(sql, params)), failures
+
+
+# NOTE: declared before /review/{item_id} so POST /review/bulk is not captured
+# as item_id="bulk" (Starlette matches routes in declaration order).
+@router.post("/review/bulk")
+def bulk_review(body: BulkReviewRequest,
+                actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    """One-click accept/reject across the review queue.
+
+    The lever that turns 2,700 individual clicks into a handful of decisions:
+    the engineer bulk-clears the high-confidence agreements and keeps their
+    attention for the rows the engine is unsure about. Only pending_review rows
+    are touched; already-decided and auto-cleared rows are skipped, and the
+    senior-approval gate still fires per row.
+    """
+    conn = get_conn()
+    try:
+        recs, failed = _bulk_targets(conn, body)
+        reviews = latest_reviews(conn, body.batch_id)
+
+        reviewed = awaiting = skipped = 0
+        for rec in recs:
+            key = (rec["item_id"], rec["stockroom_id"])
+            if derive_status(rec, reviews.get(key)) != "pending_review":
+                skipped += 1
+                continue
+            cur = current_values(conn, body.batch_id, *key)
+            eng = (rec["new_max"], rec["new_rop"], rec["new_min"])
+            final = eng if body.decision == "accept" else cur
+            _, _, _, requires_senior = _record_review(
+                conn, actor, body.batch_id, rec, body.decision, final,
+                body.comment, body.justification or "bulk review")
+            if requires_senior:
+                awaiting += 1
+            else:
+                reviewed += 1
+
+        audit(conn, actor, "POST", "/review/bulk", "review", body.batch_id,
+              {"decision": body.decision, "reviewed": reviewed,
+               "awaiting_senior": awaiting, "skipped": skipped,
+               "failed": len(failed)})
+        conn.commit()
+        return {"batch_id": body.batch_id, "decision": body.decision,
+                "selected": len(recs), "reviewed": reviewed,
+                "awaiting_senior": awaiting, "skipped": skipped,
+                "failed": failed}
+    finally:
+        conn.close()
 
 
 @router.post("/review/{item_id}")
