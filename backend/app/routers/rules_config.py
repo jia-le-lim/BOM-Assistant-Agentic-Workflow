@@ -28,6 +28,13 @@ AUTOCLEAR_DEFAULTS = {
     "autoclear_reliable": engine_statistical.AUTOCLEAR_RELIABLE,
 }
 
+TRIAGE_DEFAULTS = {
+    "triage_clear_min_confidence": 0.8,
+    "triage_clear_precision_bar": 0.98,
+    "triage_preselect_min_confidence": 0.9,
+    "triage_guarded_assist_enabled": False,
+}
+
 # Keys that may be updated via the API, with their expected types.
 EDITABLE = {
     "low_cost_threshold": (int, float),
@@ -47,6 +54,10 @@ EDITABLE = {
     "autoclear_immaterial_usd": (int, float),
     "autoclear_high_value_usd": (int, float),
     "autoclear_reliable": (bool,),
+    "triage_clear_min_confidence": (int, float),
+    "triage_clear_precision_bar": (int, float),
+    "triage_preselect_min_confidence": (int, float),
+    "triage_guarded_assist_enabled": (bool,),
 }
 
 
@@ -55,7 +66,7 @@ def get_rules(actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         cfg = active_config(conn)
-        merged = {**AUTOCLEAR_DEFAULTS, **cfg}   # stored values win over defaults
+        merged = {**AUTOCLEAR_DEFAULTS, **TRIAGE_DEFAULTS, **cfg}
         return {"rule_version": cfg["rule_version"],
                 "config": {k: v for k, v in merged.items() if not k.startswith("_")}}
     finally:

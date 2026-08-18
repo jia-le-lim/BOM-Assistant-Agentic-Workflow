@@ -1,14 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fmtUsd, useApi } from "@/lib/api";
+import { ApiError, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
-  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
+  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review, TriageResult,
 } from "@/lib/types";
-import { ActionChip, AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip, Spinner, StatusChip } from "@/components/ui";
+import { ActionChip, AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip, Spinner, StatusChip, TriageChip } from "@/components/ui";
 
 const CONTEXT_LABELS: Record<string, string> = {
   item_desc: "Description", machine_type: "Machine type", aging_status: "Aging status",
@@ -30,6 +29,7 @@ export default function ItemPage({ params }: {
 
   const [d, setD] = useState<ItemDetail | null>(null);
   const [history, setHistory] = useState<Review[]>([]);
+  const [triage, setTriage] = useState<TriageResult | null>(null);
   const [justificationTemplates, setJustificationTemplates] = useState<JustificationTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -41,10 +41,18 @@ export default function ItemPage({ params }: {
 
   const load = useCallback(async () => {
     try {
-      const [detail, h, templatePage] = await Promise.all([
-        call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`),
+      const detail = await call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`);
+      const triagePath = `triage/${batchId}/${itemId}?stockroom_id=${encodeURIComponent(
+        detail.recommendation.stockroom_id)}`;
+      const [h, templatePage, triageResult] = await Promise.all([
         call<{ reviews: Review[] }>(`history/${itemId}`),
         call<JustificationTemplatePage>("review/justification-templates"),
+        can.review(role)
+          ? call<TriageResult>(triagePath).catch((e) => {
+              if (e instanceof ApiError && e.status === 404) return null;
+              throw e;
+            })
+          : Promise.resolve(null),
       ]);
       setD(detail);
       setFMax(String(detail.recommendation.new_max));
@@ -52,9 +60,10 @@ export default function ItemPage({ params }: {
       setFMin(String(detail.recommendation.new_min));
       setHistory(h.reviews);
       setJustificationTemplates(templatePage.templates);
+      setTriage(triageResult);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
-  }, [call, batchId, itemId]);
+  }, [call, batchId, itemId, role]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => { void load(); });
@@ -135,6 +144,46 @@ export default function ItemPage({ params }: {
 
       <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
         <div className="flex flex-col gap-5">
+          {triage && (
+            <div className="card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <h2 className="text-sm font-semibold">Advisory triage</h2>
+                <div className="flex items-center gap-3">
+                  <TriageChip tier={triage.triage_tier} />
+                  <span className="text-xs tnum" style={{ color: "var(--text-secondary)" }}>
+                    priority {triage.priority_score.toFixed(0)} · confidence {Math.round(triage.confidence * 100)}%
+                  </span>
+                </div>
+              </div>
+              <p className="text-sm">{triage.rationale}</p>
+              {triage.focus_question && (
+                <p className="text-sm mt-3 p-3 rounded" style={{ background: "var(--seq-soft)" }}>
+                  <strong>Focus:</strong> {triage.focus_question}
+                </p>
+              )}
+              <div className="grid gap-3 mt-4 md:grid-cols-3">
+                {([
+                  ["History", triage.history_narrative],
+                  ["Demand", triage.demand_narrative],
+                  ["Procurement", triage.procurement_narrative],
+                ] as const).filter(([, narrative]) => narrative).map(([label, narrative]) => (
+                  <div key={label}>
+                    <div className="text-xs font-medium mb-1">{label}</div>
+                    <p className="text-xs" style={{ color: "var(--text-secondary)" }}>{narrative}</p>
+                  </div>
+                ))}
+              </div>
+              <details className="text-xs mt-4">
+                <summary style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+                  {triage.sources.length} grounded sources · {triage.provider}:{triage.model}
+                </summary>
+                <pre className="mt-2 p-3 rounded scroll-x" style={{ background: "var(--seq-soft)" }}>
+                  {JSON.stringify(triage.sources, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )}
+
           <div className="card p-5">
             <h2 className="text-sm font-semibold mb-3">Engine recommendation</h2>
             <div className="scroll-x">

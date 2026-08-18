@@ -6,6 +6,12 @@
   "rule9_mode": "wide",
   "autoclear_guard": true,
 
+  "_triage": "Advisory triage gates. Guarded bulk preselection stays off until the recorded backtest clears the precision bar.",
+  "triage_clear_min_confidence": 0.8,
+  "triage_clear_precision_bar": 0.98,
+  "triage_preselect_min_confidence": 0.9,
+  "triage_guarded_assist_enabled": false,
+
   "low_cost_threshold": 50.0,
   "high_cost_threshold": 1500.0,
   "long_lead_time_threshold": 45,

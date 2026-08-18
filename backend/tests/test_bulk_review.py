@@ -4,7 +4,9 @@ These exercise the statistical engine (BOM_ENGINE=statistical) so route/
 consumable/agreement are populated; the workflow suite stays on the rule engine.
 """
 
-from conftest import ENG, make_row, rows_to_csv, upload
+import pandas as pd
+
+from conftest import ADMIN, ENG, make_row, rows_to_csv, upload
 
 WINS = (5, 30, 90, 180, 365, 547)
 
@@ -33,6 +35,18 @@ def _high_volume(item_id: str) -> dict:
         last_365_day_cnsmptn_qty=365, last_547_day_cnsmptn_qty=540,
         max_qty=1, factory_recommended_new_max="",
         factory_recommended_new_rop="", factory_recommended_new_min="")
+
+
+def _matching_constant(item_id: str) -> dict:
+    from app.engine_statistical import run
+
+    row = _constant(item_id)
+    row["unitprice"] = "10"
+    result = run(pd.DataFrame([row])).iloc[0]
+    for level in ("max", "rop", "min"):
+        row[f"factory_recommended_new_{level}"] = str(int(
+            result[f"factory_recommended_new_{level}"]))
+    return row
 
 
 def _scored(client, monkeypatch, rows) -> int:
@@ -112,3 +126,34 @@ def test_bulk_requires_a_target(client, monkeypatch):
     r = client.post("/review/bulk", headers=ENG,
                     json={"batch_id": bid, "decision": "accept"})
     assert r.status_code == 422
+
+
+def test_bulk_can_filter_by_triage_tier(client, monkeypatch):
+    bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
+    triage = client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
+    assert triage.status_code == 200, triage.text
+    assert client.get(f"/triage/{bid}", headers=ENG).json()["items"][0][
+        "triage_tier"] == "clear_candidate"
+
+    reviewed = client.post("/review/bulk", headers=ENG, json={
+        "batch_id": bid, "decision": "accept",
+        "filters": {"triage_tier": "clear_candidate"}})
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["reviewed"] == 1
+
+
+def test_guarded_triage_preselection_is_config_gated(client, monkeypatch):
+    bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
+    client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
+    body = {"batch_id": bid, "decision": "accept",
+            "filters": {"triage_preselect": True}}
+    disabled = client.post("/review/bulk", headers=ENG, json=body)
+    assert disabled.status_code == 409
+
+    enabled = client.post("/config/rules", headers=ADMIN, json={
+        "rule_version": "triage-enabled-test",
+        "updates": {"triage_guarded_assist_enabled": True}})
+    assert enabled.status_code == 200, enabled.text
+    reviewed = client.post("/review/bulk", headers=ENG, json=body)
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["reviewed"] == 1

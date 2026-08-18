@@ -42,6 +42,7 @@ psycopg[binary]==3.3.4
 # Used only by app/llm/nyra.py, and only when LLM_BASE_URL is set. Unset, the
 # app runs on EchoProvider with no network calls at all.
 openai==2.50.0
+langgraph==1.2.9
 
 # --- Optional: mem0 recall layer ---------------------------------------
 # NOT installed by default. MEM0_ENABLED=0 is the default and the suite must

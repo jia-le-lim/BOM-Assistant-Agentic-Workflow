@@ -1,6 +1,6 @@
 "use client";
 
-import type { Recommendation, Status } from "@/lib/types";
+import type { Recommendation, Status, TriageTier } from "@/lib/types";
 
 /* ---------------- status & risk chips (icon + label, never colour alone) ---- */
 
@@ -43,6 +43,22 @@ export function ActionChip({ action }: { action: Recommendation["action"] }) {
     <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap">
       <span aria-hidden style={{ color: "var(--text-muted)" }}>{icon}</span>
       <span style={{ color: "var(--text-secondary)" }}>{action}</span>
+    </span>
+  );
+}
+
+const TRIAGE_META: Record<TriageTier, { label: string; icon: string; color: string }> = {
+  clear_candidate: { label: "Clear candidate", icon: "✓", color: "var(--good)" },
+  review: { label: "Review", icon: "◐", color: "var(--warning)" },
+  escalate: { label: "Escalate", icon: "▲", color: "var(--critical)" },
+};
+
+export function TriageChip({ tier }: { tier: TriageTier }) {
+  const m = TRIAGE_META[tier];
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap">
+      <span aria-hidden style={{ color: m.color }}>{m.icon}</span>
+      <span style={{ color: "var(--text-secondary)" }}>{m.label}</span>
     </span>
   );
 }

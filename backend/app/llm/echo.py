@@ -62,9 +62,22 @@ class EchoProvider:
                           if m.role == "user"), "")
         tool_results = [m for m in messages if m.role == "tool"]
 
+        if messages and "triage synthesis specialist" in messages[0].content:
+            return Response(content=self._triage_verdict(last_user),
+                            model=self.model, provider=self.name)
+
         if tool_results:
             return Response(content=self._summarise(tool_results),
                             model=self.model, provider=self.name)
+
+        item = ITEM_RE.search(last_user)
+        if (item and "history" in last_user.lower() and "note" in last_user.lower()
+                and {"get_item_history", "get_item_notes"} <= available):
+            item_id = item.group(1)
+            return Response(tool_calls=[
+                ToolCall("c1", "get_item_history", {"item_id": item_id}),
+                ToolCall("c2", "get_item_notes", {"item_id": item_id}),
+            ], model=self.model, provider=self.name)
 
         call = self._route(last_user, available)
         if call is None:
@@ -89,6 +102,13 @@ class EchoProvider:
         ql = q.lower()
         item = ITEM_RE.search(q)
 
+        if (item and "get_procurement_context" in available
+                and any(w in ql for w in
+                        ("procurement", "criticality", "lead time", "moq",
+                         "order multiple", "ownership"))):
+            return ToolCall("c1", "get_procurement_context",
+                            {"item_id": item.group(1)})
+
         if item and WRITE_RE.search(q):
             qty = QTY_RE.search(q)
             if qty and "propose_change" in available:
@@ -107,8 +127,12 @@ class EchoProvider:
                     })
 
         if item and any(w in ql for w in ("why", "explain", "reason")):
-            return ToolCall("c1", "get_recommendation",
-                            {"item_id": item.group(1)})
+            if "get_recommendation" in available:
+                return ToolCall("c1", "get_recommendation",
+                                {"item_id": item.group(1)})
+            if "get_triage_context" in available:
+                return ToolCall("c1", "get_triage_context",
+                                {"item_id": item.group(1)})
 
         if item and "history" in ql:
             return ToolCall("c1", "get_item_history",
@@ -190,6 +214,21 @@ class EchoProvider:
                     f"min {data['current_min']} "
                     f"(stockroom {data['stockroom_id']})")
 
+        if tool == "get_triage_context":
+            return (f"Item {data['item_id']} is {data['route'] or 'unrouted'} / "
+                    f"{data['consumable'] or 'unclassified'} with "
+                    f"{data['agreement'] or 'no'} benchmark agreement. "
+                    f"{data['explanation']} Reason: {data['reason_code']}; "
+                    f"risk {data['risk_level']}; exposure "
+                    f"${data['exposure_usd'] or 0:,.0f}.")
+
+        if tool == "get_procurement_context":
+            return (f"Item {data['item_id']} procurement context: criticality "
+                    f"{data['criticality']} ({data['criticality_source']}), "
+                    f"ownership {data['ownership']}, contractual lead time "
+                    f"{data['contractual_lead_time_days'] or 'unknown'} days, "
+                    f"order multiple {data['order_qty_multiple'] or 'unknown'}.")
+
         if tool == "get_item_history":
             rows = data.get("reviews", [])
             lines = [f"{r['reviewed_at']}: {r['reviewer']} {r['decision']} -> "
@@ -242,3 +281,41 @@ class EchoProvider:
                     f"pending exposure ${data.get('exposure_pending_usd', 0):,.0f}")
 
         return json.dumps(data)[:400]
+
+    def _triage_verdict(self, payload: str) -> str:
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return "{}"
+        features = data.get("features", {})
+        risk = data.get("risk_level")
+        agreement = data.get("agreement")
+        engine_confidence = float(data.get("engine_confidence") or 0)
+        critical = bool(features.get("critical"))
+        high_exposure = bool(features.get("high_exposure"))
+
+        score = {"High": 40, "Medium": 25, "Low": 10}.get(risk, 20)
+        score += 30 if agreement == "diverge" else -10 if agreement == "match" else 10
+        score += 20 if high_exposure else 0
+        score += 25 if critical else 0
+        score += 20 * (1 - engine_confidence)
+        score = round(min(100, max(0, score)), 1)
+
+        safe_clear = (agreement == "match" and risk == "Low"
+                      and not high_exposure and not critical
+                      and engine_confidence >= 0.8)
+        tier = ("escalate" if critical or risk == "High" or score >= 75 else
+                "clear_candidate" if safe_clear else "review")
+        signals = [risk or "unknown risk", agreement or "no benchmark agreement"]
+        if high_exposure:
+            signals.append("high exposure")
+        if critical:
+            signals.append("critical part")
+        return json.dumps({
+            "tier": tier,
+            "priority_score": score,
+            "rationale": "Triage signals: " + ", ".join(signals) + ".",
+            "confidence": round(min(0.99, max(0.1, engine_confidence)), 2),
+            "focus_question": ("Which procurement or demand assumption needs "
+                               "human confirmation before approval?"),
+        })

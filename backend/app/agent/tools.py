@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -81,6 +82,63 @@ def get_recommendation(ctx: ToolContext, item_id: str,
             "reason_code": r["reason_code"], "risk_level": r["risk_level"],
             "confidence": r["confidence"], "explanation": r["explanation"],
             "exposure_usd": r["exposure_usd"], "rule_version": r["rule_version"]}
+
+
+def get_triage_context(ctx: ToolContext, item_id: str,
+                       batch_id: int | None = None,
+                       stockroom_id: str | None = None) -> dict:
+    """Recommendation evidence without stock-level outputs.
+
+    Triage explains an existing decision signal; it never proposes quantities.
+    Keeping the quantity columns out of this tool makes that boundary structural.
+    """
+    bid = batch_id or ctx.batch_id
+    r = _resolve(ctx, bid, item_id, stockroom_id)
+    if r is None:
+        return EMPTY
+    ctx.sources.append({"type": "recommendation_result", "batch_id": bid,
+                        "item_id": item_id,
+                        "stockroom_id": r["stockroom_id"],
+                        "reason_code": r["reason_code"],
+                        "rule_version": r["rule_version"]})
+    return {"item_id": r["item_id"], "route": r["route"],
+            "consumable": r["consumable"], "agreement": r["agreement"],
+            "review_required": r["review_required"], "action": r["action"],
+            "reason_code": r["reason_code"], "risk_level": r["risk_level"],
+            "confidence": r["confidence"], "explanation": r["explanation"],
+            "exposure_usd": r["exposure_usd"],
+            "rule_version": r["rule_version"]}
+
+
+def get_procurement_context(ctx: ToolContext, item_id: str,
+                            batch_id: int | None = None,
+                            stockroom_id: str | None = None) -> dict:
+    """Read procurement signals without exposing or proposing stock levels."""
+    bid = batch_id or ctx.batch_id
+    rec = _resolve(ctx, bid, item_id, stockroom_id)
+    if rec is None:
+        return EMPTY
+    row = ctx.conn.execute(
+        "SELECT payload FROM bom_rows WHERE batch_id=? AND item_id=? "
+        "AND stockroom_id=?", (bid, item_id, rec["stockroom_id"])).fetchone()
+    if row is None:
+        return EMPTY
+    payload = json.loads(row["payload"])
+    machine = str(payload.get("machine_type") or "")
+    configured = next((level for pattern, level in
+                       active_config(ctx.conn).get("machine_criticality", {}).items()
+                       if pattern.lower() in machine.lower()), None)
+    ctx.sources.append({"type": "bom_rows", "batch_id": bid,
+                        "item_id": item_id,
+                        "stockroom_id": rec["stockroom_id"]})
+    return {
+        "item_id": item_id,
+        "criticality": configured or payload.get("sfm_criticality") or "unknown",
+        "criticality_source": "confirmed config" if configured else "source row",
+        "ownership": payload.get("ownership") or "unknown",
+        "contractual_lead_time_days": payload.get("contractual_lead_time") or None,
+        "order_qty_multiple": payload.get("order_qty_multiple") or None,
+    }
 
 
 def get_current_values(ctx: ToolContext, item_id: str,
@@ -317,6 +375,25 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
                                           "stockroom_id": _STOCK},
          "required": ["item_id"]}), get_current_values),
 
+    "get_triage_context": (ToolSpec(
+        "get_triage_context",
+        "Read-only engine routing, demand class, agreement, risk, confidence, "
+        "reason and explanation for triage. It deliberately omits stock-level "
+        "quantities.",
+        {"type": "object", "properties": {"item_id": _ITEM,
+                                            "batch_id": _BATCH,
+                                            "stockroom_id": _STOCK},
+         "required": ["item_id"]}), get_triage_context),
+
+    "get_procurement_context": (ToolSpec(
+        "get_procurement_context",
+        "Read-only criticality, ownership, contractual lead time, and order "
+        "multiple for procurement triage. It omits stock-level quantities.",
+        {"type": "object", "properties": {"item_id": _ITEM,
+                                            "batch_id": _BATCH,
+                                            "stockroom_id": _STOCK},
+         "required": ["item_id"]}), get_procurement_context),
+
     "get_item_history": (ToolSpec(
         "get_item_history",
         "Past review DECISIONS for an item across all batches. Use for 'what "
@@ -396,9 +473,12 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
 READ_ONLY_TOOLS = frozenset(REGISTRY) - {"propose_change"}
 
 
-def specs(allow_writes: bool) -> list[ToolSpec]:
+def specs(allow_writes: bool,
+          names: Collection[str] | None = None) -> list[ToolSpec]:
+    allowed = set(names) if names is not None else None
     return [spec for name, (spec, _) in REGISTRY.items()
-            if allow_writes or name != "propose_change"]
+            if (allow_writes or name != "propose_change")
+            and (allowed is None or name in allowed)]
 
 
 def dispatch(ctx: ToolContext, name: str, args: dict) -> str:

@@ -3,8 +3,8 @@
 The delete behaviour is picked per relation, not uniformly, and each choice
 encodes a rule about this system:
 
-  CASCADE   bom_rows, recommendation_result, model_prediction_log -- derived
-            data, reproducible by re-running ingest and score.
+  CASCADE   bom_rows, recommendation_result, model_prediction_log,
+            triage_result -- derived data, reproducible by re-running.
   RESTRICT  review_history, pending_change -- the audit trail. Deleting a batch
             that carries decisions must fail loudly rather than shed them.
   SET NULL  conversation_turn.batch_id, item_note.origin_* -- provenance only.
@@ -103,7 +103,7 @@ def test_batch_without_decisions_cascades_cleanly(client, synth_csv, db_file):
     try:
         conn.execute("DELETE FROM batches WHERE batch_id=?", (b,))
         conn.commit()
-        for table in ("bom_rows", "recommendation_result"):
+        for table in ("bom_rows", "recommendation_result", "triage_result"):
             n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             assert n == 0, f"{table} left {n} orphaned rows"
     finally:
@@ -175,6 +175,8 @@ def test_fk_supporting_indexes_are_declared():
     # columns, so the PK index already serves those two.
     pk_covered = {("bom_rows", ("batch_id",)),
                   ("recommendation_result",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("triage_result",
                    ("batch_id", "item_id", "stockroom_id"))}
     flat = FK_INDEX_DDL.replace("\n", " ")
     for _name, child, cols, parent, _pcols, _action in FOREIGN_KEYS:

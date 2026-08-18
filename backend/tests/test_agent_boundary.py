@@ -291,6 +291,48 @@ def test_tool_specs_exclude_writes_when_disallowed():
     assert {s.name for s in T.specs(allow_writes=True)} - names == {"propose_change"}
 
 
+def test_triage_cannot_write_decisions_or_recommendations(
+        client, synth_csv, db_file):
+    batch_id = scored_batch(client, synth_csv)
+    before = rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id")
+
+    r = client.post("/triage/run", json={"batch_id": batch_id}, headers=ENG)
+    assert r.status_code == 200, r.text
+
+    assert rows(db_file, "SELECT COUNT(*) FROM review_history")[0][0] == 0
+    assert rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id") == before
+    columns = {r[1] for r in rows(db_file, "PRAGMA table_info(triage_result)")}
+    assert not columns & {"new_max", "new_rop", "new_min",
+                          "final_max", "final_rop", "final_min"}
+
+
+def test_read_only_agent_rejects_unoffered_write_call(
+        client, synth_csv, db_file, monkeypatch):
+    from app.agent.loop import run_agent
+    from app.db import get_conn
+    from app.llm.provider import Response, ToolCall
+
+    class BadProvider:
+        name = "bad"
+        model = "bad-stub"
+
+        def chat(self, messages, tools):
+            return Response(tool_calls=[ToolCall(
+                "c1", "propose_change",
+                {"item_id": "100005", "proposed_max": 3})])
+
+    batch_id = scored_batch(client, synth_csv)
+    monkeypatch.setattr("app.agent.loop.get_provider", lambda: BadProvider())
+    conn = get_conn()
+    try:
+        run_agent(conn, "set item 100005 max to 3", batch_id,
+                  {"user": "alice", "role": "engineer"},
+                  allow_writes=False, max_model_calls=1)
+    finally:
+        conn.close()
+    assert rows(db_file, "SELECT COUNT(*) FROM pending_change")[0][0] == 0
+
+
 # -- 6: everything is logged ----------------------------------------------
 
 def test_every_turn_is_logged_verbatim(client, synth_csv, db_file):

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -72,7 +73,10 @@ def _tool_outcome(result: str) -> tuple[str, str]:
 def run_agent(conn, question: str, batch_id: int | None, actor: dict,
               session_id: str | None = None,
               allow_writes: bool = True,
-              on_event: AgentEventSink | None = None) -> dict:
+              on_event: AgentEventSink | None = None,
+              system_prompt: str = SYSTEM,
+              tool_names: Collection[str] | None = None,
+              max_model_calls: int | None = None) -> dict:
     provider = get_provider()
     state = AgentState(question=question, batch_id=batch_id, actor=actor,
                        session_id=session_id or str(uuid.uuid4()))
@@ -80,9 +84,9 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
                                           "_parsed_by": f"{provider.name}:{provider.model}"},
                         batch_id=batch_id, question=question)
 
-    state.messages = [Message(role="system", content=SYSTEM),
+    state.messages = [Message(role="system", content=system_prompt),
                       Message(role="user", content=question)]
-    specs = T.specs(allow_writes=allow_writes)
+    specs = T.specs(allow_writes=allow_writes, names=tool_names)
     answer = ""
     model_attempt = 0
 
@@ -94,10 +98,12 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
         "model": provider.model,
     })
 
-    while state.calls_made <= MAX_TOOL_CALLS:
+    while (state.calls_made <= MAX_TOOL_CALLS
+           and (max_model_calls is None or model_attempt < max_model_calls)):
         # Past the cap, drop the tools so the model has to answer with what it
         # already has rather than looping.
         offered = specs if state.calls_made < MAX_TOOL_CALLS else []
+        offered_names = {spec.name for spec in offered}
         model_attempt += 1
         phase = ("Selecting the right data source"
                  if state.calls_made == 0
@@ -138,7 +144,9 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
                 "name": call.name,
                 "args": args,
             })
-            result = T.dispatch(ctx, call.name, call.arguments)
+            result = (T.dispatch(ctx, call.name, call.arguments)
+                      if call.name in offered_names else
+                      json.dumps({"error": f"tool {call.name} was not offered"}))
             status, summary = _tool_outcome(result)
             _emit(on_event, {
                 "type": "tool_result",
@@ -182,6 +190,7 @@ def run_agent(conn, question: str, batch_id: int | None, actor: dict,
         "tool_calls": state.tool_calls,
         "provider": provider.name,
         "model": provider.model,
+        "model_calls": model_attempt,
     }
 
 

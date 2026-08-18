@@ -35,6 +35,12 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
+class TriageRunRequest(BaseModel):
+    batch_id: int = Field(ge=1)
+    llm_call_budget: int = Field(default=2000, ge=3, le=2000)
+    refresh: bool = False
+
+
 class ConfirmPendingRequest(BaseModel):
     """Turning a staged proposal into a real review decision.
 
@@ -75,6 +81,9 @@ class BulkReviewFilters(BaseModel):
     reason_code: str | None = None
     min_exposure: float | None = Field(default=None, ge=0)
     min_confidence: float | None = Field(default=None, ge=0, le=1)
+    triage_tier: Literal["clear_candidate", "review", "escalate"] | None = None
+    min_triage_confidence: float | None = Field(default=None, ge=0, le=1)
+    triage_preselect: bool = False
     exclude_high_risk: bool = True
 
 

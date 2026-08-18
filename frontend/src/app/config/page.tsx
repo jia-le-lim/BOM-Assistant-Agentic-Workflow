@@ -27,6 +27,12 @@ const AUTOCLEAR = [
   ["autoclear_high_value_usd", "High-value gate ($)", "A material change at/above this always reaches a human"],
 ] as const;
 
+const TRIAGE = [
+  ["triage_clear_min_confidence", "Clear-candidate confidence", "Minimum synthesis confidence before a row may be labelled clear candidate"],
+  ["triage_clear_precision_bar", "Required validation precision", "Backtest precision bar for enabling guarded assistance"],
+  ["triage_preselect_min_confidence", "Guarded preselection confidence", "Minimum confidence used by the human-confirmed bulk action"],
+] as const;
+
 export default function ConfigPage() {
   const { call } = useApi();
   const { role } = useSession();
@@ -40,13 +46,17 @@ export default function ConfigPage() {
   const [pattern, setPattern] = useState("");
   const [crit, setCrit] = useState("High");
   const [reliableEdit, setReliableEdit] = useState("");
+  const [triageEnabledEdit, setTriageEnabledEdit] = useState("");
 
   const load = useCallback(async () => {
     try { setCfg(await call<RuleConfig>("config/rules")); setErr(null); }
     catch (e) { setErr((e as Error).message); }
   }, [call]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void load(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [load]);
 
   async function save() {
     setBusy(true); setErr(null); setNote(null);
@@ -59,14 +69,18 @@ export default function ConfigPage() {
           (reliableEdit === "true") !== Boolean(cfg?.config.autoclear_reliable)) {
         updates.autoclear_reliable = reliableEdit === "true";
       }
+      if (triageEnabledEdit !== "" &&
+          (triageEnabledEdit === "true") !== Boolean(cfg?.config.triage_guarded_assist_enabled)) {
+        updates.triage_guarded_assist_enabled = triageEnabledEdit === "true";
+      }
       if (!Object.keys(updates).length) { setErr("No changes to apply."); return; }
       const r = await call<{ rule_version: string }>("config/rules", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rule_version: version, updates }),
       });
-      setNote(`Saved as ${r.rule_version}. Re-run the engine on a batch to apply it — ` +
+      setNote(`Saved as ${r.rule_version}. Re-run the engine or triage on a batch to apply it — ` +
               `existing results keep the version they were scored with.`);
-      setEdits({}); setReliableEdit(""); setVersion(""); await load();
+      setEdits({}); setReliableEdit(""); setTriageEnabledEdit(""); setVersion(""); await load();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -205,6 +219,59 @@ export default function ConfigPage() {
             </tbody>
           </table>
         </div>
+      </div>
+
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold mb-1">Advisory triage policy</h2>
+        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+          Triage ranks review work but never changes Min/ROP/Max. Guarded assistance only
+          preselects validated clear candidates; an engineer still confirms the bulk action.
+        </p>
+        <div className="scroll-x">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead>
+              <tr><th>Setting</th><th className="text-right">Active</th>
+                  <th className="text-right w-32">New value</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              {TRIAGE.map(([key, label, hint]) => (
+                <tr key={key}>
+                  <td>{label}</td>
+                  <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
+                  <td className="text-right">
+                    <input className="field w-28 tnum text-right" type="number"
+                           min={0} max={1} step="0.01" disabled={!can.configWrite(role)}
+                           value={edits[key] ?? ""}
+                           placeholder={String(cfg.config[key] ?? "")}
+                           onChange={(e) => setEdits({ ...edits, [key]: e.target.value })} />
+                  </td>
+                  <td className="text-xs" style={{ color: "var(--text-muted)" }}>{hint}</td>
+                </tr>
+              ))}
+              <tr>
+                <td>Guarded triage assistance</td>
+                <td className="text-right tnum">
+                  {cfg.config.triage_guarded_assist_enabled ? "on" : "off"}
+                </td>
+                <td className="text-right">
+                  <select className="field w-28" disabled={!can.configWrite(role)}
+                          value={triageEnabledEdit}
+                          onChange={(e) => setTriageEnabledEdit(e.target.value)}>
+                    <option value="">—</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </td>
+                <td className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  Enables human-confirmed bulk acceptance of qualifying clear candidates. Off by default.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
+          Saving uses the same new-version box above. Re-run triage to rebuild existing results.
+        </p>
       </div>
 
       <div className="card p-5">

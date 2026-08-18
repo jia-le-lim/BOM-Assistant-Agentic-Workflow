@@ -27,7 +27,10 @@ export default function BatchesPage() {
     } catch (e) { setErr((e as Error).message); setBatches([]); }
   }, [call]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void load(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [load]);
 
   async function upload(e: React.FormEvent) {
     e.preventDefault();

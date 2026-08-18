@@ -11,7 +11,7 @@ High-risk items and every override require senior approval before export
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
-from ..db import get_conn
+from ..db import active_config, get_conn
 from ..justifications import JUSTIFICATION_TEMPLATES
 from ..schemas import BulkReviewRequest, ConfirmPendingRequest, ReviewRequest
 from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
@@ -93,26 +93,42 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
         return recs, failures
 
     f = req.filters
-    where, params = ["batch_id=?"], [req.batch_id]
+    use_triage = bool(f.triage_tier or f.min_triage_confidence is not None
+                      or f.triage_preselect)
+    join = (" JOIN triage_result t ON t.batch_id=r.batch_id "
+            "AND t.item_id=r.item_id AND t.stockroom_id=r.stockroom_id"
+            if use_triage else "")
+    where, params = ["r.batch_id=?"], [req.batch_id]
     if f.risk_level:
-        where.append("risk_level=?"); params.append(f.risk_level)
+        where.append("r.risk_level=?"); params.append(f.risk_level)
     if f.action:
-        where.append("action=?"); params.append(f.action)
+        where.append("r.action=?"); params.append(f.action)
     if f.consumable:
-        where.append("consumable=?"); params.append(f.consumable)
+        where.append("r.consumable=?"); params.append(f.consumable)
     if f.route:
-        where.append("route=?"); params.append(f.route)
+        where.append("r.route=?"); params.append(f.route)
     if f.agreement:
-        where.append("agreement=?"); params.append(f.agreement)
+        where.append("r.agreement=?"); params.append(f.agreement)
     if f.reason_code:
-        where.append("reason_code LIKE ?"); params.append(f"%{f.reason_code}%")
+        where.append("r.reason_code LIKE ?"); params.append(f"%{f.reason_code}%")
     if f.min_exposure is not None:
-        where.append("exposure_usd>=?"); params.append(f.min_exposure)
+        where.append("r.exposure_usd>=?"); params.append(f.min_exposure)
     if f.min_confidence is not None:
-        where.append("confidence>=?"); params.append(f.min_confidence)
+        where.append("r.confidence>=?"); params.append(f.min_confidence)
+    if f.triage_tier:
+        where.append("t.triage_tier=?"); params.append(f.triage_tier)
+    if f.min_triage_confidence is not None:
+        where.append("t.confidence>=?"); params.append(f.min_triage_confidence)
+    if f.triage_preselect:
+        cfg = active_config(conn)
+        if not cfg.get("triage_guarded_assist_enabled", False):
+            raise HTTPException(409, "guarded triage preselection is disabled")
+        where.extend(("t.triage_tier='clear_candidate'", "t.confidence>=?"))
+        params.append(float(cfg.get("triage_preselect_min_confidence", 0.9)))
     if f.exclude_high_risk:
-        where.append("risk_level<>?"); params.append("High")
-    sql = "SELECT * FROM recommendation_result WHERE " + " AND ".join(where)
+        where.append("r.risk_level<>?"); params.append("High")
+    sql = ("SELECT r.* FROM recommendation_result r" + join + " WHERE "
+           + " AND ".join(where))
     return list(conn.execute(sql, params)), failures
 
 

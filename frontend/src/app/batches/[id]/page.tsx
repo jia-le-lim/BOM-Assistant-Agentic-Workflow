@@ -6,14 +6,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { fmtCompact, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
-  BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RunSummary, Status,
+  BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RuleConfig, RunSummary,
+  Status, TriagePage, TriageRunSummary,
 } from "@/lib/types";
 import {
   AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip,
   Spinner, StatTile, StatusChip,
 } from "@/components/ui";
 import { WorkflowPipeline } from "@/components/WorkflowPipeline";
-import { PriorityCallout, TriageLanes } from "@/components/TriageLanes";
+import { AgentTriage, PriorityCallout, TriageLanes } from "@/components/TriageLanes";
 
 const PAGE = 25;
 
@@ -32,9 +33,13 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
 
   const [summary, setSummary] = useState<BatchSummary | null>(null);
   const [page, setPage] = useState<RecommendationPage | null>(null);
+  const [triage, setTriage] = useState<TriagePage | null>(null);
+  const [ruleConfig, setRuleConfig] = useState<RuleConfig | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [triageBudget, setTriageBudget] = useState("2000");
+  const [triageRefresh, setTriageRefresh] = useState(false);
 
   // Initialize filter state from URL query parameters
   const [status, setStatus] = useState<Status | "">(
@@ -97,8 +102,20 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     } catch (e) { setErr((e as Error).message); setPage(null); }
   }, [call, batchId, status, risk, action, consumable, agreement, minExp, offset]);
 
+  const loadTriage = useCallback(async () => {
+    if (!canReview) { setTriage(null); return; }
+    try { setTriage(await call<TriagePage>(`triage/${batchId}`)); }
+    catch (e) { setErr((e as Error).message); }
+  }, [call, batchId, canReview]);
+
+  const loadRuleConfig = useCallback(async () => {
+    try { setRuleConfig(await call<RuleConfig>("config/rules")); }
+    catch (e) { setErr((e as Error).message); }
+  }, [call]);
+
   // Create wrapper functions for filter setters that update both state and URL
-  const handleStatusChange = useCallback((v: Status | "") => {
+  const handleStatusChange = useCallback((value: string) => {
+    const v = value as Status | "";
     setStatus(v);
     setOffset(0);
     setSelected(new Set());
@@ -145,16 +162,30 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     updateUrl(status, risk, action, consumable, agreement, minExp, v);
   }, [updateUrl, status, risk, action, consumable, agreement, minExp]);
 
-  useEffect(() => { loadSummary(); }, [loadSummary]);
-  useEffect(() => { loadPage(); }, [loadPage]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void loadSummary(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadSummary]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void loadPage(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadPage]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void loadTriage(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadTriage]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void loadRuleConfig(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadRuleConfig]);
 
   const isScored = summary?.batch.status === "scored";
   const statuses = (summary?.statuses ?? {}) as Record<Status, number>;
   const needsHuman = (statuses.pending_review ?? 0) + (statuses.awaiting_senior ?? 0);
 
   const refresh = useCallback(async () => {
-    await Promise.all([loadSummary(), loadPage()]);
-  }, [loadSummary, loadPage]);
+    await Promise.all([loadSummary(), loadPage(), loadTriage()]);
+  }, [loadSummary, loadPage, loadTriage]);
 
   async function runEngine() {
     setBusy(true); setErr(null); setNote(null);
@@ -164,6 +195,25 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
               `${s.review_required_Y.toLocaleString()} need review, ` +
               `${s.review_required_N.toLocaleString()} auto-cleared.`);
       await refresh();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function runTriage() {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      const s = await call<TriageRunSummary>("triage/run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch_id: batchId,
+          llm_call_budget: Number(triageBudget),
+          refresh: triageRefresh,
+        }),
+      });
+      setNote(`Triaged ${s.triaged.toLocaleString()} rows with ${s.llm_calls_used.toLocaleString()} ` +
+              `model calls${s.budget_exhausted ? "; budget reached, run again to resume" : ""}.`);
+      setTriageRefresh(false);
+      await loadTriage();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -188,6 +238,24 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
         }),
       });
       setNote(`${cons} lane — ${summarise(r)}.`);
+      setSelected(new Set());
+      await refresh();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function acceptGuardedTriage() {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      const r = await call<BulkReviewResult>("review/bulk", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch_id: batchId, decision: "accept",
+          justification: "bulk: human-confirmed guarded triage candidates",
+          filters: { triage_preselect: true },
+        }),
+      });
+      setNote(`Guarded triage selection — ${summarise(r)}.`);
       setSelected(new Set());
       await refresh();
     } catch (e) { setErr((e as Error).message); }
@@ -321,6 +389,39 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           </div>
 
           <PriorityCallout summary={summary} />
+
+          {canReview && (
+            <div className="card p-5">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="mr-auto">
+                  <h2 className="text-sm font-semibold">Run advisory triage</h2>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    Resumes missing rows by default. The model call budget is capped at 2,000 per run.
+                  </p>
+                </div>
+                <label className="flex flex-col gap-1 text-xs">
+                  <span style={{ color: "var(--text-secondary)" }}>Model call budget</span>
+                  <input className="field w-28 tnum" type="number" min={3} max={2000}
+                         value={triageBudget} onChange={(e) => setTriageBudget(e.target.value)} />
+                </label>
+                <label className="flex items-center gap-2 text-xs pb-2">
+                  <input type="checkbox" checked={triageRefresh}
+                         onChange={(e) => setTriageRefresh(e.target.checked)} />
+                  Rebuild existing results
+                </label>
+                <button className="btn btn-primary" onClick={runTriage}
+                        disabled={busy || !triageBudget}>
+                  {busy ? "Working…" : triage?.total ? "Resume triage" : "Run triage"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canReview && triage && (
+            <AgentTriage batchId={batchId} triage={triage} busy={busy}
+                         guardedAssist={Boolean(ruleConfig?.config.triage_guarded_assist_enabled)}
+                         onGuardedAccept={acceptGuardedTriage} />
+          )}
 
           <div className="grid gap-5 lg:grid-cols-2">
             <TriageLanes summary={summary} busy={busy} canReview={canReview}

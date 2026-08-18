@@ -29,6 +29,7 @@ verified end to end.
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 from .config import (ENGINE_DIR, database_url, db_path, is_postgres,
@@ -70,6 +71,10 @@ FOREIGN_KEYS = [
      "conversation_turn", ("turn_id",), "SET NULL"),
     ("model_prediction_log_batch_fk", "model_prediction_log", ("batch_id",),
      "batches", ("batch_id",), "CASCADE"),
+    ("triage_result_recommendation_fk", "triage_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
 ]
 
 # Postgres does not index the referencing side of a foreign key, so every
@@ -260,9 +265,35 @@ CREATE TABLE IF NOT EXISTS model_prediction_log (
   predicted_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Advisory explanations only. Human decisions remain in review_history.
+CREATE TABLE IF NOT EXISTS triage_result (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  triage_tier TEXT NOT NULL CHECK (
+    triage_tier IN ('clear_candidate', 'review', 'escalate')),
+  priority_score REAL NOT NULL DEFAULT 0,
+  rationale TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  focus_question TEXT,
+  history_narrative TEXT,
+  demand_narrative TEXT,
+  procurement_narrative TEXT,
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  provider TEXT,
+  model TEXT,
+  triaged_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
+CREATE INDEX IF NOT EXISTS ix_triage_result_tier
+  ON triage_result(batch_id, triage_tier, priority_score);
 """ + FK_INDEX_DDL
 
 # Postgres equivalent. Differences are confined to: IDENTITY vs AUTOINCREMENT,
@@ -413,9 +444,35 @@ CREATE TABLE IF NOT EXISTS model_prediction_log (
   predicted_at TEXT DEFAULT {PG_NOW}
 );
 
+-- Advisory explanations only. Human decisions remain in review_history.
+CREATE TABLE IF NOT EXISTS triage_result (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  triage_tier TEXT NOT NULL CHECK (
+    triage_tier IN ('clear_candidate', 'review', 'escalate')),
+  priority_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+  rationale TEXT NOT NULL,
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+  focus_question TEXT,
+  history_narrative TEXT,
+  demand_narrative TEXT,
+  procurement_narrative TEXT,
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  provider TEXT,
+  model TEXT,
+  triaged_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
+CREATE INDEX IF NOT EXISTS ix_triage_result_tier
+  ON triage_result(batch_id, triage_tier, priority_score);
 """ + FK_INDEX_DDL + PG_ONLY_INDEX_DDL
 
 # Tables whose PK is a generated identity -- needed to translate lastrowid.
@@ -468,22 +525,38 @@ def _translate_fragment(frag: str) -> str:
 class _Result:
     """Uniform cursor surface over sqlite3.Cursor and psycopg.Cursor."""
 
-    def __init__(self, cur, lastrowid=None):
+    def __init__(self, cur=None, lastrowid=None, rows=None):
         self._cur = cur
         self._lastrowid = lastrowid
+        self._rows = rows
+        self._index = 0
 
     def fetchone(self):
+        if self._rows is not None:
+            if self._index >= len(self._rows):
+                return None
+            row = self._rows[self._index]
+            self._index += 1
+            return row
         return self._cur.fetchone()
 
     def fetchall(self):
+        if self._rows is not None:
+            rows = self._rows[self._index:]
+            self._index = len(self._rows)
+            return rows
         return self._cur.fetchall()
 
     def __iter__(self):
+        if self._rows is not None:
+            rows = self._rows[self._index:]
+            self._index = len(self._rows)
+            return iter(rows)
         return iter(self._cur)
 
     @property
     def lastrowid(self):
-        if self._lastrowid is not None:
+        if self._cur is None or self._lastrowid is not None:
             return self._lastrowid
         return self._cur.lastrowid
 
@@ -494,6 +567,7 @@ class Conn:
     def __init__(self, raw, is_postgres: bool):
         self._raw = raw
         self.is_postgres = is_postgres
+        self._lock = threading.RLock()
 
     def execute(self, sql: str, params=()) -> _Result:
         sql = _translate(sql)
@@ -501,7 +575,10 @@ class Conn:
             cur = self._raw.cursor()
             cur.execute(sql, tuple(params))
             return _Result(cur)
-        return _Result(self._raw.execute(sql, params))
+        with self._lock:
+            cur = self._raw.execute(sql, params)
+            rows = cur.fetchall() if cur.description else []
+            return _Result(lastrowid=cur.lastrowid, rows=rows)
 
     def executemany(self, sql: str, seq) -> None:
         sql = _translate(sql)
@@ -509,7 +586,8 @@ class Conn:
             cur = self._raw.cursor()
             cur.executemany(sql, [tuple(r) for r in seq])
             return
-        self._raw.executemany(sql, seq)
+        with self._lock:
+            self._raw.executemany(sql, seq)
 
     def insert_returning(self, sql: str, params, table: str) -> int:
         """INSERT that yields the generated primary key on either dialect."""
@@ -518,16 +596,20 @@ class Conn:
             cur = self._raw.cursor()
             cur.execute(_translate(sql) + f" RETURNING {pk}", tuple(params))
             return cur.fetchone()[pk]
-        return self._raw.execute(sql, params).lastrowid
+        with self._lock:
+            return self._raw.execute(sql, params).lastrowid
 
     def commit(self) -> None:
-        self._raw.commit()
+        with self._lock:
+            self._raw.commit()
 
     def rollback(self) -> None:
-        self._raw.rollback()
+        with self._lock:
+            self._raw.rollback()
 
     def close(self) -> None:
-        self._raw.close()
+        with self._lock:
+            self._raw.close()
 
 
 def get_conn() -> Conn:
@@ -545,7 +627,10 @@ def get_conn() -> Conn:
                               autocommit=False)
         return Conn(raw, True)
 
-    raw = sqlite3.connect(db_path())
+    # LangGraph fan-out runs specialist nodes in worker threads. Those nodes
+    # only read in parallel and join before persist, so one serialized SQLite
+    # connection is sufficient; the default same-thread guard is not.
+    raw = sqlite3.connect(db_path(), check_same_thread=False)
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA foreign_keys = ON")
     return Conn(raw, False)
@@ -596,14 +681,16 @@ def _ensure_columns(conn) -> None:
     """Additive migration for DBs created before a column was added.
 
     CREATE TABLE IF NOT EXISTS never alters an existing table, so a dev/prod DB
-    that predates route/consumable/agreement on recommendation_result would 500
-    on the next score. These columns are new triage signals; default them empty.
+    that predates route/consumable/agreement or Phase-2 procurement would 500
+    on the next request. New columns are nullable/default-empty.
     """
     wanted = ("route", "consumable", "agreement")
     if is_postgres() or use_rest():
         for col in wanted:
             conn.execute("ALTER TABLE recommendation_result "
                          f"ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE triage_result ADD COLUMN IF NOT EXISTS "
+                     "procurement_narrative TEXT")
         return
     existing = {r["name"] for r in conn.execute(
         "PRAGMA table_info(recommendation_result)")}
@@ -611,6 +698,10 @@ def _ensure_columns(conn) -> None:
         if col not in existing:
             conn.execute("ALTER TABLE recommendation_result "
                          f"ADD COLUMN {col} TEXT DEFAULT ''")
+    triage_cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(triage_result)")}
+    if "procurement_narrative" not in triage_cols:
+        conn.execute("ALTER TABLE triage_result ADD COLUMN procurement_narrative TEXT")
 
 
 def init_db() -> None:

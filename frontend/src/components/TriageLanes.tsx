@@ -9,8 +9,10 @@
  * turns thousands of individual clicks into a handful of decisions.
  */
 
+import Link from "next/link";
 import { fmtCompact } from "@/lib/api";
-import type { BatchSummary } from "@/lib/types";
+import type { BatchSummary, TriagePage, TriageTier } from "@/lib/types";
+import { TriageChip } from "@/components/ui";
 
 const LANES: { key: string; label: string; blurb: string }[] = [
   { key: "constant", label: "Constant consumers", blurb: "steady demand — priority review" },
@@ -63,6 +65,77 @@ export function TriageLanes({ summary, busy, canReview, onAcceptLane }: {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+export function AgentTriage({ batchId, triage, busy, guardedAssist, onGuardedAccept }: {
+  batchId: number;
+  triage: TriagePage;
+  busy: boolean;
+  guardedAssist: boolean;
+  onGuardedAccept: () => void;
+}) {
+  const counts = triage.items.reduce<Record<TriageTier, number>>(
+    (out, item) => ({ ...out, [item.triage_tier]: out[item.triage_tier] + 1 }),
+    { clear_candidate: 0, review: 0, escalate: 0 },
+  );
+
+  return (
+    <div className="card p-5 lg:col-span-2">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-sm font-semibold">Advisory triage</h2>
+          <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+            Grounded specialist summaries rank the human queue. They never write Min/ROP/Max.
+          </p>
+        </div>
+        <button className="btn text-xs" disabled={busy || !guardedAssist || !counts.clear_candidate}
+                onClick={onGuardedAccept}
+                title={guardedAssist
+                  ? "Human-confirm the configured high-confidence clear candidates"
+                  : "Enable guarded triage assist in Rules & criticality first"}>
+          Accept guarded candidates ({counts.clear_candidate})
+        </button>
+      </div>
+
+      <div className="grid gap-3 grid-cols-3 mb-4">
+        {(["escalate", "review", "clear_candidate"] as TriageTier[]).map((tier) => (
+          <div key={tier} className="p-3 rounded" style={{ background: "var(--seq-soft)" }}>
+            <TriageChip tier={tier} />
+            <div className="text-xl tnum mt-1">{counts[tier].toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+
+      {triage.items.length === 0 ? (
+        <p className="text-sm py-2" style={{ color: "var(--text-muted)" }}>
+          No persisted triage results yet. Run triage to build the ranked queue.
+        </p>
+      ) : (
+        <div className="scroll-x">
+          <table className="w-full text-sm min-w-[760px]">
+            <thead><tr><th>Item</th><th>Tier</th><th className="text-right">Priority</th>
+              <th className="text-right">Confidence</th><th>Focus question</th><th></th></tr></thead>
+            <tbody>
+              {triage.items.map((item) => (
+                <tr key={`${item.item_id}::${item.stockroom_id}`}>
+                  <td className="font-mono text-xs">{item.item_id}</td>
+                  <td><TriageChip tier={item.triage_tier} /></td>
+                  <td className="text-right tnum">{item.priority_score.toFixed(0)}</td>
+                  <td className="text-right tnum">{Math.round(item.confidence * 100)}%</td>
+                  <td className="max-w-[360px] text-xs">{item.focus_question || item.rationale}</td>
+                  <td className="text-right">
+                    <Link className="btn text-xs" href={`/batches/${batchId}/items/${item.item_id}`}>
+                      Open
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

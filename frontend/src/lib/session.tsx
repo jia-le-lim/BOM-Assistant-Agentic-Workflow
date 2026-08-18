@@ -29,13 +29,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [role, setRole] = useState<Role>("engineer");
 
   useEffect(() => {
-    const s = localStorage.getItem("bom-session");
-    if (s) {
-      try {
-        const p = JSON.parse(s);
-        if (p.user && p.role) { setUser(p.user); setRole(p.role); }
-      } catch { /* ignore malformed */ }
-    }
+    const frame = window.requestAnimationFrame(() => {
+      const s = localStorage.getItem("bom-session");
+      if (s) {
+        try {
+          const p = JSON.parse(s);
+          if (p.user && p.role) { setUser(p.user); setRole(p.role); }
+        } catch { /* ignore malformed */ }
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   const setIdentity = useCallback((u: string, r: Role) => {
