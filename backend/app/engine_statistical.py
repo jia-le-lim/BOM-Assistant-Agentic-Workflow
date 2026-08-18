@@ -28,24 +28,18 @@ MODEL_VERSION = "stat-v1"
 WINDOWS = [5, 30, 90, 180, 365, 547]
 CONS = {w: f"last_{w}_day_cnsmptn_qty" for w in WINDOWS}
 
-# Defaults (overridable via the active rule_config -- see _cfg()).
-DEFAULTS = {
-    "stat_review_period_days": 30,
-    "stat_default_lead_time": 30,
-    "stat_phi_active": 1.5,
-    "stat_phi_dying": 3.0,
-    "stat_keep_alive_floor": 1,
-    "stat_high_volume_review_per_day": 0.1,   # mu_day above this -> human review
-    "stat_regular_freq": 6,                    # frequencymonthswithusage for Poisson
-    "stat_regular_cv2": 0.5,
-    "stat_big_change_frac": 0.5,               # |new-cur| beyond this share -> review
-}
+# Sizing constants (PRD v3.2 5.x).
+T_REVIEW = 30                  # review / protection period, days
+DEFAULT_LT = 30                # fallback lead time when the row has none
+PHI_ACTIVE = 1.5               # conservative variance-to-mean floor, active parts
+PHI_DYING = 3.0                # ...and for parts whose demand has ceased
+KEEP_ALIVE = 1                 # insurance stock for critical dormant parts
+HIGH_VOLUME_PER_DAY = 0.1      # mu_day above this -> human review
+REGULAR_FREQ = 6               # frequencymonthswithusage >= this -> Poisson candidate
+REGULAR_CV2 = 0.5              # ...and pseudo_cv2 below this
+BIG_CHANGE_FRAC = 0.5          # |new-cur| beyond this share of current -> review
 SL_BY_CRIT = {"h": 0.99, "m": 0.95, "l": 0.90, "d": 0.90}
 SL_DEFAULT = 0.95
-
-
-def _cfg(cfg: dict, key: str):
-    return cfg.get(key, DEFAULTS[key]) if cfg else DEFAULTS[key]
 
 
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
@@ -95,28 +89,15 @@ def _quantile(mean: float, sl: float, phi: float, use_poisson: bool) -> int:
 
 
 def _action(new_max: int, cur_max: float) -> str:
-    if pd.isna(cur_max):
+    if pd.isna(cur_max) or new_max == cur_max:
         return "Maintain"
-    if new_max > cur_max:
-        return "Increase"
-    if new_max < cur_max:
-        return "Decrease"
-    return "Maintain"
+    return "Increase" if new_max > cur_max else "Decrease"
 
 
 def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     """Size Min/ROP/Max for every row; returns the engine-standard schema."""
     cfg = cfg or {}
     rule_version = str(cfg.get("rule_version", "stat"))
-    T = int(_cfg(cfg, "stat_review_period_days"))
-    default_lt = float(_cfg(cfg, "stat_default_lead_time"))
-    phi_active = float(_cfg(cfg, "stat_phi_active"))
-    phi_dying = float(_cfg(cfg, "stat_phi_dying"))
-    keep_alive = int(_cfg(cfg, "stat_keep_alive_floor"))
-    hv_thresh = float(_cfg(cfg, "stat_high_volume_review_per_day"))
-    reg_freq = float(_cfg(cfg, "stat_regular_freq"))
-    reg_cv2 = float(_cfg(cfg, "stat_regular_cv2"))
-    big_frac = float(_cfg(cfg, "stat_big_change_frac"))
 
     win = {w: _num(df, CONS[w]) for w in WINDOWS}
     lt = _num(df, "contractual_lead_time")
@@ -135,7 +116,7 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
         mu = _mu_day(w)
         cv2 = _pseudo_cv2(w)
         criticality = crit.iloc[i]
-        L = lt.iloc[i] if pd.notna(lt.iloc[i]) and lt.iloc[i] > 0 else default_lt
+        L = lt.iloc[i] if pd.notna(lt.iloc[i]) and lt.iloc[i] > 0 else DEFAULT_LT
         moq = int(moq_s.iloc[i]) if pd.notna(moq_s.iloc[i]) and moq_s.iloc[i] >= 1 else 1
         sl = _sl(criticality)
         cur = cur_max.iloc[i]
@@ -167,9 +148,9 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
 
         elif route == "dormant":
             if _is_critical(criticality):
-                new_min = keep_alive
-                new_rop = keep_alive
-                new_max = keep_alive + moq
+                new_min = KEEP_ALIVE
+                new_rop = KEEP_ALIVE
+                new_max = KEEP_ALIVE + moq
                 review, dist, conf, risk = "Y", "insurance", 0.6, "Medium"
                 reasons.append("DORMANT_CRITICAL_KEEPALIVE")
             else:
@@ -179,14 +160,14 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
 
         else:  # active / dying -> rate-based sizing
             mu_L = mu * L
-            mu_LT = mu * (L + T)
-            regular = pd.notna(freq.iloc[i]) and freq.iloc[i] >= reg_freq and cv2 < reg_cv2
+            mu_LT = mu * (L + T_REVIEW)
+            regular = pd.notna(freq.iloc[i]) and freq.iloc[i] >= REGULAR_FREQ and cv2 < REGULAR_CV2
             if regular:
                 use_poisson, phi = True, 1.0
                 dist = "poisson"
             else:
                 use_poisson = False
-                phi = max(phi_dying if route == "dying" else phi_active, 1.0 + cv2)
+                phi = max(PHI_DYING if route == "dying" else PHI_ACTIVE, 1.0 + cv2)
                 dist = "nbinom"
             new_rop = _quantile(mu_L, sl, phi, use_poisson)
             new_max = _quantile(mu_LT, sl, phi, use_poisson)
@@ -203,10 +184,10 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
             else:                                   # constant consumer
                 reasons.append("CONSTANT_CONSUMER")
                 conf, risk = 0.9, "Low"
-                if mu > hv_thresh:                  # improvement 1: high-volume review band
+                if mu > HIGH_VOLUME_PER_DAY:        # high-volume review band
                     reasons.append("HIGH_VOLUME_REVIEW")
                     review, conf, risk = "Y", 0.3, "High"
-                elif pd.notna(cur) and abs(new_max - cur) > max(1.0, big_frac * cur):
+                elif pd.notna(cur) and abs(new_max - cur) > max(1.0, BIG_CHANGE_FRAC * cur):
                     reasons.append("BIG_CHANGE")
                     review = "Y"
 

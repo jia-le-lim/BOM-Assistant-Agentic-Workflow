@@ -21,18 +21,10 @@ sys.path.insert(0, str(ENGINE_DIR))
 import engine  # noqa: E402  (analysis/engine/engine.py)
 
 
-def _select_engine(cfg: dict):
-    """Statistical sizing engine by default; legacy rule engine when opted out.
-
-    BOM_ENGINE env (rules|statistical) wins when set -- used to pin the workflow
-    test-suite to the rule engine it was written against; otherwise the active
-    config's use_statistical_engine flag decides (default True)."""
-    mode = os.environ.get("BOM_ENGINE", "").strip().lower()
-    if mode == "rules":
-        return engine
-    if mode in ("statistical", "stat"):
-        return engine_statistical
-    return engine_statistical if cfg.get("use_statistical_engine", True) else engine
+def _select_engine():
+    """Statistical sizing engine, unless BOM_ENGINE=rules pins the legacy one
+    (the workflow test-suite was written against the rule engine)."""
+    return engine if os.environ.get("BOM_ENGINE", "").strip().lower() == "rules" else engine_statistical
 
 
 def load_batch_df(conn: Conn, batch_id: int) -> pd.DataFrame:
@@ -53,7 +45,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     cfg_hash = hashlib.sha256(
         json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
 
-    res = _select_engine(cfg).run(df, cfg)
+    res = _select_engine().run(df, cfg)
 
     stk = df.get("stockroom_id", pd.Series("", index=df.index)).astype(str).str.strip()
 

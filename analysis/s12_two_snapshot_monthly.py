@@ -47,7 +47,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common import OUT, to_num
+from common import OUT, find_header_row, find_tag_col, norm_cols, to_num
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "BOM table"
@@ -66,21 +66,10 @@ WIN_MONTHS = {30: 1, 90: 3, 180: 6, 365: 12, 547: 18}
 WINDOWS = sorted(WIN_MONTHS)                       # [30, 90, 180, 365, 547]
 CONS_COLS = {w: f"last_{w}_day_cnsmptn_qty" for w in WINDOWS}
 
-# Non-overlapping buckets: (window, previous-window-or-None, offset range back
-# from the anchor month). offsets are whole months; e.g. last_90-last_30 -> the
-# 2 months immediately before the anchor month.
-def _buckets() -> list[tuple[int, int | None, range]]:
-    out: list[tuple[int, int | None, range]] = []
-    prev = None
-    prev_k = 0
-    for w in WINDOWS:
-        k = WIN_MONTHS[w]
-        out.append((w, prev, range(prev_k, k)))
-        prev, prev_k = w, k
-    return out
-
-
-BUCKETS = _buckets()
+# Non-overlapping buckets: (window, previous-window-or-None, offsets in whole
+# months back from the anchor). e.g. last_90-last_30 -> the 2 months before it.
+BUCKETS = [(30, None, range(0, 1)), (90, 30, range(1, 3)), (180, 90, range(3, 6)),
+           (365, 180, range(6, 12)), (547, 365, range(12, 18))]
 
 # Static (non-consumption) attributes carried into the training set.
 ID_COLS = ["item_desc", "machine_type", "replenishment_policy",
@@ -101,49 +90,20 @@ def _ym(month_index: int) -> str:
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
-def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    return df
-
-
-def _find_header_row(path: Path, sheet: str, scan: int = 20) -> int:
-    probe = pd.read_excel(path, sheet_name=sheet, header=None, nrows=scan, dtype=str)
-    for i in range(len(probe)):
-        cells = [str(c).strip().lower() for c in probe.iloc[i].values]
-        if "item_id" in cells:
-            return i
-    return 0
-
-
-def _find_tag_col(df: pd.DataFrame) -> str:
-    """Locate the multi-tag module column, tolerating naming drift across months."""
-    for cand in ("new_modulle", "new_module", "module_tags", "modules"):
-        if cand in df.columns:
-            return cand
-    # Fall back: any column whose values look like a 'Module-*' tag list.
-    for c in df.columns:
-        if not hasattr(df[c], "str"):
-            continue
-        sample = df[c].dropna().astype(str).head(200)
-        if len(sample) and (sample.str.contains("module-", case=False)).mean() > 0.3:
-            return c
-    raise ValueError("no multi-tag module column (e.g. 'new_modulle') found")
-
-
 def load_snapshot(name: str, year: int, month: int, sheet: str | None) -> pd.DataFrame:
     """Load one snapshot, filter to TCB/Epoxy tags, collapse stockrooms -> item."""
     path = SRC / name
     if sheet is None:
         raw = pd.read_csv(path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
     else:
-        hdr = _find_header_row(path, sheet)
+        hdr = find_header_row(path, sheet)
         raw = pd.read_excel(path, sheet_name=sheet, header=hdr, dtype=str)
-    raw = _norm_cols(raw)
+    raw = norm_cols(raw)
     for c in raw.columns:
         if hasattr(raw[c], "str"):
             raw[c] = raw[c].str.strip()
 
-    tag_col = _find_tag_col(raw)
+    tag_col = find_tag_col(raw)
     keep = raw[raw[tag_col].fillna("").str.contains(TAG_PATTERN)].copy()
 
     for w in WINDOWS:

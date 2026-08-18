@@ -52,8 +52,6 @@ def _read_table(content: bytes, filename: str) -> pd.DataFrame:
                     break
             df = pd.read_excel(io.BytesIO(content), header=hdr, dtype=str)
             return df.fillna("")
-        except IngestionError:
-            raise
         except Exception as e:  # noqa: BLE001 - surface as 400, not 500
             raise IngestionError(f"Could not parse Excel: {e}") from e
     try:

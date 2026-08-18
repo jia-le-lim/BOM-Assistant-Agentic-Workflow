@@ -103,3 +103,32 @@ def blank(s: pd.Series) -> pd.Series:
 
 def pct(n, d) -> str:
     return "n/a" if not d else f"{100.0 * n / d:.1f}%"
+
+
+# --- multi-snapshot loading (BOM review workbooks drift in shape) ------------
+def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+
+def find_header_row(path: Path, sheet: str, scan: int = 20) -> int:
+    """Workbooks carry banner rows above the header; find the item_id row."""
+    probe = pd.read_excel(path, sheet_name=sheet, header=None, nrows=scan, dtype=str)
+    for i in range(len(probe)):
+        if "item_id" in [str(c).strip().lower() for c in probe.iloc[i].values]:
+            return i
+    return 0
+
+
+def find_tag_col(df: pd.DataFrame) -> str:
+    """Locate the multi-tag module column, tolerating naming drift across months."""
+    for cand in ("new_modulle", "new_module", "module_tags", "modules"):
+        if cand in df.columns:
+            return cand
+    for c in df.columns:
+        if not hasattr(df[c], "str"):
+            continue
+        sample = df[c].dropna().astype(str).head(200)
+        if len(sample) and (sample.str.contains("module-", case=False)).mean() > 0.3:
+            return c
+    raise ValueError("no multi-tag module column (e.g. 'new_modulle') found")
