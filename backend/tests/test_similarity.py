@@ -664,3 +664,22 @@ def test_triage_still_runs_without_similarity(client, synth_csv):
     r = client.post("/triage/run", json={"batch_id": batch_id}, headers=ENG)
     assert r.status_code == 200, r.text
     assert r.json()["triaged"] > 0
+
+
+def test_neighbours_carry_the_peer_description(client, synth_csv, db_file):
+    """The engineer identifies a peer by what it IS, not by its item number."""
+    first = scored_batch(client, synth_csv, label="JAN")
+    review_everything(client, first)
+    second = scored_batch(client, synth_csv, label="FEB")
+    client.post("/similarity/run", json={"batch_id": second}, headers=ENG)
+
+    item_id = rows(db_file, "SELECT item_id FROM similarity_neighbour "
+                            "WHERE batch_id=? LIMIT 1", (second,))[0][0]
+    got = client.get(f"/similarity/{second}/{item_id}", headers=ENG).json()
+    assert got["neighbours"], "no neighbours to check"
+    for n in got["neighbours"]:
+        want = json.loads(rows(db_file, "SELECT payload FROM bom_rows "
+                                        "WHERE batch_id=? AND item_id=? LIMIT 1",
+                               (n["neighbour_batch_id"],
+                                n["neighbour_item_id"]))[0][0])["item_desc"]
+        assert n["neighbour_item_desc"] == want

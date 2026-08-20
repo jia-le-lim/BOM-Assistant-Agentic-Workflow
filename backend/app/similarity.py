@@ -600,3 +600,23 @@ def _summarise(target: dict, per_feature: np.ndarray, distance: np.ndarray,
         for rank, (idx, peer) in enumerate(zip(close, picked), start=1)
     ]
     return result, neighbour_rows
+
+
+def attach_neighbour_desc(conn: Conn, neighbours: list[dict]) -> list[dict]:
+    """Add neighbour_item_desc from the peer's OWN frozen bom_rows payload.
+
+    Read-time, not stored: item_desc already lives in bom_rows and copying it
+    into similarity_neighbour would need a migration plus a re-run for every
+    row already scored. Keyed on (batch_id, item_id) only -- the same item in
+    two stockrooms carries the same description.
+    """
+    cache: dict[tuple, str | None] = {}
+    for n in neighbours:
+        key = (n["neighbour_batch_id"], n["neighbour_item_id"])
+        if key not in cache:
+            row = conn.execute(
+                "SELECT payload FROM bom_rows WHERE batch_id=? AND item_id=? "
+                "LIMIT 1", key).fetchone()
+            cache[key] = json.loads(row["payload"]).get("item_desc") if row else None
+        n["neighbour_item_desc"] = cache[key]
+    return neighbours

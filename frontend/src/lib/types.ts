@@ -180,6 +180,8 @@ export interface TriageRunSummary {
 export interface SimilarityNeighbour {
   neighbour_rank: number;
   neighbour_item_id: string;
+  /** From the peer's own frozen BOM row; null if that row is gone. */
+  neighbour_item_desc: string | null;
   neighbour_batch_id: number;
   distance: number;
   similarity_reasons: string;

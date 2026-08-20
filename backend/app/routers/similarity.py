@@ -10,7 +10,7 @@ from ..audit import audit
 from ..db import get_conn
 from ..schemas import SimilarityRunRequest
 from ..security import REVIEW_ROLES, require_role
-from ..similarity import run_similarity
+from ..similarity import attach_neighbour_desc, run_similarity
 
 router = APIRouter()
 
@@ -65,10 +65,10 @@ def get_similarity(batch_id: int, item_id: str, stockroom_id: str | None = None,
         if len(rows) > 1:
             raise HTTPException(409, "item is present in more than one stockroom")
         out = dict(rows[0])
-        out["neighbours"] = [dict(r) for r in conn.execute(
+        out["neighbours"] = attach_neighbour_desc(conn, [dict(r) for r in conn.execute(
             "SELECT * FROM similarity_neighbour WHERE batch_id=? AND item_id=? "
             "AND stockroom_id=? ORDER BY neighbour_rank",
-            (batch_id, item_id, out["stockroom_id"]))]
+            (batch_id, item_id, out["stockroom_id"]))])
         return out
     finally:
         conn.close()

@@ -535,7 +535,12 @@ export default function ItemPage({ params }: {
                     <tbody>
                       {similar.neighbours.slice(0, 5).map((n) => (
                         <tr key={n.neighbour_rank}>
-                          <td className="font-mono text-xs">{n.neighbour_item_id}</td>
+                          <td>
+                            <div className="font-mono text-xs">{n.neighbour_item_id}</div>
+                            <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                              {n.neighbour_item_desc || "—"}
+                            </div>
+                          </td>
                           <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
                             {n.similarity_reasons || "—"}
                           </td>
