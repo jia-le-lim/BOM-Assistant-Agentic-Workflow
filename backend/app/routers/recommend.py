@@ -67,9 +67,13 @@ def batch_summary(batch_id: int, actor: dict = Depends(any_role())):
             if st in ("pending_review", "awaiting_senior"):
                 exposure_pending += exp
             # The bulk-clear candidate set: engine confident, not high-risk, and
-            # not diverging from the engineer's own benchmark -> safe to accept.
+            # a STRONG benchmark actually agreed. "ag != diverge" used to stand
+            # in for that, but it also passes rows with no benchmark at all --
+            # inert on a reviewed month, wide open on a brand-new one.
+            src = r["agreement_source"] or ""
             if (st == "pending_review" and r["risk_level"] != "High"
-                    and (r["confidence"] or 0) >= 0.8 and ag != "diverge"):
+                    and (r["confidence"] or 0) >= 0.8 and ag == "match"
+                    and src in ("factory", "prior_review")):
                 bulk_acceptable += 1
 
         # Exposure Pareto: how few rows carry the money. Working the queue in

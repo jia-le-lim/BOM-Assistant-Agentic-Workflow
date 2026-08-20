@@ -9,7 +9,9 @@ import io
 
 import pandas as pd
 
-from conftest import ENG, make_row, rows_to_csv, upload
+from conftest import ENG, SENIOR, make_row, rows_to_csv, upload
+
+from app.engine_statistical import _drift_ok
 
 WINS = (5, 30, 90, 180, 365, 547)
 
@@ -119,6 +121,116 @@ def test_benchmark_never_changes_sizing():
     a = _run([_row(**base)]).iloc[0]
     b = _run([_row(factory_recommended_new_max=7, factory_recommended_new_rop=4,
                    factory_recommended_new_min=1, **base)]).iloc[0]
+    for c in ("factory_recommended_new_max", "factory_recommended_new_rop",
+              "factory_recommended_new_min"):
+        assert a[c] == b[c]
+
+
+# --- benchmark ladder: grading a month nobody has reviewed yet -------------
+# factory_recommended_new_* only exists on a COMPLETED cycle. Without a fallback
+# rung a fresh upload scores "none" on every row and every agreement-gated
+# signal downstream (safe_clear, demand_only, bulk_acceptable) goes dark.
+
+def _sized():
+    """What the engine proposes for a plain _CONST row, no benchmark present."""
+    r = _run([_row(**_CONST)]).iloc[0]
+    return (int(r["factory_recommended_new_max"]),
+            int(r["factory_recommended_new_rop"]),
+            int(r["factory_recommended_new_min"]))
+
+
+def _prior(**kw):
+    mx, rp, mn = _sized()
+    kw.setdefault("prior_final_max", mx)
+    kw.setdefault("prior_final_rop", rp)
+    kw.setdefault("prior_final_min", mn)
+    return _run([_row(**kw, **_CONST)]).iloc[0]
+
+
+def test_factory_column_outranks_the_prior_review():
+    """The engineer's number for THIS cycle wins. Otherwise a reviewed month
+    would silently be graded against stale history."""
+    mx, rp, mn = _sized()
+    r = _prior(factory_recommended_new_max=mx, factory_recommended_new_rop=rp,
+               factory_recommended_new_min=mn,
+               prior_final_max=mx + 500, prior_final_rop=rp + 500,
+               prior_final_min=mn + 500, prior_c365=12)
+    assert r["agreement_source"] == "factory"
+    assert r["agreement"] == "match"
+    assert "MATCHES_FACTORY" in r["reason_code"]
+
+
+def test_prior_review_is_the_benchmark_on_an_unreviewed_month():
+    """The point of the ladder: a blank factory column is no longer unknowable."""
+    r = _prior(prior_c365=12)
+    assert r["agreement_source"] == "prior_review"
+    assert r["agreement"] == "match"
+    assert "MATCHES_PRIOR_REVIEW" in r["reason_code"]
+
+
+def test_prior_review_can_diverge():
+    r = _prior(prior_final_max=9999, prior_final_rop=9999, prior_final_min=9999,
+               prior_c365=12)
+    assert r["agreement"] == "diverge"
+    assert r["agreement_source"] == "prior_review"
+    assert "DIVERGES_PRIOR_REVIEW" in r["reason_code"]
+
+
+def test_drifted_demand_invalidates_the_precedent():
+    """365d demand tripled since that review. Reproducing the old number is not
+    agreement with the engineer -- it is agreement with a dead decision."""
+    r = _prior(prior_c365=4)
+    assert (r["agreement"], r["agreement_source"]) == ("none", "")
+
+
+def test_unverifiable_staleness_is_not_a_benchmark():
+    """Strict, because this rung feeds auto-clear (specialists.safe_clear)."""
+    r = _prior()                                  # no prior_c365 at all
+    assert (r["agreement"], r["agreement_source"]) == ("none", "")
+
+
+def test_drift_band_edges():
+    assert _drift_ok(12, 12)
+    assert _drift_ok(15, 12)            # exactly +25%
+    assert not _drift_ok(15.1, 12)
+    assert not _drift_ok(float("nan"), 12)
+    assert not _drift_ok(12, float("nan"))
+    # The floor is on the FRACTION (0.25 * max(|then|, 1)), not on the delta:
+    # a part waking from zero consumption has no valid precedent.
+    assert not _drift_ok(1, 0)
+    assert _drift_ok(0, 0)
+
+
+def test_prior_match_lifts_confidence_less_than_factory():
+    """A precedent is weaker evidence than the engineer's own current number.
+
+    Sized off a SPORADIC row: a constant consumer already sits at 0.9 and both
+    lifts clip against the 0.95 ceiling, hiding the ordering.
+    """
+    sporadic = dict(last_30_day_cnsmptn_qty=1, last_90_day_cnsmptn_qty=3,
+                    last_365_day_cnsmptn_qty=0, last_547_day_cnsmptn_qty=0)
+    r0 = _run([_row(**sporadic)]).iloc[0]
+    assert r0["consumable"] == "sporadic"
+    sized = {"max": int(r0["factory_recommended_new_max"]),
+             "rop": int(r0["factory_recommended_new_rop"]),
+             "min": int(r0["factory_recommended_new_min"])}
+    prior = _run([_row(prior_final_max=sized["max"], prior_final_rop=sized["rop"],
+                       prior_final_min=sized["min"], prior_c365=0,
+                       **sporadic)]).iloc[0]
+    factory = _run([_row(factory_recommended_new_max=sized["max"],
+                         factory_recommended_new_rop=sized["rop"],
+                         factory_recommended_new_min=sized["min"],
+                         **sporadic)]).iloc[0]
+    assert prior["agreement_source"] == "prior_review"
+    assert (r0["confidence_score"] < prior["confidence_score"]
+            < factory["confidence_score"])
+
+
+def test_prior_benchmark_never_changes_sizing():
+    """Same no-leakage guarantee as the factory column, for the new rung."""
+    a = _run([_row(**_CONST)]).iloc[0]
+    b = _prior(prior_final_max=9999, prior_final_rop=9999, prior_final_min=9999,
+               prior_c365=12)
     for c in ("factory_recommended_new_max", "factory_recommended_new_rop",
               "factory_recommended_new_min"):
         assert a[c] == b[c]
@@ -269,6 +381,65 @@ def test_end_to_end_statistical_engine(client, monkeypatch):
     body = run_r.json()
     assert body["rows_scored"] == 1
     assert "CONSTANT_CONSUMER" in body["top_reason_codes"]
+
+
+def _month(client, label, item_ids, **kw):
+    rows = [make_row(item_id=i, module="TCB", frequencymonthswithusage=8,
+                     sfm_criticality="M", contractual_lead_time=30,
+                     max_qty=2, rop_qty=1, min_qty=0, **_CONST, **kw)
+            for i in item_ids]
+    up = upload(client, rows_to_csv(rows), label=label)
+    assert up.status_code == 200, up.text
+    bid = up.json()["batch_id"]
+    r = client.post(f"/run-recommendation?batch_id={bid}", headers=ENG)
+    assert r.status_code == 200, r.text
+    return bid
+
+
+def _scored(client, batch_id):
+    return client.get(f"/recommendations?batch_id={batch_id}&limit=50",
+                      headers=ENG).json()["items"]
+
+
+def test_prior_review_benchmark_round_trips_through_score_batch(client, monkeypatch):
+    """Second month of the same parts is graded against last month's decisions.
+
+    Also the only guard on engine_adapter's hand-built positional INSERT: a
+    column added to `cols` but not to the value tuple or the placeholder count
+    shifts every field one slot, silently.
+    """
+    monkeypatch.setenv("BOM_ENGINE", "statistical")
+    first = _month(client, "jan", ["P1", "P2"])
+    for item in _scored(client, first):
+        r = client.post(f"/review/{item['item_id']}?batch_id={first}"
+                        f"&stockroom_id={item['stockroom_id']}",
+                        json={"decision": "accept", "comment": "steady consumer",
+                              "justification": "Matches observed demand"},
+                        headers=SENIOR)
+        assert r.status_code == 200, r.text
+
+    # Next month: same parts, engineer column blanked -- a real new upload.
+    second = _month(client, "feb", ["P1", "P2"],
+                    factory_recommended_new_max="",
+                    factory_recommended_new_rop="",
+                    factory_recommended_new_min="")
+    got = _scored(client, second)
+    assert got, "second batch scored nothing"
+    assert {g["agreement_source"] for g in got} == {"prior_review"}
+    assert {g["agreement"] for g in got} == {"match"}
+    # Column-shift canary: these would hold values from a neighbouring slot.
+    assert all(isinstance(g["new_max"], int)
+               and g["risk_level"] in ("Low", "Medium", "High") for g in got)
+
+
+def test_first_ever_month_has_no_benchmark(client, monkeypatch):
+    """Nothing to fall back on. The honest answer is 'none', not a guess."""
+    monkeypatch.setenv("BOM_ENGINE", "statistical")
+    bid = _month(client, "cold", ["P9"], factory_recommended_new_max="",
+                 factory_recommended_new_rop="", factory_recommended_new_min="")
+    got = _scored(client, bid)
+    assert got and all((g["agreement"], g["agreement_source"]) == ("none", "")
+                       for g in got)
 
 
 def test_xlsx_upload_is_accepted(client):

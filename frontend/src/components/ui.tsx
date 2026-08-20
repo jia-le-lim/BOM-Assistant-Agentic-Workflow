@@ -87,14 +87,23 @@ const AGREEMENT_META: Record<string, { label: string; icon: string; color: strin
   diverge: { label: "Diverges",         icon: "≠", color: "var(--critical)" },
 };
 
-/** Engine vs the engineer's own factory_recommended_* number (PRD v3 §6). */
-export function AgreementChip({ value }: { value: string }) {
+/** A brand-new month has no factory_recommended_* to grade against, so the
+ *  engine falls back to this part's last engineer decision. Say which, or the
+ *  chip claims an authority it does not have. */
+const PRIOR_LABEL: Record<string, string> = {
+  match:   "Matches last review",
+  diverge: "Diverges from last review",
+};
+
+/** Engine vs whichever benchmark the ladder picked (PRD v3 §6). */
+export function AgreementChip({ value, source }: { value: string; source?: string }) {
   const m = AGREEMENT_META[value];
   if (!m) return null;
+  const label = (source === "prior_review" && PRIOR_LABEL[value]) || m.label;
   return (
     <span className="inline-flex items-center gap-1 text-xs whitespace-nowrap">
       <span aria-hidden style={{ color: m.color }}>{m.icon}</span>
-      <span style={{ color: "var(--text-secondary)" }}>{m.label}</span>
+      <span style={{ color: "var(--text-secondary)" }}>{label}</span>
     </span>
   );
 }

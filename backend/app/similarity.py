@@ -74,6 +74,12 @@ PRICE_EDGES = (100.0, 1000.0, 10000.0)      # -> bands 0..3, USD
 
 NO_RELIABLE_ANALOGUE = "NO_RELIABLE_ANALOGUE"
 ANALOGUE_DIVERGENCE = "ANALOGUE_DIVERGENCE"
+# The weak rung of the benchmark ladder (engine_statistical._benchmark): the
+# engine's Max sits inside the peers' own interquartile spread. Their spread IS
+# the tolerance, so no arbitrary +/-% band has to be invented. Advisory only --
+# analogue concurrence must never auto-clear (s15 put this class at ~71%
+# precision); it buys a cheaper LLM route, nothing more.
+ANALOGUE_CONCUR = "ANALOGUE_CONCUR"
 
 # Business language, never the sensitive VALUE. redact.py masks by key name, so
 # a supplier or machine_type embedded in this free text would sail straight
@@ -569,6 +575,8 @@ def _summarise(target: dict, per_feature: np.ndarray, distance: np.ndarray,
         engine_max = _as_int(target["new_max"])
         if abs(a_max - engine_max) > max(1.0, divergence_frac * engine_max):
             codes.append(ANALOGUE_DIVERGENCE)
+        elif a_p25 <= engine_max <= a_p75:
+            codes.append(ANALOGUE_CONCUR)
     else:
         codes.append(NO_RELIABLE_ANALOGUE)
 

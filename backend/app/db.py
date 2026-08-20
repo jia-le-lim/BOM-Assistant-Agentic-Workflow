@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd REAL,
   model_version TEXT, rule_version TEXT,
   route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
+  agreement_source TEXT DEFAULT '',
   scored_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -421,6 +422,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd DOUBLE PRECISION,
   model_version TEXT, rule_version TEXT,
   route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
+  agreement_source TEXT DEFAULT '',
   scored_at TEXT DEFAULT {PG_NOW},
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -840,7 +842,7 @@ def _ensure_columns(conn) -> None:
     that predates route/consumable/agreement or Phase-2 procurement would 500
     on the next request. New columns are nullable/default-empty.
     """
-    wanted = ("route", "consumable", "agreement")
+    wanted = ("route", "consumable", "agreement", "agreement_source")
     if is_postgres() or use_rest():
         for col in wanted:
             conn.execute("ALTER TABLE recommendation_result "

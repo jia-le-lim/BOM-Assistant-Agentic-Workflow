@@ -36,10 +36,53 @@ def load_batch_df(conn: Conn, batch_id: int) -> pd.DataFrame:
     return pd.DataFrame([json.loads(r["payload"]) for r in rows])
 
 
+# One precedent per stocking row, latest wins -- ORDER BY review_id so the last
+# write into the dict is the most recent decision (same idiom as
+# similarity._load_pool and services.latest_reviews).
+_PRIOR_SQL = (
+    "SELECT h.item_id, h.stockroom_id, h.final_max, h.final_rop, h.final_min, "
+    "b.payload "
+    "FROM review_history h "
+    "JOIN bom_rows b ON b.batch_id=h.batch_id AND b.item_id=h.item_id "
+    "AND b.stockroom_id=h.stockroom_id "
+    "WHERE h.batch_id != ? ORDER BY h.review_id")
+
+
+def _attach_prior_benchmark(conn: Conn, batch_id: int, df: pd.DataFrame) -> pd.DataFrame:
+    """Carry each part's last engineer decision onto this month's rows.
+
+    A brand-new upload has no factory_recommended_new_*, so without this the
+    engine has nothing to grade itself against and agreement is 'none' for the
+    whole batch. Unlike the similarity layer we keep backfill-v1 rows: that
+    exclusion (similarity.py) is about accept/override RATES being meaningless
+    for a backfilled decision -- the number itself is the engineer's real one.
+
+    prior_c365 travels alongside so the engine can reject a stale precedent
+    (engine_statistical._drift_ok).
+    """
+    prior: dict[tuple[str, str], tuple] = {}
+    for row in conn.execute(_PRIOR_SQL, (batch_id,)):
+        payload = json.loads(row["payload"])
+        prior[(str(row["item_id"]), str(row["stockroom_id"]))] = (
+            row["final_max"], row["final_rop"], row["final_min"],
+            payload.get(engine_statistical.CONS[365]))
+    if not prior:
+        return df
+    keys = zip(df.get("item_id", pd.Series("", index=df.index)).astype(str),
+               df.get("stockroom_id", pd.Series("", index=df.index)
+                      ).astype(str).str.strip())
+    hits = [prior.get(k, (None, None, None, None)) for k in keys]
+    for pos, col in enumerate(("prior_final_max", "prior_final_rop",
+                               "prior_final_min", "prior_c365")):
+        df[col] = [h[pos] for h in hits]
+    return df
+
+
 def score_batch(conn: Conn, batch_id: int) -> dict:
     df = load_batch_df(conn, batch_id)
     if df.empty:
         raise ValueError(f"Batch {batch_id} has no scoreable rows")
+    df = _attach_prior_benchmark(conn, batch_id, df)
 
     cfg = active_config(conn)
     cfg_hash = hashlib.sha256(
@@ -66,7 +109,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
         " AND h.stockroom_id=recommendation_result.stockroom_id)", (batch_id,))
     # Triage signals: the statistical engine emits these; the legacy rule engine
     # does not, so default them rather than KeyError on a rules re-score.
-    for c in ("route", "consumable", "agreement"):
+    for c in ("route", "consumable", "agreement", "agreement_source"):
         if c not in res.columns:
             res[c] = ""
     # NOTE: not itertuples() -- it renames underscore-prefixed columns
@@ -75,19 +118,22 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
             "factory_recommended_new_min", "review_required",
             "factory_recommendation_action", "reason_code", "risk_level",
             "confidence_score", "explanation", "_exposure_usd",
-            "model_version", "rule_version", "route", "consumable", "agreement"]
+            "model_version", "rule_version", "route", "consumable", "agreement",
+            "agreement_source"]
     payload = [
         (batch_id, str(v[0]), stk.iloc[i], int(v[1]), int(v[2]), int(v[3]),
          str(v[4]), str(v[5]), str(v[6]), str(v[7]), float(v[8]), str(v[9]),
-         float(v[10]), str(v[11]), str(v[12]), str(v[13]), str(v[14]), str(v[15]))
+         float(v[10]), str(v[11]), str(v[12]), str(v[13]), str(v[14]), str(v[15]),
+         str(v[16]))
         for i, v in enumerate(res[cols].to_numpy())
     ]
     payload = [p for p in payload if (p[1], p[2]) not in reviewed]
     conn.executemany(
         "INSERT INTO recommendation_result (batch_id, item_id, stockroom_id, new_max, "
         "new_rop, new_min, review_required, action, reason_code, risk_level, confidence, "
-        "explanation, exposure_usd, model_version, rule_version, route, consumable, agreement) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", payload)
+        "explanation, exposure_usd, model_version, rule_version, route, consumable, agreement, "
+        "agreement_source) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", payload)
     conn.execute(
         "UPDATE batches SET status='scored', scored_rule_version=?, scored_config_hash=?, "
         "scored_at=datetime('now') WHERE batch_id=?",

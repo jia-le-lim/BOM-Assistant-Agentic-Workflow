@@ -9,6 +9,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from . import specialists
+from ..similarity import ANALOGUE_CONCUR
 
 
 class TriageState(TypedDict, total=False):
@@ -40,7 +41,14 @@ def triage_features(rec: dict, exposure_threshold: float,
     exposure = float(rec.get("exposure_usd") or 0)
     high_exposure = exposure >= exposure_threshold
     critical = str(rec.get("sfm_criticality") or "").lower().startswith("h")
-    demand_only = (rec.get("agreement") == "match" and not high_exposure
+    # Any rung of the benchmark ladder buys the cheapest route: being wrong here
+    # costs one specialist instead of three, never an unreviewed auto-clear.
+    # Without the analogue rung a brand-new month (agreement 'none' everywhere)
+    # would send every single row down the expensive path.
+    concurs = (rec.get("agreement") == "match"
+               or (rec.get("agreement") in ("none", "", None) and sim
+                   and ANALOGUE_CONCUR in (sim.get("advisory_codes") or "")))
+    demand_only = (bool(concurs) and not high_exposure
                    and not critical and rec.get("risk_level") != "High")
     # Advisory peer evidence, promote-only. It can add urgency; graph.synthesis
     # is where that is applied, and it may never cancel a rule-based signal.

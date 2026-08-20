@@ -70,6 +70,11 @@ AUTOCLEAR_IMMATERIAL_USD = 0.0  # exposure below this auto-clears (0 = off)
 AUTOCLEAR_HIGH_VALUE_USD = 5000.0   # material change at/above this -> always review
 AUTOCLEAR_RELIABLE = False      # reliable-stable lever: opt-in until calibrated
 
+# Benchmark ladder (see _benchmark). A prior review is only a fair yardstick
+# while demand has not moved out from under it -- beyond this drift the engine
+# would score a "match" for reproducing a decision the data has invalidated.
+PRIOR_BENCH_MAX_DRIFT = 0.25    # |c365_now - c365_then| as a fraction of then
+
 
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
@@ -198,7 +203,7 @@ def _within(e: float, base: float, tol_abs: float, tol_rel: float) -> bool:
 
 
 def _agreement(engine_vals, bench_vals) -> str:
-    """Engine Min/ROP/Max vs the engineer's factory_recommended_new_* benchmark.
+    """Engine Min/ROP/Max vs whichever benchmark _benchmark() selected.
 
     A post-hoc scoring signal (PRD v3 6) that drives triage/confidence only --
     the benchmark is never an input to sizing, so there is no target leakage.
@@ -212,6 +217,32 @@ def _agreement(engine_vals, bench_vals) -> str:
 
     return ("match" if all(close(e, b) for e, b in zip(engine_vals, bench_vals))
             else "diverge")
+
+
+def _drift_ok(c365_now: float, c365_then: float) -> bool:
+    """Has this part's demand held still since the engineer last ruled on it?"""
+    if pd.isna(c365_now) or pd.isna(c365_then):
+        return False        # strict: this feeds auto-clear
+    return abs(c365_now - c365_then) <= PRIOR_BENCH_MAX_DRIFT * max(abs(c365_then), 1.0)
+
+
+def _benchmark(bench, prior, c365_now, c365_then):
+    """Whose number are we grading against?
+
+    The engineer's own for this cycle if the upload carries one; otherwise
+    their last decision on this same part, while demand still supports it. A
+    brand-new month has no factory_recommended_new_* at all, so without the
+    prior-review rung every row scores "none" and every agreement-gated
+    signal downstream goes dark.
+
+    Returns (bench_vals, source) with source 'factory' | 'prior_review' | ''.
+    """
+    if any(pd.notna(b) for b in bench):
+        return bench, "factory"
+    if any(pd.notna(p) for p in prior) and _drift_ok(c365_now, c365_then):
+        return prior, "prior_review"
+    # ponytail: 365d volume only; add a per-window drift check if seasonality bites.
+    return (float("nan"),) * 3, ""
 
 
 def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
@@ -246,6 +277,12 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     bench_max = _num(df, "factory_recommended_new_max")
     bench_rop = _num(df, "factory_recommended_new_rop")
     bench_min = _num(df, "factory_recommended_new_min")
+    # Fallback benchmark: this part's last engineer decision, attached by
+    # engine_adapter._attach_prior_benchmark (absent on a bare run()).
+    prior_max = _num(df, "prior_final_max")
+    prior_rop = _num(df, "prior_final_rop")
+    prior_min = _num(df, "prior_final_min")
+    prior_c365 = _num(df, "prior_c365")
     sfm_mean_lt = _num(df, "sfm_mean_lt_cd")
     excess_qty = _num(df, "qry_eoh_excess_qty")
     own = df.get("ownership", pd.Series("", index=df.index)).astype(str)
@@ -360,14 +397,23 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
 
         # Engineer-benchmark agreement: raises trust when the engine reproduces
         # the engineer's own number, surfaces disagreements for the review queue.
-        agreement = _agreement(
-            (new_max, new_rop, new_min),
-            (bench_max.iloc[i], bench_rop.iloc[i], bench_min.iloc[i]))
-        if agreement == "match":
-            reasons.append("MATCHES_FACTORY")
-            conf = min(0.95, conf + 0.1)
-        elif agreement == "diverge":
-            reasons.append("DIVERGES_FACTORY")
+        bench_vals, agreement_source = _benchmark(
+            (bench_max.iloc[i], bench_rop.iloc[i], bench_min.iloc[i]),
+            (prior_max.iloc[i], prior_rop.iloc[i], prior_min.iloc[i]),
+            w[365], prior_c365.iloc[i])
+        agreement = _agreement((new_max, new_rop, new_min), bench_vals)
+        if agreement == "none":
+            agreement_source = ""
+        elif agreement_source == "factory":
+            reasons.append("MATCHES_FACTORY" if agreement == "match"
+                           else "DIVERGES_FACTORY")
+            if agreement == "match":
+                conf = min(0.95, conf + 0.1)
+        else:
+            reasons.append("MATCHES_PRIOR_REVIEW" if agreement == "match"
+                           else "DIVERGES_PRIOR_REVIEW")
+            if agreement == "match":
+                conf = min(0.95, conf + 0.05)
 
         # --- auto-clear policy (triage only; never touches Min/ROP/Max) ---
         # Expand review=N only where an un-reviewed error is rare or cheap: a
@@ -412,6 +458,7 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
             "route": route,
             "consumable": consumable,
             "agreement": agreement,
+            "agreement_source": agreement_source,
             # debug-only (ignored by adapter)
             "mu_day": round(mu, 5) if pd.notna(mu) else np.nan,
         })

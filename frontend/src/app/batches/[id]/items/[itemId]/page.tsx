@@ -186,7 +186,7 @@ export default function ItemPage({ params }: {
           <RiskChip level={r.risk_level} />
           <ActionChip action={r.action} />
           <ConsumableChip value={r.consumable} />
-          <AgreementChip value={r.agreement} />
+          <AgreementChip value={r.agreement} source={r.agreement_source} />
           <span className="text-sm tnum" style={{ color: "var(--text-secondary)" }}>
             {fmtUsd(r.exposure_usd)} exposure
           </span>

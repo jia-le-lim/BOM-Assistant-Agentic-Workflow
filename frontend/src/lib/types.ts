@@ -58,6 +58,10 @@ export interface Recommendation {
   route: string;
   consumable: string;
   agreement: "match" | "diverge" | "none" | "";
+  /** Which benchmark `agreement` was measured against. "factory" = the
+   *  engineer's own number in this upload; "prior_review" = their last decision
+   *  on this part; "" = no benchmark existed. */
+  agreement_source: "factory" | "prior_review" | "";
 }
 
 export interface BatchSummary {

@@ -495,7 +495,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                           <td className="text-right tnum">{fmtUsd(r.exposure_usd)}</td>
                           <td><StatusChip status={r.status} /></td>
                           <td><RiskChip level={r.risk_level} /></td>
-                          <td><AgreementChip value={r.agreement} /></td>
+                          <td><AgreementChip value={r.agreement} source={r.agreement_source} /></td>
                           <td className="text-right tnum">{r.new_max}</td>
                           <td className="max-w-[240px]"><ReasonCodes codes={r.reason_code} /></td>
                           <td>

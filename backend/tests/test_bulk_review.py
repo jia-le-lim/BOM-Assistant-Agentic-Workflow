@@ -13,8 +13,11 @@ WINS = (5, 30, 90, 180, 365, 547)
 
 def _constant(item_id: str, **kw) -> dict:
     """A steady low-volume consumer with a big gap to current -> pending_review,
-    high confidence, no benchmark -> bulk-acceptable. unitprice keeps it material
-    (above the immaterial auto-clear floor) so it stays in the queue."""
+    high confidence, and NO benchmark of any kind. unitprice keeps it material
+    (above the immaterial auto-clear floor) so it stays in the queue.
+
+    Deliberately not bulk-acceptable: nothing has ever agreed with this number.
+    Use _matching_constant for a row that is."""
     return make_row(
         item_id=item_id, module="TCB", sfm_criticality="M",
         frequencymonthswithusage=8, contractual_lead_time=30, unitprice=500,
@@ -60,13 +63,23 @@ def _scored(client, monkeypatch, rows) -> int:
 
 
 def test_summary_has_triage_breakdowns(client, monkeypatch):
-    bid = _scored(client, monkeypatch, [_constant(f"P{i}") for i in range(5)])
+    bid = _scored(client, monkeypatch, [_matching_constant(f"P{i}") for i in range(5)])
     s = client.get(f"/batches/{bid}/summary", headers=ENG).json()
     for k in ("consumables", "routes", "agreements", "bulk_acceptable", "pareto"):
         assert k in s, s.keys()
     assert s["consumables"].get("constant", 0) == 5
     assert s["bulk_acceptable"] >= 5
     assert "items_for_80pct" in s["pareto"]
+
+
+def test_unbenchmarked_rows_are_not_bulk_acceptable(client, monkeypatch):
+    """"Safe to bulk-accept" must mean a benchmark AGREED, not that none existed.
+    The old `agreement != "diverge"` test passed every unbenchmarked row -- inert
+    on a reviewed month, wide open on a brand-new one."""
+    bid = _scored(client, monkeypatch, [_constant(f"P{i}") for i in range(5)])
+    s = client.get(f"/batches/{bid}/summary", headers=ENG).json()
+    assert s["agreements"].get("none", 0) == 5
+    assert s["bulk_acceptable"] == 0
 
 
 def test_bulk_accept_via_filter_clears_pending(client, monkeypatch):

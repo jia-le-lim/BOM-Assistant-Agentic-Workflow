@@ -144,7 +144,11 @@ def synthesis(state: dict) -> dict:
     high_risk = rec.get("risk_level") == "High"
     fallback_tier = "escalate" if critical or high_risk else "review"
     tier = verdict.get("tier") if verdict.get("tier") in TIERS else fallback_tier
+    # Strong benchmark only: the engineer's own number this cycle, or their last
+    # decision on this same part. An analogue median agreeing is advisory -- s15
+    # put that class near 71% precision, which is not a bar to clear money over.
     safe_clear = (rec.get("agreement") == "match"
+                  and rec.get("agreement_source") in ("factory", "prior_review")
                   and rec.get("risk_level") == "Low"
                   and not state["features"]["high_exposure"] and not critical
                   and float(rec.get("confidence") or 0)

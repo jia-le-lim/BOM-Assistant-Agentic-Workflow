@@ -267,6 +267,28 @@ def test_analogue_max_respects_order_multiple(client, db_file):
     assert all(s[0] % 5 == 0 for s in saved)
 
 
+def test_analogue_concur_when_engine_sits_inside_the_peer_spread(client, db_file):
+    """The weak rung of the benchmark ladder. Peers accepted these very numbers,
+    so the engine's Max lands inside their IQR -- their spread IS the tolerance.
+
+    Advisory only: graph.triage_features lets this buy the cheap LLM route on a
+    month with no engineer benchmark, but specialists.safe_clear still refuses
+    to auto-clear on it.
+    """
+    csv_bytes = _multi_peer_csv()
+    first = scored_batch(client, csv_bytes, label="JAN")
+    assert review_everything(client, first) >= 5      # accept -> final = engine
+
+    second = scored_batch(client, csv_bytes, label="FEB")
+    client.post("/similarity/run", json={"batch_id": second}, headers=ENG)
+    saved = rows(db_file, "SELECT advisory_codes FROM similarity_result "
+                          "WHERE batch_id=? AND analogue_max_median IS NOT NULL",
+                 (second,))
+    assert saved, "expected at least one row with enough neighbours"
+    assert all(S.ANALOGUE_CONCUR in s[0] for s in saved)
+    assert all(S.ANALOGUE_DIVERGENCE not in s[0] for s in saved)
+
+
 def test_critical_analogue_never_zero(client, db_file):
     """Keep-alive floor: peers that all decided zero must not zero a critical
     spare's analogue."""
