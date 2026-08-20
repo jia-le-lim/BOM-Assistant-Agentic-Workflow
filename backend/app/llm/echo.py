@@ -109,6 +109,19 @@ class EchoProvider:
             return ToolCall("c1", "get_procurement_context",
                             {"item_id": item.group(1)})
 
+        # Before the write branch on purpose: "similar parts for 500005" carries
+        # an item id, and WRITE_RE would otherwise claim anything with a verb.
+        if (item and "get_similar_parts" in available
+                and any(w in ql for w in ("similar", "comparable", "peer",
+                                          "unusual", "analogue"))):
+            return ToolCall("c1", "get_similar_parts",
+                            {"item_id": item.group(1)})
+
+        if ("search_similar_reviews" in available
+                and any(w in ql for w in ("what did we say", "past comment",
+                                          "previously discussed"))):
+            return ToolCall("c1", "search_similar_reviews", {"query": q[:200]})
+
         if item and WRITE_RE.search(q):
             qty = QTY_RE.search(q)
             if qty and "propose_change" in available:

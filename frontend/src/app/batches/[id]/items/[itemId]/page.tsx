@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { ApiError, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
-  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review, TriageResult,
+  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
+  SimilarityResult, TriageResult,
 } from "@/lib/types";
 import { ActionChip, AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip, Spinner, StatusChip, TriageChip } from "@/components/ui";
 
@@ -30,6 +31,7 @@ export default function ItemPage({ params }: {
   const [d, setD] = useState<ItemDetail | null>(null);
   const [history, setHistory] = useState<Review[]>([]);
   const [triage, setTriage] = useState<TriageResult | null>(null);
+  const [similar, setSimilar] = useState<SimilarityResult | null>(null);
   const [justificationTemplates, setJustificationTemplates] = useState<JustificationTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -44,11 +46,19 @@ export default function ItemPage({ params }: {
       const detail = await call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`);
       const triagePath = `triage/${batchId}/${itemId}?stockroom_id=${encodeURIComponent(
         detail.recommendation.stockroom_id)}`;
-      const [h, templatePage, triageResult] = await Promise.all([
+      const similarPath = `similarity/${batchId}/${itemId}?stockroom_id=${encodeURIComponent(
+        detail.recommendation.stockroom_id)}`;
+      const [h, templatePage, triageResult, similarResult] = await Promise.all([
         call<{ reviews: Review[] }>(`history/${itemId}`),
         call<JustificationTemplatePage>("review/justification-templates"),
         can.review(role)
           ? call<TriageResult>(triagePath).catch((e) => {
+              if (e instanceof ApiError && e.status === 404) return null;
+              throw e;
+            })
+          : Promise.resolve(null),
+        can.review(role)
+          ? call<SimilarityResult>(similarPath).catch((e) => {
               if (e instanceof ApiError && e.status === 404) return null;
               throw e;
             })
@@ -61,6 +71,7 @@ export default function ItemPage({ params }: {
       setHistory(h.reviews);
       setJustificationTemplates(templatePage.templates);
       setTriage(triageResult);
+      setSimilar(similarResult);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
   }, [call, batchId, itemId, role]);
@@ -213,6 +224,14 @@ export default function ItemPage({ params }: {
                       <td className="text-right tnum">{Number(d.context.factory_recommended_new_min)}</td>
                     </tr>
                   )}
+                  {similar && similar.analogue_max_median !== null && (
+                    <tr>
+                      <td style={{ color: "var(--text-secondary)" }}>Historical analogues</td>
+                      <td className="text-right tnum">{similar.analogue_max_median}</td>
+                      <td className="text-right tnum">{similar.analogue_rop_median}</td>
+                      <td className="text-right tnum">{similar.analogue_min_median}</td>
+                    </tr>
+                  )}
                   {latest && (
                     <tr>
                       <td style={{ color: "var(--text-secondary)" }}>Engineer final</td>
@@ -224,6 +243,15 @@ export default function ItemPage({ params }: {
                 </tbody>
               </table>
             </div>
+
+            {similar && similar.analogue_max_median !== null && (
+              <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+                Typical Max range {similar.analogue_max_p25}–{similar.analogue_max_p75}
+                {" · "}{similar.neighbour_count} peers
+                {" · "}confidence {similar.confidence.toFixed(2)}
+                {" · "}advisory only, never applied
+              </p>
+            )}
 
             <div className="mt-4">
               <div className="text-xs mb-1.5" style={{ color: "var(--text-secondary)" }}>
@@ -363,8 +391,91 @@ export default function ItemPage({ params }: {
             </div>
           </div>
 
+          {similar && (
+            <div className="card p-5">
+              <h2 className="text-sm font-semibold mb-1">Similar parts historically</h2>
+              <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+                Different items with comparable characteristics — not this item&apos;s
+                own history. Advisory evidence; it never sets Min/ROP/Max.
+              </p>
+
+              {similar.part_category ? (
+                <p className="text-xs mb-3 p-2 rounded" style={{ background: "var(--seq-soft)" }}>
+                  Peers restricted to <strong>{similar.part_category}</strong> — a part
+                  of a different known category is never shown here.
+                </p>
+              ) : (
+                <Banner kind="info">
+                  No part category matched this description, so peers were not
+                  restricted by category. Add a rule on the Config page to sharpen this.
+                </Banner>
+              )}
+
+              {similar.advisory_codes.includes("NO_RELIABLE_ANALOGUE") && (
+                <Banner kind="warning">
+                  This part is unusual against {similar.pool_size.toLocaleString()} reviewed
+                  {" "}peers — {similar.neighbour_count} close match
+                  {similar.neighbour_count === 1 ? "" : "es"} found. Manual review;
+                  no analogue range is shown.
+                </Banner>
+              )}
+              {similar.advisory_codes.includes("ANALOGUE_DIVERGENCE") && (
+                <Banner kind="info">
+                  The engine proposes Max {r.new_max}, but comparable parts settled
+                  around Max {similar.analogue_max_median}. Worth a second look.
+                </Banner>
+              )}
+
+              {similar.neighbours.length === 0 ? (
+                <p className="text-sm py-2" style={{ color: "var(--text-muted)" }}>
+                  No sufficiently similar reviewed parts found.
+                </p>
+              ) : (
+                <div className="scroll-x mt-3">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="text-left">Similar part</th>
+                        <th className="text-left">Why similar</th>
+                        <th className="text-right">Final</th>
+                        <th className="text-left">Historical reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {similar.neighbours.slice(0, 5).map((n) => (
+                        <tr key={n.neighbour_rank}>
+                          <td className="font-mono text-xs">{n.neighbour_item_id}</td>
+                          <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                            {n.similarity_reasons || "—"}
+                          </td>
+                          <td className="text-right tnum">
+                            {n.neighbour_final_max === null ? "—" : `Max ${n.neighbour_final_max}`}
+                          </td>
+                          <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                            {n.neighbour_justification || n.neighbour_comment || "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <details className="text-xs mt-4">
+                <summary style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+                  {similar.similarity_model_version} · outlier score{" "}
+                  {similar.outlier_score.toFixed(2)} · nearest distance{" "}
+                  {similar.nearest_distance === null ? "—" : similar.nearest_distance.toFixed(3)}
+                </summary>
+                <pre className="mt-2 p-3 rounded scroll-x" style={{ background: "var(--seq-soft)" }}>
+                  {JSON.stringify(similar.neighbours, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )}
+
           <div className="card p-5">
-            <h2 className="text-sm font-semibold mb-1">Review history</h2>
+            <h2 className="text-sm font-semibold mb-1">This item previously</h2>
             <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
               The memory layer — every decision on this item, across all batches.
             </p>

@@ -3,7 +3,7 @@
 # Works on Windows (GNU make + cmd.exe, e.g. ezwinports make) and on Unix.
 #
 #   make dev        # start BOTH (backend :8011 + frontend :3010) in parallel
-#   make backend    # FastAPI on http://127.0.0.1:8011  (local SQLite dev mode)
+#   make backend    # FastAPI on http://127.0.0.1:8011  (Supabase from backend/.env)
 #   make frontend   # Next.js console on http://localhost:3010 (webpack)
 #   make install    # install backend (venv) + frontend (npm) dependencies
 #   make test       # run the backend test suite
@@ -17,10 +17,12 @@ ifeq ($(OS),Windows_NT)
     SHELL := cmd.exe
     .SHELLFLAGS := /c
     VENV_PY := .venv\Scripts\python.exe
-    BACKEND_ENV := set "BOM_ALLOW_SQLITE=1" && set "BOM_DB_PATH=backend/data/bom_review.db" && set "PYTHONIOENCODING=utf-8" &&
+    BACKEND_ENV := set "PYTHONIOENCODING=utf-8" &&
+    TEST_ENV := set "BOM_ALLOW_SQLITE=1" && set "BOM_DB_PATH=backend/data/bom_review.db" && set "PYTHONIOENCODING=utf-8" &&
 else
     VENV_PY := .venv/bin/python
-    BACKEND_ENV := BOM_ALLOW_SQLITE=1 BOM_DB_PATH=backend/data/bom_review.db PYTHONIOENCODING=utf-8
+    BACKEND_ENV := PYTHONIOENCODING=utf-8
+    TEST_ENV := BOM_ALLOW_SQLITE=1 BOM_DB_PATH=backend/data/bom_review.db PYTHONIOENCODING=utf-8
 endif
 
 .DEFAULT_GOAL := help
@@ -48,4 +50,4 @@ install:
 	cd frontend && npm install
 
 test:
-	$(BACKEND_ENV) $(VENV_PY) -m pytest backend/tests -q
+	$(TEST_ENV) $(VENV_PY) -m pytest backend/tests -q

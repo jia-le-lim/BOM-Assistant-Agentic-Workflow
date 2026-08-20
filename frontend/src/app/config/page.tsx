@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
-import type { RuleConfig } from "@/lib/types";
+import type { PartCategoryPage, RuleConfig } from "@/lib/types";
 import { Banner, Spinner } from "@/components/ui";
 
 const EDITABLE = [
@@ -45,6 +45,10 @@ export default function ConfigPage() {
 
   const [pattern, setPattern] = useState("");
   const [crit, setCrit] = useState("High");
+  const [cats, setCats] = useState<PartCategoryPage | null>(null);
+  const [catPattern, setCatPattern] = useState("");
+  const [catName, setCatName] = useState("");
+  const [catPriority, setCatPriority] = useState("500");
   const [reliableEdit, setReliableEdit] = useState("");
   const [triageEnabledEdit, setTriageEnabledEdit] = useState("");
 
@@ -53,10 +57,17 @@ export default function ConfigPage() {
     catch (e) { setErr((e as Error).message); }
   }, [call]);
 
+  const loadCategories = useCallback(async () => {
+    try { setCats(await call<PartCategoryPage>("config/part-categories")); }
+    catch (e) { setErr((e as Error).message); }
+  }, [call]);
+
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => { void load(); });
+    const frame = window.requestAnimationFrame(() => {
+      void load(); void loadCategories();
+    });
     return () => window.cancelAnimationFrame(frame);
-  }, [load]);
+  }, [load, loadCategories]);
 
   async function save() {
     setBusy(true); setErr(null); setNote(null);
@@ -105,6 +116,32 @@ export default function ConfigPage() {
       await call(`config/criticality/${encodeURIComponent(p)}/confirm`, { method: "POST" });
       setNote(`Confirmed "${p}" — the engine will use it on the next run.`);
       await load();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function proposeCategory() {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      await call("config/part-categories", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pattern: catPattern, category: catName,
+                               priority: Number(catPriority) || 500 }),
+      });
+      setNote(`Proposed "${catPattern}" → ${catName}. It does NOT affect peer ` +
+              `retrieval until a different person with senior rights confirms it.`);
+      setCatPattern(""); setCatName(""); await loadCategories();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function confirmCategory(p: string) {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      await call(`config/part-categories/${encodeURIComponent(p)}/confirm`,
+                 { method: "POST" });
+      setNote(`Confirmed "${p}" — re-run similarity on a batch to apply it.`);
+      await loadCategories();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -320,6 +357,88 @@ export default function ConfigPage() {
                   disabled={busy || !pattern || !can.approve(role)}
                   title={can.approve(role) ? "Confirm this pattern" : "Needs senior or admin"}>
             Confirm as senior
+          </button>
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold mb-1">Part categories</h2>
+        <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+          What KIND of part each row is, matched against its description. This is a
+          <strong> constraint</strong> on peer similarity, not a weighting: a part of a
+          different known category is never shown as a peer. Lower priority wins, so
+          specific rules must sit above generic ones — <code>SENSOR BRACKET ASSY</code> is
+          a sensor, not a bracket. Same two-person rule as criticality: propose, then a
+          different senior confirms.
+        </p>
+
+        {cats && (
+          <p className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
+            {cats.confirmed} confirmed · {cats.pending} pending
+          </p>
+        )}
+
+        {cats && cats.rules.length > 0 && (
+          <div className="scroll-x mb-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr>
+                  <th className="text-right">Pri</th>
+                  <th className="text-left">Category</th>
+                  <th className="text-left">Pattern</th>
+                  <th className="text-left">Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {cats.rules.map((r) => (
+                  <tr key={r.pattern}>
+                    <td className="text-right tnum">{r.priority}</td>
+                    <td>{r.category}</td>
+                    <td className="font-mono text-xs">{r.pattern}</td>
+                    <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                      {r.confirmed
+                        ? <span><span aria-hidden style={{ color: "var(--success-text)" }}>✓ </span>
+                            active{r.confirmed_by ? ` (${r.confirmed_by})` : ""}</span>
+                        : <span><span aria-hidden style={{ color: "var(--warning)" }}>◷ </span>
+                            pending{r.set_by ? ` (${r.set_by})` : ""}</span>}
+                    </td>
+                    <td className="text-right">
+                      {!r.confirmed && (
+                        <button className="btn text-xs" disabled={busy || !can.approve(role)}
+                                onClick={() => confirmCategory(r.pattern)}>
+                          Confirm
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex gap-3 flex-wrap items-end">
+          <label className="flex flex-col gap-1 text-xs">
+            <span style={{ color: "var(--text-secondary)" }}>Pattern (regex on description)</span>
+            <input className="field font-mono" value={catPattern} disabled={!can.review(role)}
+                   onChange={(e) => setCatPattern(e.target.value)}
+                   placeholder="\b(GRIPPER|VACUUM CUP)\b" />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span style={{ color: "var(--text-secondary)" }}>Category</span>
+            <input className="field w-32" value={catName} disabled={!can.review(role)}
+                   onChange={(e) => setCatName(e.target.value)} placeholder="gripper" />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span style={{ color: "var(--text-secondary)" }}>Priority</span>
+            <input className="field w-20 tnum" type="number" min={1} max={9999}
+                   value={catPriority} disabled={!can.review(role)}
+                   onChange={(e) => setCatPriority(e.target.value)} />
+          </label>
+          <button className="btn" onClick={proposeCategory}
+                  disabled={busy || !catPattern || !catName || !can.review(role)}>
+            Propose
           </button>
         </div>
       </div>

@@ -136,11 +136,13 @@ export function StatTile({ label, value, sub, accent }: {
 }
 
 export function Banner({ kind, children }: {
-  kind: "error" | "info" | "success"; children: React.ReactNode;
+  kind: "error" | "info" | "success" | "warning"; children: React.ReactNode;
 }) {
   const color = kind === "error" ? "var(--critical)"
-              : kind === "success" ? "var(--success-text)" : "var(--seq)";
-  const icon = kind === "error" ? "✕" : kind === "success" ? "✓" : "ℹ";
+              : kind === "success" ? "var(--success-text)"
+              : kind === "warning" ? "var(--warning)" : "var(--seq)";
+  const icon = kind === "error" ? "✕" : kind === "success" ? "✓"
+             : kind === "warning" ? "⚠" : "ℹ";
   return (
     <div className="card p-3 text-sm flex gap-2 items-start"
          style={{ borderColor: color }}>

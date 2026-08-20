@@ -7,7 +7,7 @@ import { fmtCompact, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
   BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RuleConfig, RunSummary,
-  Status, TriagePage, TriageRunSummary,
+  SimilarityRunSummary, Status, TriagePage, TriageRunSummary,
 } from "@/lib/types";
 import {
   AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip,
@@ -40,6 +40,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [busy, setBusy] = useState(false);
   const [triageBudget, setTriageBudget] = useState("2000");
   const [triageRefresh, setTriageRefresh] = useState(false);
+  const [similarityRefresh, setSimilarityRefresh] = useState(false);
 
   // Initialize filter state from URL query parameters
   const [status, setStatus] = useState<Status | "">(
@@ -194,6 +195,28 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
       setNote(`Scored ${s.rows_scored.toLocaleString()} rows with ${s.rule_version} — ` +
               `${s.review_required_Y.toLocaleString()} need review, ` +
               `${s.review_required_N.toLocaleString()} auto-cleared.`);
+      await refresh();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function runSimilarity() {
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      const s = await call<SimilarityRunSummary>("similarity/run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batch_id: batchId, refresh: similarityRefresh }),
+      });
+      setNote(s.neighbour_pool === 0
+        ? "No reviewed history yet — every row is flagged as having no reliable "
+          + "analogue. Run again once this month's reviews are recorded."
+        : `Matched ${s.scored.toLocaleString()} rows against `
+          + `${s.neighbour_pool.toLocaleString()} reviewed peers — `
+          + `${s.outliers.toLocaleString()} unusual, `
+          + `${s.diverging.toLocaleString()} diverging from peer median. `
+          + `${s.categorised.toLocaleString()} of ${s.scored.toLocaleString()} `
+          + `had a part category.`);
+      setSimilarityRefresh(false);
       await refresh();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
@@ -389,6 +412,29 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           </div>
 
           <PriorityCallout summary={summary} />
+
+          {canReview && (
+            <div className="card p-5">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="mr-auto">
+                  <h2 className="text-sm font-semibold">Run peer similarity</h2>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    Matches each scored row against previously reviewed parts. Advisory
+                    evidence only — it never changes Min/ROP/Max or a risk level.
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-xs pb-2">
+                  <input type="checkbox" checked={similarityRefresh}
+                         onChange={(e) => setSimilarityRefresh(e.target.checked)} />
+                  Rebuild existing results
+                </label>
+                <button className="btn btn-primary" onClick={runSimilarity}
+                        disabled={busy}>
+                  {busy ? "Working…" : "Run similarity"}
+                </button>
+              </div>
+            </div>
+          )}
 
           {canReview && (
             <div className="card p-5">

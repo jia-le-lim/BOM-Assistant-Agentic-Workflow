@@ -173,6 +173,100 @@ export interface TriageRunSummary {
   budget_exhausted: boolean;
 }
 
+/**
+ * Advisory peer evidence. Never applied to Min/ROP/Max and never lowers a risk
+ * level — the layer can only add evidence and raise review priority.
+ */
+export interface SimilarityNeighbour {
+  neighbour_rank: number;
+  neighbour_item_id: string;
+  neighbour_batch_id: number;
+  distance: number;
+  similarity_reasons: string;
+  neighbour_decision: string | null;
+  neighbour_final_max: number | null;
+  neighbour_final_rop: number | null;
+  neighbour_final_min: number | null;
+  neighbour_risk_level: string | null;
+  neighbour_reason_code: string | null;
+  neighbour_justification: string | null;
+  neighbour_comment: string | null;
+}
+
+export interface SimilarityResult {
+  batch_id: number;
+  item_id: string;
+  stockroom_id: string;
+  similarity_model_version: string;
+  neighbour_count: number;
+  pool_size: number;
+  nearest_distance: number | null;
+  /** INTEGER on both dialects, like Review.requires_senior_approval. */
+  outlier_score: number;
+  is_outlier: number;
+  historical_override_rate: number | null;
+  historical_upward_override_rate: number | null;
+  historical_high_risk_rate: number | null;
+  analogue_max_median: number | null;
+  analogue_max_p25: number | null;
+  analogue_max_p75: number | null;
+  analogue_rop_median: number | null;
+  analogue_min_median: number | null;
+  /**
+   * What KIND of part this is, from the engineer-owned lexicon. A constraint,
+   * not a weighted feature: peers of a different known category are excluded
+   * outright. "" means no rule matched, and nothing was restricted.
+   */
+  part_category: string;
+  /** Comma-joined, like reason_code — renders through <ReasonCodes />. */
+  advisory_codes: string;
+  confidence: number;
+  generated_at: string;
+  neighbours: SimilarityNeighbour[];
+}
+
+export interface SimilarityRunSummary {
+  batch_id: number;
+  candidates: number;
+  scored: number;
+  neighbour_pool: number;
+  outliers: number;
+  diverging: number;
+  no_analogue: number;
+  categorised: number;
+  uncategorised: number;
+  broken_category_rules: string[];
+  similarity_model_version: string;
+}
+
+/** One lexicon rule. Only confirmed rules affect retrieval. */
+export interface PartCategoryRule {
+  pattern: string;
+  category: string;
+  priority: number;
+  set_by: string | null;
+  confirmed: number;
+  confirmed_by: string | null;
+  updated_at: string;
+}
+
+export interface PartCategoryPage {
+  rules: PartCategoryRule[];
+  confirmed: number;
+  pending: number;
+}
+
+export interface PartCategoryCoverage {
+  batch_id: number;
+  total: number;
+  categorised: number;
+  uncategorised: number;
+  pct: number;
+  by_category: Record<string, number>;
+  uncategorised_samples: string[];
+  broken_rules: string[];
+}
+
 export interface ChatResponse {
   answer: string;
   sources: Record<string, unknown>[];

@@ -177,6 +177,10 @@ def test_fk_supporting_indexes_are_declared():
                   ("recommendation_result",
                    ("batch_id", "item_id", "stockroom_id")),
                   ("triage_result",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("similarity_result",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("similarity_neighbour",
                    ("batch_id", "item_id", "stockroom_id"))}
     flat = FK_INDEX_DDL.replace("\n", " ")
     for _name, child, cols, parent, _pcols, _action in FOREIGN_KEYS:

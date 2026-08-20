@@ -75,6 +75,14 @@ FOREIGN_KEYS = [
      ("batch_id", "item_id", "stockroom_id"),
      "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
      "CASCADE"),
+    ("similarity_result_recommendation_fk", "similarity_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
+    ("similarity_neighbour_result_fk", "similarity_neighbour",
+     ("batch_id", "item_id", "stockroom_id"),
+     "similarity_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
 ]
 
 # Postgres does not index the referencing side of a foreign key, so every
@@ -193,6 +201,20 @@ CREATE TABLE IF NOT EXISTS machine_criticality_config (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- What KIND of part this is, matched against item_desc. Engineer-owned on the
+-- same terms as machine_criticality_config: anyone with review rights may
+-- PROPOSE a rule, only an approver confirms, and similarity reads confirmed
+-- rows only. Lower priority wins, so specific rules sit above generic ones.
+CREATE TABLE IF NOT EXISTS part_category_config (
+  pattern TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT DEFAULT (datetime('now')),
@@ -289,11 +311,71 @@ CREATE TABLE IF NOT EXISTS triage_result (
     ON DELETE CASCADE
 );
 
+-- Advisory peer evidence. Never an input to sizing, never exported.
+-- The engine calculates; these are historical analogues for the engineer.
+CREATE TABLE IF NOT EXISTS similarity_result (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  similarity_model_version TEXT NOT NULL,
+  neighbour_count INTEGER NOT NULL DEFAULT 0,
+  pool_size INTEGER NOT NULL DEFAULT 0,
+  nearest_distance REAL,
+  outlier_score REAL NOT NULL DEFAULT 1,
+  is_outlier INTEGER NOT NULL DEFAULT 1,
+  historical_override_rate REAL,
+  historical_upward_override_rate REAL,
+  historical_high_risk_rate REAL,
+  analogue_max_median INTEGER,
+  analogue_max_p25 INTEGER,
+  analogue_max_p75 INTEGER,
+  analogue_rop_median INTEGER,
+  analogue_min_median INTEGER,
+  part_category TEXT NOT NULL DEFAULT '',
+  advisory_codes TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0,
+  generated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
+-- One row per retrieved peer. similarity_reasons is business language only --
+-- it must never embed a supplier or machine_type VALUE (redact.py masks by key
+-- name, so a value inside a free-text column would bypass LLM_REDACT_PROMPTS).
+CREATE TABLE IF NOT EXISTS similarity_neighbour (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_rank INTEGER NOT NULL,
+  neighbour_item_id TEXT NOT NULL,
+  neighbour_stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_batch_id INTEGER NOT NULL,
+  distance REAL NOT NULL,
+  similarity_reasons TEXT NOT NULL DEFAULT '',
+  neighbour_decision TEXT,
+  neighbour_final_max INTEGER,
+  neighbour_final_rop INTEGER,
+  neighbour_final_min INTEGER,
+  neighbour_engine_max INTEGER,
+  neighbour_risk_level TEXT,
+  neighbour_reason_code TEXT,
+  neighbour_justification TEXT,
+  neighbour_comment TEXT,
+  PRIMARY KEY (batch_id, item_id, stockroom_id, neighbour_rank),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES similarity_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
 CREATE INDEX IF NOT EXISTS ix_triage_result_tier
   ON triage_result(batch_id, triage_tier, priority_score);
+CREATE INDEX IF NOT EXISTS ix_similarity_result_outlier
+  ON similarity_result(batch_id, is_outlier, outlier_score);
 """ + FK_INDEX_DDL
 
 # Postgres equivalent. Differences are confined to: IDENTITY vs AUTOINCREMENT,
@@ -384,6 +466,20 @@ CREATE TABLE IF NOT EXISTS machine_criticality_config (
   updated_at TEXT DEFAULT {PG_NOW}
 );
 
+-- What KIND of part this is, matched against item_desc. Engineer-owned on the
+-- same terms as machine_criticality_config: anyone with review rights may
+-- PROPOSE a rule, only an approver confirms, and similarity reads confirmed
+-- rows only. Lower priority wins, so specific rules sit above generic ones.
+CREATE TABLE IF NOT EXISTS part_category_config (
+  pattern TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ts TEXT DEFAULT {PG_NOW},
@@ -468,11 +564,71 @@ CREATE TABLE IF NOT EXISTS triage_result (
     ON DELETE CASCADE
 );
 
+-- Advisory peer evidence. Never an input to sizing, never exported.
+-- The engine calculates; these are historical analogues for the engineer.
+CREATE TABLE IF NOT EXISTS similarity_result (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  similarity_model_version TEXT NOT NULL,
+  neighbour_count INTEGER NOT NULL DEFAULT 0,
+  pool_size INTEGER NOT NULL DEFAULT 0,
+  nearest_distance DOUBLE PRECISION,
+  outlier_score DOUBLE PRECISION NOT NULL DEFAULT 1,
+  is_outlier INTEGER NOT NULL DEFAULT 1,
+  historical_override_rate DOUBLE PRECISION,
+  historical_upward_override_rate DOUBLE PRECISION,
+  historical_high_risk_rate DOUBLE PRECISION,
+  analogue_max_median INTEGER,
+  analogue_max_p25 INTEGER,
+  analogue_max_p75 INTEGER,
+  analogue_rop_median INTEGER,
+  analogue_min_median INTEGER,
+  part_category TEXT NOT NULL DEFAULT '',
+  advisory_codes TEXT NOT NULL DEFAULT '',
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+  generated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
+-- One row per retrieved peer. similarity_reasons is business language only --
+-- it must never embed a supplier or machine_type VALUE (redact.py masks by key
+-- name, so a value inside a free-text column would bypass LLM_REDACT_PROMPTS).
+CREATE TABLE IF NOT EXISTS similarity_neighbour (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_rank INTEGER NOT NULL,
+  neighbour_item_id TEXT NOT NULL,
+  neighbour_stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_batch_id BIGINT NOT NULL,
+  distance DOUBLE PRECISION NOT NULL,
+  similarity_reasons TEXT NOT NULL DEFAULT '',
+  neighbour_decision TEXT,
+  neighbour_final_max INTEGER,
+  neighbour_final_rop INTEGER,
+  neighbour_final_min INTEGER,
+  neighbour_engine_max INTEGER,
+  neighbour_risk_level TEXT,
+  neighbour_reason_code TEXT,
+  neighbour_justification TEXT,
+  neighbour_comment TEXT,
+  PRIMARY KEY (batch_id, item_id, stockroom_id, neighbour_rank),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES similarity_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
 CREATE INDEX IF NOT EXISTS ix_triage_result_tier
   ON triage_result(batch_id, triage_tier, priority_score);
+CREATE INDEX IF NOT EXISTS ix_similarity_result_outlier
+  ON similarity_result(batch_id, is_outlier, outlier_score);
 """ + FK_INDEX_DDL + PG_ONLY_INDEX_DDL
 
 # Tables whose PK is a generated identity -- needed to translate lastrowid.
@@ -691,6 +847,10 @@ def _ensure_columns(conn) -> None:
                          f"ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
         conn.execute("ALTER TABLE triage_result ADD COLUMN IF NOT EXISTS "
                      "procurement_narrative TEXT")
+        # similarity_result already exists on the live project, so CREATE TABLE
+        # IF NOT EXISTS will never add this one.
+        conn.execute("ALTER TABLE similarity_result ADD COLUMN IF NOT EXISTS "
+                     "part_category TEXT DEFAULT ''")
         return
     existing = {r["name"] for r in conn.execute(
         "PRAGMA table_info(recommendation_result)")}
@@ -702,6 +862,11 @@ def _ensure_columns(conn) -> None:
         "PRAGMA table_info(triage_result)")}
     if "procurement_narrative" not in triage_cols:
         conn.execute("ALTER TABLE triage_result ADD COLUMN procurement_narrative TEXT")
+    sim_cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(similarity_result)")}
+    if "part_category" not in sim_cols:
+        conn.execute("ALTER TABLE similarity_result "
+                     "ADD COLUMN part_category TEXT DEFAULT ''")
 
 
 def init_db() -> None:
@@ -730,6 +895,23 @@ def init_db() -> None:
                 "VALUES (?,?,1,?)",
                 (cfg["rule_version"], json.dumps(cfg), "seed"),
             )
+        # Seed the part-category lexicon, confirmed. An empty criticality table
+        # means "fall back to the source column", which is a safe default; an
+        # empty lexicon means the similarity constraint silently does nothing,
+        # which is worse than a default an engineer can correct. rule_config is
+        # seeded active=1 for the same reason.
+        n = conn.execute(
+            "SELECT COUNT(*) c FROM part_category_config").fetchone()["c"]
+        if n == 0:
+            from .part_category import DEFAULT_RULES
+            # Every value is a placeholder, including the constants: the REST
+            # transport rebuilds the VALUES clause from the row width, so a
+            # literal written inline is silently dropped (rest_conn.executemany).
+            conn.executemany(
+                "INSERT INTO part_category_config (pattern, category, priority, "
+                "set_by, confirmed, confirmed_by) VALUES (?,?,?,?,?,?)",
+                [(pat, cat, pri, "seed", 1, "seed")
+                 for pri, cat, pat in DEFAULT_RULES])
         conn.commit()
     finally:
         conn.close()

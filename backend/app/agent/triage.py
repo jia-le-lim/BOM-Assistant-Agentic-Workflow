@@ -30,9 +30,12 @@ def run_triage(conn, batch_id: int, actor: dict | None = None,
         "AND b.stockroom_id=r.stockroom_id "
         "LEFT JOIN triage_result t ON t.batch_id=r.batch_id AND t.item_id=r.item_id "
         "AND t.stockroom_id=r.stockroom_id "
+        "LEFT JOIN similarity_result s ON s.batch_id=r.batch_id "
+        "AND s.item_id=r.item_id AND s.stockroom_id=r.stockroom_id "
         "WHERE r.batch_id=? AND r.review_required='Y' "
         "AND t.batch_id IS NULL "
-        "ORDER BY CASE WHEN r.risk_level='High' THEN 0 ELSE 1 END, "
+        "ORDER BY COALESCE(s.is_outlier, 0) DESC, "
+        "CASE WHEN r.risk_level='High' THEN 0 ELSE 1 END, "
         "CASE WHEN r.agreement='diverge' THEN 0 ELSE 1 END, "
         "r.exposure_usd DESC, r.item_id",
         (batch_id,)))

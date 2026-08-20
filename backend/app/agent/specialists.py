@@ -84,6 +84,7 @@ def synthesis(state: dict) -> dict:
         "history": state.get("history_narrative", "")[:2000],
         "demand": state.get("demand_narrative", "")[:2000],
         "procurement": state.get("procurement_narrative", "")[:2000],
+        "peer_evidence": state.get("similarity", {}),
     }
     provider = get_provider()
     response = provider.chat([
@@ -108,10 +109,21 @@ def synthesis(state: dict) -> dict:
     if tier == "clear_candidate" and not safe_clear:
         tier = fallback_tier
 
+    # Peer evidence is asymmetric by design: it may surface additional risk, it
+    # may never cancel a rule-based signal. An outlier has no comparable
+    # precedent, so it cannot be a clear candidate whatever the model said.
+    priority = _number(verdict.get("priority_score"), 0, 100,
+                       90 if fallback_tier == "escalate" else 50)
+    if state["features"].get("similarity_outlier") and tier == "clear_candidate":
+        tier = "review"
+    if state["features"].get("similarity_elevated"):
+        priority = min(100.0, priority + 15)
+        if tier == "clear_candidate":
+            tier = "review"
+
     return {
         "triage_tier": tier,
-        "priority_score": _number(verdict.get("priority_score"), 0, 100,
-                                  90 if fallback_tier == "escalate" else 50),
+        "priority_score": priority,
         "rationale": str(verdict.get("rationale") or
                          "Conservative fallback: synthesis returned no valid verdict.")[:4000],
         "confidence": _number(verdict.get("confidence"), 0, 1, 0),

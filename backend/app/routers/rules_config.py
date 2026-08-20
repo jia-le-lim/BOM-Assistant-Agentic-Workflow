@@ -11,8 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
 from ..db import active_config, get_conn, stored_config
-from .. import engine_statistical
-from ..schemas import ConfigUpdateRequest, CriticalityRequest
+from .. import engine_statistical, similarity
+from ..part_category import categorise, load_rules
+from ..schemas import (ConfigUpdateRequest, CriticalityRequest,
+                       PartCategoryRequest)
 from ..security import APPROVE_ROLES, CONFIG_WRITE_ROLES, REVIEW_ROLES, any_role, require_role
 
 router = APIRouter()
@@ -33,6 +35,15 @@ TRIAGE_DEFAULTS = {
     "triage_clear_precision_bar": 0.98,
     "triage_preselect_min_confidence": 0.9,
     "triage_guarded_assist_enabled": False,
+}
+
+# Advisory KNN peer-evidence knobs, shown with the module defaults so the Config
+# page always reflects the policy actually in force.
+SIMILARITY_DEFAULTS = {
+    "similarity_max_distance": similarity.MAX_DISTANCE,
+    "similarity_min_neighbours": similarity.MIN_NEIGHBOURS,
+    "similarity_k": similarity.K_NEIGHBOURS,
+    "similarity_divergence_frac": similarity.DIVERGENCE_FRAC,
 }
 
 # Keys that may be updated via the API, with their expected types.
@@ -58,6 +69,10 @@ EDITABLE = {
     "triage_clear_precision_bar": (int, float),
     "triage_preselect_min_confidence": (int, float),
     "triage_guarded_assist_enabled": (bool,),
+    "similarity_max_distance": (int, float),
+    "similarity_min_neighbours": (int, float),
+    "similarity_k": (int, float),
+    "similarity_divergence_frac": (int, float),
 }
 
 
@@ -66,7 +81,8 @@ def get_rules(actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         cfg = active_config(conn)
-        merged = {**AUTOCLEAR_DEFAULTS, **TRIAGE_DEFAULTS, **cfg}
+        merged = {**AUTOCLEAR_DEFAULTS, **TRIAGE_DEFAULTS,
+                  **SIMILARITY_DEFAULTS, **cfg}
         return {"rule_version": cfg["rule_version"],
                 "config": {k: v for k, v in merged.items() if not k.startswith("_")}}
     finally:
@@ -157,5 +173,110 @@ def confirm_criticality(pattern: str,
               "criticality", pattern, {"confirmed": True})
         conn.commit()
         return {"pattern": pattern, "confirmed": True, "confirmed_by": actor["user"]}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# part-category lexicon (PRD 5.3 pattern: propose -> confirm -> engine reads)
+# ---------------------------------------------------------------------------
+
+@router.get("/config/part-categories")
+def list_part_categories(actor: dict = Depends(any_role())):
+    """Every rule, confirmed and pending. Only confirmed ones affect retrieval."""
+    conn = get_conn()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT pattern, category, priority, set_by, confirmed, confirmed_by, "
+            "updated_at FROM part_category_config ORDER BY priority, pattern")]
+        return {"rules": rows, "confirmed": sum(1 for r in rows if r["confirmed"]),
+                "pending": sum(1 for r in rows if not r["confirmed"])}
+    finally:
+        conn.close()
+
+
+@router.post("/config/part-categories")
+def propose_part_category(body: PartCategoryRequest,
+                          actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO part_category_config (pattern, category, priority, "
+            "set_by, confirmed, updated_at) VALUES (?,?,?,?,0,datetime('now')) "
+            "ON CONFLICT(pattern) DO UPDATE SET category=excluded.category, "
+            "priority=excluded.priority, set_by=excluded.set_by, "
+            "confirmed=0, confirmed_by=NULL, updated_at=datetime('now')",
+            (body.pattern, body.category, body.priority, actor["user"]))
+        audit(conn, actor, "POST", "/config/part-categories", "part_category",
+              body.pattern, body.model_dump())
+        conn.commit()
+        return {"pattern": body.pattern, "category": body.category,
+                "priority": body.priority, "confirmed": False,
+                "note": "proposal recorded; requires confirmation before "
+                        "similarity uses it"}
+    finally:
+        conn.close()
+
+
+@router.post("/config/part-categories/{pattern:path}/confirm")
+def confirm_part_category(pattern: str,
+                          actor: dict = Depends(require_role(*APPROVE_ROLES))):
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT * FROM part_category_config WHERE pattern=?",
+                         (pattern,)).fetchone()
+        if r is None:
+            raise HTTPException(404, f"no part-category rule for pattern '{pattern}'")
+        if r["set_by"] == actor["user"]:
+            raise HTTPException(403, "proposer cannot confirm their own rule")
+        conn.execute(
+            "UPDATE part_category_config SET confirmed=1, confirmed_by=?, "
+            "updated_at=datetime('now') WHERE pattern=?", (actor["user"], pattern))
+        audit(conn, actor, "POST", "/config/part-categories/confirm",
+              "part_category", pattern, {"confirmed": True})
+        conn.commit()
+        return {"pattern": pattern, "confirmed": True,
+                "confirmed_by": actor["user"]}
+    finally:
+        conn.close()
+
+
+@router.get("/config/part-categories/coverage")
+def part_category_coverage(batch_id: int, limit: int = 20,
+                           actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    """How much of a batch the lexicon actually resolves, and what it missed.
+
+    The feedback loop that keeps the lexicon alive: an engineer reads the
+    unmatched descriptions and writes the next rule.
+    """
+    conn = get_conn()
+    try:
+        if conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
+                        (batch_id,)).fetchone() is None:
+            raise HTTPException(404, f"batch {batch_id} not found")
+        rules, broken = load_rules(conn)
+        by_category: dict[str, int] = {}
+        samples: list[str] = []
+        total = uncategorised = 0
+        for row in conn.execute(
+                "SELECT payload FROM bom_rows WHERE batch_id=? AND quarantined=0",
+                (batch_id,)):
+            desc = json.loads(row["payload"]).get("item_desc")
+            total += 1
+            cat = categorise(desc, rules)
+            if cat:
+                by_category[cat] = by_category.get(cat, 0) + 1
+            else:
+                uncategorised += 1
+                if len(samples) < max(1, min(int(limit), 100)) and str(desc or "").strip():
+                    samples.append(str(desc).strip()[:80])
+        return {"batch_id": batch_id, "total": total,
+                "categorised": total - uncategorised,
+                "uncategorised": uncategorised,
+                "pct": round(100 * (total - uncategorised) / total, 1) if total else 0.0,
+                "by_category": dict(sorted(by_category.items(),
+                                           key=lambda kv: -kv[1])),
+                "uncategorised_samples": samples,
+                "broken_rules": broken}
     finally:
         conn.close()

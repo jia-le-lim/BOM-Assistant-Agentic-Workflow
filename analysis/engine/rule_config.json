@@ -12,6 +12,12 @@
   "triage_preselect_min_confidence": 0.9,
   "triage_guarded_assist_enabled": false,
 
+  "_similarity": "Advisory KNN peer-evidence layer. Never alters Min/ROP/Max or lowers a risk level.",
+  "similarity_max_distance": 0.35,
+  "similarity_min_neighbours": 5,
+  "similarity_k": 7,
+  "similarity_divergence_frac": 0.5,
+
   "low_cost_threshold": 50.0,
   "high_cost_threshold": 1500.0,
   "long_lead_time_threshold": 45,

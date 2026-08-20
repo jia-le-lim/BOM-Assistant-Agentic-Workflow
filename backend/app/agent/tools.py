@@ -188,6 +188,86 @@ def get_item_notes(ctx: ToolContext, item_id: str) -> dict:
     return {"item_id": item_id, "notes": rows}
 
 
+def get_similar_parts(ctx: ToolContext, item_id: str,
+                      batch_id: int | None = None,
+                      stockroom_id: str | None = None,
+                      limit: int = 5) -> dict:
+    """Historical PEER parts -- different items with comparable attributes.
+
+    Not this item's own history; that is get_item_history (spec section 7).
+    neighbour_stockroom_id is deliberately withheld: stockroom_id is on the PRD
+    5.1 sensitive list, and redact.py masks by key name, so the prefixed column
+    would slip past LLM_REDACT_PROMPTS.
+    """
+    bid = batch_id or ctx.batch_id
+    rec = _resolve(ctx, bid, item_id, stockroom_id)
+    if rec is None:
+        return EMPTY
+    res = ctx.conn.execute(
+        "SELECT * FROM similarity_result WHERE batch_id=? AND item_id=? "
+        "AND stockroom_id=?", (bid, item_id, rec["stockroom_id"])).fetchone()
+    if res is None:
+        return EMPTY
+    limit = max(1, min(int(limit), 10))
+    rows = [dict(r) for r in ctx.conn.execute(
+        "SELECT neighbour_rank, neighbour_item_id, distance, similarity_reasons, "
+        "neighbour_decision, neighbour_final_max, neighbour_final_rop, "
+        "neighbour_final_min, neighbour_reason_code, neighbour_justification "
+        "FROM similarity_neighbour WHERE batch_id=? AND item_id=? "
+        "AND stockroom_id=? ORDER BY neighbour_rank LIMIT ?",
+        (bid, item_id, rec["stockroom_id"], limit))]
+    for r in rows:
+        r["distance"] = round(float(r["distance"]), 3)
+    ctx.sources.append({"type": "similarity_result", "batch_id": bid,
+                        "item_id": item_id,
+                        "similarity_model_version": res["similarity_model_version"],
+                        "neighbour_count": res["neighbour_count"]})
+    return {"item_id": item_id, "neighbour_count": res["neighbour_count"],
+            "pool_size": res["pool_size"], "is_outlier": res["is_outlier"],
+            "advisory_codes": res["advisory_codes"],
+            "analogue_max_median": res["analogue_max_median"],
+            "analogue_max_p25": res["analogue_max_p25"],
+            "analogue_max_p75": res["analogue_max_p75"],
+            "analogue_rop_median": res["analogue_rop_median"],
+            "analogue_min_median": res["analogue_min_median"],
+            "confidence": res["confidence"], "neighbours": rows,
+            "caveat": "advisory peer evidence; never a stock level to apply"}
+
+
+def search_similar_reviews(ctx: ToolContext, query: str,
+                           item_id: str | None = None,
+                           limit: int = 5) -> dict:
+    """Free-text search over what engineers WROTE on past reviews.
+
+    Uses the GIN to_tsvector indexes db.PG_ONLY_INDEX_DDL already creates on
+    review_history -- until now nothing queried them. SQLite (the test backend)
+    has no FTS5 table here, so it falls back to LIKE.
+    """
+    limit = max(1, min(int(limit), 10))
+    if ctx.conn.is_postgres:
+        where = ("to_tsvector('english', coalesce(h.comment,'') || ' ' || "
+                 "coalesce(h.justification,'')) @@ plainto_tsquery('english', ?)")
+        params: list[Any] = [query]
+    else:
+        where = ("LOWER(COALESCE(h.comment,'') || ' ' || "
+                 "COALESCE(h.justification,'')) LIKE ?")
+        params = [f"%{query.strip().lower()}%"]
+    sql = ("SELECT h.item_id, h.batch_id, h.decision, h.final_max, h.final_rop, "
+           "h.final_min, h.comment, h.justification, h.reviewed_at "
+           "FROM review_history h WHERE " + where)
+    if item_id:
+        sql += " AND h.item_id=?"
+        params.append(item_id)
+    sql += " ORDER BY h.review_id DESC LIMIT ?"
+    params.append(limit)
+    rows = [dict(r) for r in ctx.conn.execute(sql, params)]
+    if not rows:
+        return EMPTY
+    ctx.sources.append({"type": "review_history", "query": query,
+                        "count": len(rows)})
+    return {"query": query, "results": rows}
+
+
 def top_exposure(ctx: ToolContext, n: int = 5,
                  batch_id: int | None = None) -> dict:
     bid = batch_id or ctx.batch_id
@@ -409,6 +489,31 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
         "item is absent from the current roster.",
         {"type": "object", "properties": {"item_id": _ITEM},
          "required": ["item_id"]}), get_item_notes),
+
+    "get_similar_parts": (ToolSpec(
+        "get_similar_parts",
+        "Historical PEER parts with comparable machine family, criticality, "
+        "lead time and demand route, with what was finally decided on each. "
+        "Use for 'show me similar parts', 'is this item unusual', 'what did we "
+        "do for comparable parts'. NOT this item's own past decisions -- that "
+        "is get_item_history. Advisory evidence only; it never sets a level.",
+        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
+                                          "stockroom_id": _STOCK,
+                                          "limit": {"type": "integer",
+                                                    "description": "1-10"}},
+         "required": ["item_id"]}), get_similar_parts),
+
+    "search_similar_reviews": (ToolSpec(
+        "search_similar_reviews",
+        "Free-text search of what engineers WROTE on past reviews -- comments "
+        "and justifications across all items and batches. Use for 'why do "
+        "dormant parts keep Max 1', 'what did we say about long lead times'. "
+        "NOT for structured peer attributes -- that is get_similar_parts.",
+        {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "item_id": _ITEM,
+            "limit": {"type": "integer", "description": "1-10"}},
+         "required": ["query"]}), search_similar_reviews),
 
     "top_exposure": (ToolSpec(
         "top_exposure",

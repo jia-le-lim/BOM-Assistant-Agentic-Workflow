@@ -1,5 +1,6 @@
 """Pydantic request/response models."""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -41,6 +42,11 @@ class TriageRunRequest(BaseModel):
     refresh: bool = False
 
 
+class SimilarityRunRequest(BaseModel):
+    batch_id: int = Field(ge=1)
+    refresh: bool = False
+
+
 class ConfirmPendingRequest(BaseModel):
     """Turning a staged proposal into a real review decision.
 
@@ -60,6 +66,28 @@ class CriticalityRequest(BaseModel):
     pattern: str = Field(min_length=2, description="machine_type substring")
     criticality: Literal["High", "Medium", "Low"]
     service_level_target: float | None = Field(default=None, ge=0.5, le=1.0)
+
+
+class PartCategoryRequest(BaseModel):
+    """One lexicon rule: a regex over item_desc, and the category it implies.
+
+    Lower priority wins, so a specific rule (sensor) must sit above a generic
+    one (holder) -- "SENSOR BRACKET ASSY" is a sensor.
+    """
+    pattern: str = Field(min_length=2, max_length=200,
+                         description="regex matched against item_desc, case-insensitive")
+    category: str = Field(min_length=2, max_length=40)
+    priority: int = Field(default=500, ge=1, le=9999)
+
+    @model_validator(mode="after")
+    def pattern_must_compile(self):
+        # Rejected here rather than discovered mid-batch. load_rules() also
+        # skips a broken pattern at read time, for rows that predate this check.
+        try:
+            re.compile(self.pattern)
+        except re.error as e:
+            raise ValueError(f"pattern is not a valid regular expression: {e}")
+        return self
 
 
 class BulkReviewItem(BaseModel):

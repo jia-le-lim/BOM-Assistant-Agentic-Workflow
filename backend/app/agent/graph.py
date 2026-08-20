@@ -19,6 +19,7 @@ class TriageState(TypedDict, total=False):
     clear_confidence_threshold: float
     model_call_limit: int
     features: dict
+    similarity: dict
     history_narrative: str
     demand_narrative: str
     procurement_narrative: str
@@ -34,22 +35,39 @@ class TriageState(TypedDict, total=False):
     focus_question: str
 
 
-def triage_features(rec: dict, exposure_threshold: float) -> dict:
+def triage_features(rec: dict, exposure_threshold: float,
+                    sim: dict | None = None) -> dict:
     exposure = float(rec.get("exposure_usd") or 0)
     high_exposure = exposure >= exposure_threshold
     critical = str(rec.get("sfm_criticality") or "").lower().startswith("h")
     demand_only = (rec.get("agreement") == "match" and not high_exposure
                    and not critical and rec.get("risk_level") != "High")
+    # Advisory peer evidence, promote-only. It can add urgency; graph.synthesis
+    # is where that is applied, and it may never cancel a rule-based signal.
+    elevated = False
+    if sim:
+        elevated = max(float(sim.get("historical_override_rate") or 0),
+                       float(sim.get("historical_high_risk_rate") or 0)) >= 0.5
     return {"high_exposure": high_exposure, "critical": critical,
             "demand_only": demand_only,
             "needs_procurement": (critical or high_exposure
                                   or rec.get("agreement") == "diverge"
-                                  or rec.get("risk_level") == "High")}
+                                  or rec.get("risk_level") == "High"),
+            "similarity_outlier": bool(sim.get("is_outlier")) if sim else False,
+            "similarity_elevated": elevated}
 
 
 def intake(state: TriageState) -> dict:
-    return {"features": triage_features(state["recommendation"],
-                                        state["exposure_threshold"])}
+    rec = state["recommendation"]
+    row = state["conn"].execute(
+        "SELECT neighbour_count, is_outlier, historical_override_rate, "
+        "historical_upward_override_rate, historical_high_risk_rate, "
+        "analogue_max_median, advisory_codes FROM similarity_result "
+        "WHERE batch_id=? AND item_id=? AND stockroom_id=?",
+        (rec["batch_id"], rec["item_id"], rec["stockroom_id"])).fetchone()
+    sim = dict(row) if row is not None else {}
+    return {"features": triage_features(rec, state["exposure_threshold"], sim),
+            "similarity": sim}
 
 
 def route_specialists(state: TriageState) -> str | list[str]:
