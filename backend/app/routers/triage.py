@@ -3,8 +3,9 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
-from ..agent.triage import run_triage
+from ..agent.triage import iter_triage, run_triage
 from ..audit import audit
 from ..db import get_conn
 from ..schemas import TriageRunRequest
@@ -26,7 +27,8 @@ def triage_batch(body: TriageRunRequest,
     try:
         try:
             summary = run_triage(conn, body.batch_id, actor,
-                                 body.llm_call_budget, body.refresh)
+                                 body.llm_call_budget, body.refresh,
+                                 body.item_id, body.stockroom_id)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         audit(conn, actor, "POST", "/triage/run", "triage", body.batch_id,
@@ -35,6 +37,57 @@ def triage_batch(body: TriageRunRequest,
         return summary
     finally:
         conn.close()
+
+
+@router.post("/triage/run/stream")
+def triage_batch_stream(body: TriageRunRequest,
+                        actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    """Same run as POST /triage/run, reported phase by phase as NDJSON.
+
+    Triage spends 3 to 7 model calls on a row, which is tens of seconds of
+    silence on the plain endpoint. Streaming the graph's own phases lets the
+    console show what is actually happening instead of a disabled button.
+    """
+    conn = get_conn()
+    events = iter_triage(conn, body.batch_id, actor, body.llm_call_budget,
+                         body.refresh, body.item_id, body.stockroom_id)
+    try:
+        # Drawn before the response starts, so a bad batch still fails as a
+        # 400 rather than as an error event inside a 200 stream.
+        first = next(events)
+    except ValueError as e:
+        conn.close()
+        raise HTTPException(400, str(e)) from e
+    except BaseException:
+        conn.close()
+        raise
+
+    def generate():
+        try:
+            summary = None
+            for event in [first, *events]:
+                if event["type"] == "complete":
+                    summary = event["summary"]
+                yield json.dumps(event, default=str,
+                                 separators=(",", ":")) + "\n"
+            if summary is not None:
+                audit(conn, actor, "POST", "/triage/run/stream", "triage",
+                      body.batch_id, summary)
+                conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            yield json.dumps({"type": "error",
+                              "message": (str(exc)
+                                          or type(exc).__name__)[:500]}) + "\n"
+        finally:
+            conn.close()
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-transform",
+                 "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/triage/{batch_id}")

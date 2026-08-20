@@ -8,7 +8,14 @@ import type {
   ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
   SimilarityResult, TriageResult,
 } from "@/lib/types";
-import { ActionChip, AgreementChip, Banner, ConsumableChip, ReasonCodes, RiskChip, Spinner, StatusChip, TriageChip } from "@/components/ui";
+import {
+  ActionChip, AgreementChip, Banner, BusyLabel, CardSkeleton, ConsumableChip,
+  ReasonCodes, RiskChip, Skeleton, StatusChip, TriageChip,
+} from "@/components/ui";
+import {
+  emptyRunStream, reduceTriageStream, RunStream,
+  type RunStreamState, type TriageStreamEvent,
+} from "@/components/RunStream";
 
 const CONTEXT_LABELS: Record<string, string> = {
   item_desc: "Description", machine_type: "Machine type", aging_status: "Aging status",
@@ -24,7 +31,7 @@ export default function ItemPage({ params }: {
 }) {
   const { id, itemId } = use(params);
   const batchId = Number(id);
-  const { call } = useApi();
+  const { call, stream } = useApi();
   const { role, user } = useSession();
   const router = useRouter();
 
@@ -35,7 +42,12 @@ export default function ItemPage({ params }: {
   const [justificationTemplates, setJustificationTemplates] = useState<JustificationTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Which action is running, not merely that one is. One shared boolean made
+  // every button on the page say "Working…" at once, so the engineer could not
+  // tell which of them they were waiting for.
+  const [pending, setPending] = useState<"decision" | "triage" | "approve" | null>(null);
+  const busy = pending !== null;
+  const [runStream, setRunStream] = useState<RunStreamState | null>(null);
 
   const [decision, setDecision] = useState<"accept" | "override" | "reject">("accept");
   const [fMax, setFMax] = useState(""); const [fRop, setFRop] = useState(""); const [fMin, setFMin] = useState("");
@@ -82,7 +94,7 @@ export default function ItemPage({ params }: {
   }, [load]);
 
   async function submit() {
-    setBusy(true); setErr(null); setNote(null);
+    setPending("decision"); setErr(null); setNote(null);
     try {
       const body: Record<string, unknown> = { decision, comment, justification };
       if (decision === "override") {
@@ -97,21 +109,55 @@ export default function ItemPage({ params }: {
         : `Recorded as ${decision}. Status: ${r.status}.`);
       await load();
     } catch (e) { setErr((e as Error).message); }
-    finally { setBusy(false); }
+    finally { setPending(null); }
+  }
+
+  /**
+   * Triage is the only step that spends model calls — 3 to 7 per item — so it
+   * runs here, on demand, for the row actually being read. Never for the batch.
+   */
+  async function runTriage() {
+    setPending("triage"); setErr(null); setNote(null);
+    // Held in a local as well as in state: the stream callback fires faster
+    // than React commits, so folding onto the state variable would drop events.
+    let live = emptyRunStream("Triaging this row");
+    setRunStream(live);
+    try {
+      await stream<TriageStreamEvent>("triage/run/stream", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch_id: batchId, item_id: itemId,
+          stockroom_id: d?.recommendation.stockroom_id, refresh: true,
+        }),
+      }, (event) => {
+        live = reduceTriageStream(live, event);
+        setRunStream(live);
+        if (event.type === "complete") {
+          const { triaged, llm_calls_used: calls } = event.summary;
+          setNote(triaged
+            ? `Triaged this item using ${calls} model call${calls === 1 ? "" : "s"}.`
+            : "Nothing to triage for this item.");
+        }
+      });
+      if (live.error) setErr(live.error);
+      await load();
+      setRunStream(null);          // the triage card below is now the result
+    } catch (e) { setErr((e as Error).message); setRunStream(null); }
+    finally { setPending(null); }
   }
 
   async function approve() {
-    setBusy(true); setErr(null); setNote(null);
+    setPending("approve"); setErr(null); setNote(null);
     try {
       await call(`review/${itemId}/approve?batch_id=${batchId}`, { method: "POST" });
       setNote("Senior approval recorded — this row is now eligible for the WINGS export.");
       await load();
     } catch (e) { setErr((e as Error).message); }
-    finally { setBusy(false); }
+    finally { setPending(null); }
   }
 
   if (err && !d) return <Banner kind="error">{err}</Banner>;
-  if (!d) return <Spinner />;
+  if (!d) return <ItemSkeleton />;
 
   const r = d.recommendation;
   const cur = {
@@ -130,7 +176,7 @@ export default function ItemPage({ params }: {
 
   return (
     <div className="flex flex-col gap-5">
-      <div>
+      <div className="page-head">
         <button onClick={() => router.back()} className="text-xs" style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
           ← Back to items
         </button>
@@ -155,46 +201,6 @@ export default function ItemPage({ params }: {
 
       <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
         <div className="flex flex-col gap-5">
-          {triage && (
-            <div className="card p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                <h2 className="text-sm font-semibold">Advisory triage</h2>
-                <div className="flex items-center gap-3">
-                  <TriageChip tier={triage.triage_tier} />
-                  <span className="text-xs tnum" style={{ color: "var(--text-secondary)" }}>
-                    priority {triage.priority_score.toFixed(0)} · confidence {Math.round(triage.confidence * 100)}%
-                  </span>
-                </div>
-              </div>
-              <p className="text-sm">{triage.rationale}</p>
-              {triage.focus_question && (
-                <p className="text-sm mt-3 p-3 rounded" style={{ background: "var(--seq-soft)" }}>
-                  <strong>Focus:</strong> {triage.focus_question}
-                </p>
-              )}
-              <div className="grid gap-3 mt-4 md:grid-cols-3">
-                {([
-                  ["History", triage.history_narrative],
-                  ["Demand", triage.demand_narrative],
-                  ["Procurement", triage.procurement_narrative],
-                ] as const).filter(([, narrative]) => narrative).map(([label, narrative]) => (
-                  <div key={label}>
-                    <div className="text-xs font-medium mb-1">{label}</div>
-                    <p className="text-xs" style={{ color: "var(--text-secondary)" }}>{narrative}</p>
-                  </div>
-                ))}
-              </div>
-              <details className="text-xs mt-4">
-                <summary style={{ color: "var(--text-muted)", cursor: "pointer" }}>
-                  {triage.sources.length} grounded sources · {triage.provider}:{triage.model}
-                </summary>
-                <pre className="mt-2 p-3 rounded scroll-x" style={{ background: "var(--seq-soft)" }}>
-                  {JSON.stringify(triage.sources, null, 2)}
-                </pre>
-              </details>
-            </div>
-          )}
-
           <div className="card p-5">
             <h2 className="text-sm font-semibold mb-3">Engine recommendation</h2>
             <div className="scroll-x">
@@ -261,6 +267,89 @@ export default function ItemPage({ params }: {
               <ReasonCodes codes={r.reason_code} max={12} />
             </div>
           </div>
+
+          {can.review(role) && !triage && (
+            <div className="card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="mr-auto">
+                  <h2 className="text-sm font-semibold">Advisory triage</h2>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    Not run for this item yet. Triage is the only step that calls the
+                    model — 3 to 7 calls — so it runs per item, when you ask for it.
+                  </p>
+                </div>
+                <button className="btn btn-primary" onClick={runTriage} disabled={busy}>
+                  <BusyLabel busy={pending === "triage"} running="Triaging…"
+                             idle="Run triage for this item" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {runStream && <RunStream state={runStream} />}
+
+          {triage && (
+            <div className="card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <h2 className="text-sm font-semibold">Advisory triage</h2>
+                <div className="flex items-center gap-3">
+                  <TriageChip tier={triage.triage_tier} />
+                  <span className="text-xs tnum" style={{ color: "var(--text-secondary)" }}>
+                    priority {triage.priority_score.toFixed(0)} · confidence {Math.round(triage.confidence * 100)}%
+                  </span>
+                  {can.review(role) && (
+                    <button className="btn text-xs" onClick={runTriage} disabled={busy}
+                            title="Re-run triage for this item only">
+                      <BusyLabel busy={pending === "triage"} running="Re-running…" idle="Re-run" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="text-sm" style={{ lineHeight: 1.5 }}>{triage.rationale}</p>
+              {triage.focus_question && (
+                <p className="text-sm mt-3 p-3 rounded" style={{ background: "var(--seq-soft)" }}>
+                  <strong>Decide:</strong> {triage.focus_question}
+                </p>
+              )}
+              {/* The rationale and focus question above ARE the conclusion. The
+                  specialist lines are the working behind it — available, but not
+                  competing with it for attention. */}
+              {(() => {
+                const evidence = ([
+                  ["History", triage.history_narrative],
+                  ["Demand", triage.demand_narrative],
+                  ["Procurement", triage.procurement_narrative],
+                ] as const).filter(([, n]) => n);
+                if (!evidence.length) return null;
+                return (
+                  <details className="mt-4">
+                    <summary className="text-xs" style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+                      Specialist evidence ({evidence.length})
+                    </summary>
+                    <div className="flex flex-col gap-3 mt-3">
+                      {evidence.map(([label, narrative]) => (
+                        <div key={label} style={{ borderLeft: "2px solid var(--seq)", paddingLeft: 10 }}>
+                          <div className="text-xs font-medium mb-1">{label}</div>
+                          <p className="text-xs" style={{ color: "var(--text-secondary)",
+                                                          whiteSpace: "pre-wrap" }}>
+                            {narrative}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })()}
+              <details className="text-xs mt-4">
+                <summary style={{ color: "var(--text-muted)", cursor: "pointer" }}>
+                  {triage.sources.length} grounded sources · {triage.provider}:{triage.model}
+                </summary>
+                <pre className="mt-2 p-3 rounded scroll-x" style={{ background: "var(--seq-soft)" }}>
+                  {JSON.stringify(triage.sources, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )}
 
           <div className="card p-5">
             <h2 className="text-sm font-semibold mb-3">Decision</h2>
@@ -347,14 +436,16 @@ export default function ItemPage({ params }: {
 
                 <div className="flex gap-2">
                   <button className="btn btn-primary" onClick={submit} disabled={busy}>
-                    {busy ? "Saving…" : "Record decision"}
+                    <BusyLabel busy={pending === "decision"} running="Saving…"
+                               idle="Record decision" />
                   </button>
                   {d.status === "awaiting_senior" && (
                     <button className="btn" onClick={approve} disabled={busy || !canApprove}
                             title={!can.approve(role) ? "Needs senior or admin role"
                                    : latest?.reviewer === user ? "You cannot approve your own review"
                                    : "Approve this review"}>
-                      Approve as senior
+                      <BusyLabel busy={pending === "approve"} running="Approving…"
+                                 idle="Approve as senior" />
                     </button>
                   )}
                 </div>
@@ -512,6 +603,35 @@ export default function ItemPage({ params }: {
               </div>
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The item page fires five requests before it can show anything. A bare
+ * "Loading…" for that long reads as a stall, so the wait shows the shape of the
+ * page that is coming -- same columns, same card count, so nothing jumps when
+ * the data lands.
+ */
+function ItemSkeleton() {
+  return (
+    <div className="flex flex-col gap-5" role="status" aria-busy="true">
+      <span className="sr-only">Loading item…</span>
+      <div className="skeleton-stack">
+        <Skeleton w="220px" h="1.35rem" />
+        <Skeleton w="52%" h="0.8rem" />
+      </div>
+      <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
+        <div className="flex flex-col gap-5">
+          <CardSkeleton lines={5} label="Loading engine recommendation" />
+          <CardSkeleton lines={3} label="Loading advisory triage" />
+          <CardSkeleton lines={4} label="Loading decision form" />
+        </div>
+        <div className="flex flex-col gap-5">
+          <CardSkeleton lines={6} label="Loading input context" />
+          <CardSkeleton lines={4} label="Loading peer evidence" />
         </div>
       </div>
     </div>

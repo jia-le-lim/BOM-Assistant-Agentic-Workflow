@@ -958,3 +958,171 @@ th { font-weight: 600; color: var(--text-secondary); text-align: left; }
 td, th { padding: 0.5rem 0.7rem; }
 tbody tr { border-top: 1px solid var(--gridline); }
 tbody tr:hover { background: var(--hover); }
+
+/* ==========================================================================
+   Loading surfaces
+   --------------------------------------------------------------------------
+   Every wait in this console is a network round trip to FastAPI, and some of
+   them (engine run, similarity, triage) are seconds to a minute long. A blank
+   card for that long reads as a broken page, so each wait gets a shape that
+   matches how long it takes and how much we know about it:
+
+     skeleton   -- short fetch, known layout: hold the space, show the shape
+     .spin      -- a single action inside a button
+     progress   -- long work with no measurable percentage (indeterminate only;
+                   it never pretends to be a completion figure)
+     agent-step -- long work with real phases streamed from the backend
+   ========================================================================== */
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--gridline);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--surface-1) 75%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: skeleton-sweep 1.3s ease-in-out infinite;
+}
+.skeleton-stack > * + * { margin-top: 0.5rem; }
+
+/* Table placeholder rows use the real row metrics, so the table does not
+   change height when the data lands (no layout shift). */
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.62rem 0.7rem;
+  border-top: 1px solid var(--gridline);
+}
+.skeleton-row > .skeleton { height: 0.7rem; flex: 1 1 0; }
+.skeleton-row > .skeleton:first-child { flex: 0 0 96px; }
+.skeleton-row > .skeleton:last-child { flex: 0 0 56px; }
+
+.spin {
+  display: inline-block;
+  width: 0.82em;
+  height: 0.82em;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  animation: agent-spin 0.7s linear infinite;
+}
+.btn > .spin { margin-right: 0.4rem; }
+
+.progress-track {
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--gridline);
+}
+.progress-track > i {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--seq);
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+/* A card whose contents are being refreshed in place: dimmed, not removed, so
+   the engineer keeps reading the previous answer instead of watching a hole. */
+.is-refreshing {
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+/* Live phase list for a streamed backend run. Reuses .agent-step markers. */
+.run-stream {
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--gridline);
+  border-radius: 9px;
+  background: var(--page);
+}
+.run-stream-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+}
+.run-stream-head strong { color: var(--text-primary); font-size: 0.72rem; font-weight: 650; }
+.run-stream-head > span:last-child { margin-left: auto; color: var(--text-muted); font-size: 0.65rem; }
+.run-stream .agent-steps { margin-top: 0; }
+
+@keyframes skeleton-sweep { to { transform: translateX(100%); } }
+@keyframes progress-slide {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
+/* ---- page layout: sticky work surfaces ---------------------------------- */
+
+/* The batch header carries Run engine / Export. Scrolling a 2,800-row queue
+   must not scroll those out of reach. */
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  margin: -1.5rem -1.25rem 0;
+  padding: 1.25rem 1.25rem 0.9rem;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Work first, analysis beside it: the queue owns the column, the signal cards
+   sit in a rail that stays visible while the queue scrolls. */
+.work-split { display: grid; gap: 1.25rem; align-items: start; }
+.work-rail { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
+
+@media (min-width: 1280px) {
+  .work-split { grid-template-columns: minmax(0, 1fr) 340px; }
+  .work-rail { position: sticky; top: 6.5rem; max-height: calc(100vh - 8rem); overflow-y: auto; }
+}
+
+/* Queue filters stay reachable while the rows scroll under them. */
+.queue-toolbar {
+  position: sticky;
+  top: 5.6rem;
+  z-index: 10;
+  padding: 0.75rem 0;
+  background: var(--surface-1);
+}
+
+@media (min-width: 1024px) {
+  .page-head { margin-inline: -2rem; padding-inline: 2rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after, .progress-track > i, .spin { animation: none; }
+  .page-head { backdrop-filter: none; background: var(--page); }
+}
+
+/* The review queue is a ten-column table of 2,800 rows. The shell's 1180px
+   reading column is right for chat and config and wrong for this: it forced
+   the table into a horizontal scrollbar with a 340px rail beside it. A page
+   opts out of the cap by marking its root .page-wide -- the shell honours it
+   rather than every page carrying its own width. */
+.shell-content:has(.page-wide) { max-width: none; }
+
+@media (min-width: 1280px) {
+  .page-wide .work-split { grid-template-columns: minmax(0, 1fr) 320px; }
+}
+@media (min-width: 1700px) {
+  .page-wide .work-split { grid-template-columns: minmax(0, 1fr) 360px; }
+}

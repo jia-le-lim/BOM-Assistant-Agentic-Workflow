@@ -1,6 +1,7 @@
 """Read-only specialist nodes used by the triage graph."""
 
 import json
+import re
 
 from ..llm import Message, get_provider
 from .loop import run_agent
@@ -8,6 +9,48 @@ from .prompts import (TRIAGE_DEMAND_SYSTEM, TRIAGE_HISTORY_SYSTEM,
                       TRIAGE_PROCUREMENT_SYSTEM, TRIAGE_SYNTHESIS_SYSTEM)
 
 TIERS = {"clear_candidate", "review", "escalate"}
+
+# TRIAGE_FORMAT asks for one sentence of implication -- roughly 150-200
+# characters. The cap leaves headroom for a long one without letting a model that
+# ignores the instruction recite the whole stored record back. The prompt asks,
+# this enforces: prompts.py's own header rule, never rely on wording alone.
+MAX_NARRATIVE_CHARS = 320
+
+# The conclusion the reviewer reads first. Uncapped it came back at 521
+# characters stitching the three specialist lines together verbatim -- two
+# sentences by punctuation, a paragraph by eye. Two short sentences is ~300.
+MAX_RATIONALE_CHARS = 360
+MAX_FOCUS_CHARS = 200
+
+_TABLE_ROW = re.compile(r"^\s*\|.*$", re.MULTILINE)      # GFM row + separator
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
+# The model also writes headings mid-sentence ("for item 500794916: ## Review
+# History"), which the line-anchored pattern above cannot see. Require a run of
+# 2+ hashes AND a trailing space so ingestion's duplicate suffix (item#dup1)
+# and ordinary "#3" survive untouched.
+_INLINE_HEADING = re.compile(r"#{2,6}\s+")
+_BULLET = re.compile(r"^\s{0,3}[-*+]\s+", re.MULTILINE)
+_EMPHASIS = re.compile(r"(\*\*|__|\*|`)")
+_BLANKS = re.compile(r"\n{2,}")
+
+
+def _plain(text: str, limit: int = MAX_NARRATIVE_CHARS) -> str:
+    """Markdown source rendered as literal text is worse than no formatting.
+
+    Strips what the specialists are told not to emit, then caps at a sentence
+    boundary so a truncation does not read as a thought cut in half.
+    """
+    out = _TABLE_ROW.sub("", str(text or ""))
+    out = _HEADING.sub("", out)
+    out = _INLINE_HEADING.sub("", out)
+    out = _BULLET.sub("", out)
+    out = _EMPHASIS.sub("", out)
+    out = _BLANKS.sub("\n", out).strip()
+    if len(out) <= limit:
+        return out
+    clipped = out[:limit]
+    stop = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
+    return clipped[:stop + 1] if stop > limit // 2 else clipped.rstrip() + "…"
 
 
 def history(state: dict) -> dict:
@@ -22,7 +65,7 @@ def history(state: dict) -> dict:
         tool_names={"get_item_history", "get_item_notes"},
         max_model_calls=state["model_call_limit"],
     )
-    narrative = (result["answer"] if result["sources"] else
+    narrative = (_plain(result["answer"]) if result["sources"] else
                  "No recorded review history or active engineer notes.")
     return {"history_narrative": narrative, "sources": result["sources"],
             "providers": [result["provider"]], "models": [result["model"]],
@@ -41,7 +84,7 @@ def demand(state: dict) -> dict:
         tool_names={"get_triage_context"},
         max_model_calls=state["model_call_limit"],
     )
-    return {"demand_narrative": result["answer"],
+    return {"demand_narrative": _plain(result["answer"]),
             "sources": result["sources"],
             "providers": [result["provider"]], "models": [result["model"]],
             "specialist_calls": 1, "llm_calls": result["model_calls"]}
@@ -59,7 +102,7 @@ def procurement(state: dict) -> dict:
         tool_names={"get_procurement_context"},
         max_model_calls=state["model_call_limit"],
     )
-    return {"procurement_narrative": result["answer"],
+    return {"procurement_narrative": _plain(result["answer"]),
             "sources": result["sources"],
             "providers": [result["provider"]], "models": [result["model"]],
             "specialist_calls": 1, "llm_calls": result["model_calls"]}
@@ -124,11 +167,13 @@ def synthesis(state: dict) -> dict:
     return {
         "triage_tier": tier,
         "priority_score": priority,
-        "rationale": str(verdict.get("rationale") or
-                         "Conservative fallback: synthesis returned no valid verdict.")[:4000],
+        "rationale": _plain(verdict.get("rationale") or
+                            "Conservative fallback: synthesis returned no valid "
+                            "verdict.", MAX_RATIONALE_CHARS),
         "confidence": _number(verdict.get("confidence"), 0, 1, 0),
-        "focus_question": str(verdict.get("focus_question") or
-                              "Does the stored evidence justify this change?")[:1000],
+        "focus_question": _plain(verdict.get("focus_question") or
+                                 "Does the stored evidence justify this change?",
+                                 MAX_FOCUS_CHARS),
         "providers": [provider.name], "models": [provider.model],
         "llm_calls": 1,
     }

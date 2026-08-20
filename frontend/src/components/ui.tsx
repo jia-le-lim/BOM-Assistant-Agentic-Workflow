@@ -152,6 +152,85 @@ export function Banner({ kind, children }: {
   );
 }
 
+/* ---------------- loading surfaces ----------------------------------------
+ * A wait needs a shape that matches it. A short fetch with a known layout gets
+ * a skeleton of that layout, so the page never collapses and never jumps when
+ * the data lands. A single action gets a spinner inside its own button. Long
+ * work with no measurable percentage gets an indeterminate bar -- never a fake
+ * one. Long work with real phases streams them (see RunStream).
+ * ------------------------------------------------------------------------ */
+
+/** One placeholder block. `w`/`h` are any CSS length. */
+export function Skeleton({ w = "100%", h = "0.72rem", className = "" }: {
+  w?: string; h?: string; className?: string;
+}) {
+  return <span className={`skeleton block ${className}`} style={{ width: w, height: h }} aria-hidden />;
+}
+
+/** Placeholder rows sized like real table rows, so the table keeps its height. */
+export function TableSkeleton({ rows = 6, cols = 5, label = "Loading rows" }: {
+  rows?: number; cols?: number; label?: string;
+}) {
+  return (
+    <div role="status" aria-busy="true" aria-label={label}>
+      <span className="sr-only">{label}…</span>
+      {Array.from({ length: rows }, (_, r) => (
+        <div key={r} className="skeleton-row">
+          {Array.from({ length: cols }, (_, c) => <Skeleton key={c} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Placeholder for a card whose contents are not a table. */
+export function CardSkeleton({ lines = 3, title = true, label = "Loading" }: {
+  lines?: number; title?: boolean; label?: string;
+}) {
+  return (
+    <div className="card p-5 skeleton-stack" role="status" aria-busy="true" aria-label={label}>
+      <span className="sr-only">{label}…</span>
+      {title && <Skeleton w="34%" h="0.85rem" />}
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton key={i} w={i === lines - 1 ? "62%" : "100%"} />
+      ))}
+    </div>
+  );
+}
+
+/** Indeterminate only. We know it is running; we do not know how far. */
+export function Progress({ label }: { label?: string }) {
+  return (
+    <div role="status" aria-busy="true" aria-live="polite">
+      {label && (
+        <div className="text-xs mb-1.5" style={{ color: "var(--text-secondary)" }}>{label}</div>
+      )}
+      <div className="progress-track"><i /></div>
+    </div>
+  );
+}
+
+/** Spinner glyph for inside a button. The label stays; only the glyph is new. */
+export function Spin() {
+  return <span className="spin" aria-hidden />;
+}
+
+/**
+ * The button label during a run. Keeping the verb visible ("Running engine…"
+ * rather than a generic "Working…") is what tells the engineer which of the
+ * several long actions on this page is the one they are waiting for.
+ */
+export function BusyLabel({ busy, idle, running }: {
+  busy: boolean; idle: React.ReactNode; running: string;
+}) {
+  return busy ? <><Spin />{running}</> : <>{idle}</>;
+}
+
 export function Spinner({ label = "Loading…" }: { label?: string }) {
-  return <div className="text-sm py-8" style={{ color: "var(--text-muted)" }}>{label}</div>;
+  return (
+    <div className="text-sm py-8 flex items-center gap-2" role="status" aria-busy="true"
+         style={{ color: "var(--text-muted)" }}>
+      <Spin /> {label}
+    </div>
+  );
 }

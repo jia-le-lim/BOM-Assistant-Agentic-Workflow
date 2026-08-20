@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type { Batch, UploadSummary } from "@/lib/types";
-import { Banner, Spinner, StatTile } from "@/components/ui";
+import { Banner, BusyLabel, Progress, StatTile, TableSkeleton } from "@/components/ui";
 
 export default function BatchesPage() {
   const { call } = useApi();
@@ -13,6 +13,10 @@ export default function BatchesPage() {
   const [batches, setBatches] = useState<Batch[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Upload-and-score is two sequential round trips over a whole extract. Naming
+  // the phase you are actually in is the difference between a slow page and a
+  // page that looks broken.
+  const [phase, setPhase] = useState<"upload" | "score" | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [label, setLabel] = useState("Jan26");
@@ -36,7 +40,7 @@ export default function BatchesPage() {
     e.preventDefault();
     const f = fileRef.current?.files?.[0];
     if (!f) return;
-    setBusy(true); setErr(null); setNote(null);
+    setBusy(true); setPhase("upload"); setErr(null); setNote(null);
     try {
       const fd = new FormData();
       fd.append("file", f);
@@ -49,6 +53,7 @@ export default function BatchesPage() {
       let msg = `Batch ${s.batch_id} — ${s.rows_loaded.toLocaleString()} rows loaded, ` +
                `${s.rows_quarantined} quarantined (${reasons}).`;
       if (scoreAfter) {
+        setPhase("score");
         const run = await call<{ rows_scored: number; review_required_Y: number; review_required_N: number }>(
           `run-recommendation?batch_id=${s.batch_id}`, { method: "POST" });
         msg += ` Scored ${run.rows_scored.toLocaleString()} rows — ` +
@@ -59,7 +64,7 @@ export default function BatchesPage() {
       if (fileRef.current) fileRef.current.value = "";
       await load();
     } catch (e) { setErr((e as Error).message); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setPhase(null); }
   }
 
   const scored = batches?.filter((b) => b.status === "scored") ?? [];
@@ -67,7 +72,7 @@ export default function BatchesPage() {
   const totalQuar = batches?.reduce((a, b) => a + (b.quarantined_count ?? 0), 0) ?? 0;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="page-wide flex flex-col gap-6">
       <div>
         <h1 className="text-xl font-semibold">Review batches</h1>
         <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
@@ -120,7 +125,9 @@ export default function BatchesPage() {
             </select>
           </label>
           <button className="btn btn-primary" disabled={busy || !can.upload(role)}>
-            {busy ? "Working…" : scoreAfter ? "Upload & score" : "Upload & ingest"}
+            <BusyLabel busy={busy}
+                       running={phase === "score" ? "Scoring rows…" : "Uploading…"}
+                       idle={scoreAfter ? "Upload & score" : "Upload & ingest"} />
           </button>
           <label className="flex items-center gap-2 text-xs" style={{ color: "var(--text-secondary)" }}>
             <input type="checkbox" checked={scoreAfter}
@@ -129,6 +136,11 @@ export default function BatchesPage() {
             Run engine now
           </label>
         </div>
+        {busy && (
+          <Progress label={phase === "score"
+            ? "Scoring the batch with the statistical engine — this runs over every ingested row."
+            : "Parsing, normalizing and quarantining the extract…"} />
+        )}
         {!can.upload(role) && (
           <p className="text-xs" style={{ color: "var(--text-muted)" }}>
             Role <code>{role}</code> cannot upload. Switch to engineer, senior, admin or it.
@@ -138,7 +150,9 @@ export default function BatchesPage() {
 
       <div className="card p-5">
         <h2 className="text-sm font-semibold mb-3">Batches</h2>
-        {batches === null ? <Spinner /> : batches.length === 0 ? (
+        {batches === null ? (
+          <TableSkeleton rows={4} cols={6} label="Loading batches" />
+        ) : batches.length === 0 ? (
           <p className="text-sm py-4" style={{ color: "var(--text-muted)" }}>
             No batches yet — upload a CSV above to begin.
           </p>

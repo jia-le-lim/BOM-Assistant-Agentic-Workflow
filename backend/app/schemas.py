@@ -37,9 +37,17 @@ class ChatRequest(BaseModel):
 
 
 class TriageRunRequest(BaseModel):
+    """Triage one item, or the whole batch when item_id is omitted.
+
+    Per item is the console path: triage is the only step that spends model
+    calls, so it is paid for when an engineer opens a row, not up front for
+    thousands of rows nobody reads.
+    """
     batch_id: int = Field(ge=1)
     llm_call_budget: int = Field(default=2000, ge=3, le=2000)
     refresh: bool = False
+    item_id: str | None = None
+    stockroom_id: str | None = None
 
 
 class SimilarityRunRequest(BaseModel):
