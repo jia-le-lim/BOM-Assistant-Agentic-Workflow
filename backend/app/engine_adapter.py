@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -36,16 +37,65 @@ def load_batch_df(conn: Conn, batch_id: int) -> pd.DataFrame:
     return pd.DataFrame([json.loads(r["payload"]) for r in rows])
 
 
-# One precedent per stocking row, latest wins -- ORDER BY review_id so the last
-# write into the dict is the most recent decision (same idiom as
-# similarity._load_pool and services.latest_reviews).
+_TS = "%Y-%m-%d %H:%M:%S"
+
+# One precedent per stocking row, latest wins -- ORDER BY reviewed_at so "latest"
+# means the most recent DECISION, not the most recent row insert. review_id breaks
+# ties only.
+#
+# The cutoff is what keeps future information out of a re-score. batch_id is NOT a
+# clock: backfill_history loads workbooks alphabetically (its glob is sorted by
+# filename), so on the live project May'25 sits at batch 10 while Oct'24 and Sept'24
+# sit at 11 and 12. `batch_id != ?` admits every other batch, and even `batch_id < ?`
+# would grade October against a decision made seven months later -- while ORDER BY
+# review_id would then pick the OLDER of the two as "latest". reviewed_at is the real
+# decision time (backfill sets it from the workbook's modified_date for exactly this
+# reason), so it is the only key that orders these correctly. It is fixed-width
+# 'YYYY-MM-DD HH:MM:SS' UTC on both dialects, so TEXT comparison is chronological.
+#
+# NULL reviewed_at is excluded rather than admitted: a decision whose date is unknown
+# cannot be shown to predate this batch, and this value feeds auto-clear.
+#
+# `<=`, not `<`: both clocks have one-second resolution, and reviewing a batch and
+# uploading the next one inside the same second is ordinary. A tie is admissible --
+# the leak this guards against is a decision made strictly AFTER this batch existed.
 _PRIOR_SQL = (
     "SELECT h.item_id, h.stockroom_id, h.final_max, h.final_rop, h.final_min, "
     "b.payload "
     "FROM review_history h "
     "JOIN bom_rows b ON b.batch_id=h.batch_id AND b.item_id=h.item_id "
     "AND b.stockroom_id=h.stockroom_id "
-    "WHERE h.batch_id != ? ORDER BY h.review_id")
+    "WHERE h.batch_id != ? AND h.reviewed_at IS NOT NULL AND h.reviewed_at <= ? "
+    "ORDER BY h.reviewed_at, h.review_id")
+
+
+def _vintage(conn: Conn, batch_id: int, df: pd.DataFrame) -> str:
+    """How current this batch's data is. A precedent must not postdate it.
+
+    Three rungs, best first:
+
+      modified_date  the newest engineer touch on any row -- the data's own vintage,
+                     and the same field backfill_history reads to stamp reviewed_at,
+                     so both sides of the comparison sit on one clock.
+      uploaded_at    when the snapshot entered the system. Weaker (a backfilled 2024
+                     workbook is stamped with the day it was loaded) but it still
+                     pins a re-score to its own upload, which is the case that leaks.
+      now()          nothing to go on; admits every decision already recorded.
+    """
+    # format="mixed" is deliberate, not a default: one workbook column carries both
+    # '08/14/2025 14:59:42' and ISO+offset. Without it pandas warns on every scoring
+    # run that it could not infer a single format and silently falls back to the
+    # same per-element parse.
+    ts = (pd.to_datetime(df["modified_date"], format="mixed",
+                         errors="coerce", utc=True).max()
+          if "modified_date" in df.columns else pd.NaT)
+    if not pd.isna(ts):
+        return ts.tz_localize(None).strftime(_TS)
+    row = conn.execute("SELECT uploaded_at FROM batches WHERE batch_id=?",
+                       (batch_id,)).fetchone()
+    if row and row["uploaded_at"]:
+        return str(row["uploaded_at"])
+    return datetime.now(timezone.utc).strftime(_TS)
 
 
 def _attach_prior_benchmark(conn: Conn, batch_id: int, df: pd.DataFrame) -> pd.DataFrame:
@@ -59,9 +109,14 @@ def _attach_prior_benchmark(conn: Conn, batch_id: int, df: pd.DataFrame) -> pd.D
 
     prior_c365 travels alongside so the engine can reject a stale precedent
     (engine_statistical._drift_ok).
+
+    Only decisions older than this batch's own data are admissible -- see _vintage
+    and _PRIOR_SQL. Re-scoring January after February has been reviewed must not
+    grade January against February's answer: that value gates specialists.safe_clear
+    and recommend.bulk_acceptable, so future information would be clearing rows.
     """
     prior: dict[tuple[str, str], tuple] = {}
-    for row in conn.execute(_PRIOR_SQL, (batch_id,)):
+    for row in conn.execute(_PRIOR_SQL, (batch_id, _vintage(conn, batch_id, df))):
         payload = json.loads(row["payload"])
         prior[(str(row["item_id"]), str(row["stockroom_id"]))] = (
             row["final_max"], row["final_rop"], row["final_min"],

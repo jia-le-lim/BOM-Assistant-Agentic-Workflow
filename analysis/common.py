@@ -105,6 +105,26 @@ def pct(n, d) -> str:
     return "n/a" if not d else f"{100.0 * n / d:.1f}%"
 
 
+# --- shared grading rule (s15, s17) -----------------------------------------
+# "Review would have added nothing": the engine value is within 1 unit or 10% of
+# the engineer's, on all three levels. One definition, so two harnesses grading
+# the same question cannot quietly drift apart.
+#
+# COUPLED, deliberately not imported: engine_statistical._agreement.close() applies
+# the identical max(1.0, 0.10*|b|) tolerance. s17 asks the ENGINE whether
+# agreement=='match' and then computes precision with this predicate, so tuning
+# either one alone makes the harness report a precision for a rule the engine is
+# not applying. They are kept separate only because importing backend/app here
+# would load engine_statistical a second time under a different module name --
+# every analysis script inserts backend/app on sys.path directly. Change both.
+TARGET_PRECISION = 98.0
+LEVELS = ("max", "rop", "min")
+
+
+def agree(eng: np.ndarray, fac: np.ndarray, tol_abs=1.0, tol_rel=0.10) -> np.ndarray:
+    return np.abs(eng - fac) <= np.maximum(tol_abs, tol_rel * np.abs(fac))
+
+
 # --- multi-snapshot loading (BOM review workbooks drift in shape) ------------
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip().lower() for c in df.columns]
