@@ -101,6 +101,20 @@ export default function ItemPage({ params }: {
     finally { setPending(null); }
   }
 
+  /** Put the suggested pair into the decision form. It is the reviewer who
+   *  submits it -- this only saves them retyping a number the rules already
+   *  chose, and an "engine" suggestion needs no override at all. */
+  function takeSuggestion() {
+    if (!assist || assist.suggested_max == null || assist.suggested_rop == null) return;
+    if (assist.suggestion_basis === "engine") { setDecision("accept"); return; }
+    setDecision("override");
+    setFMax(String(assist.suggested_max));
+    setFRop(String(assist.suggested_rop));
+    // Min is not suggested, but the API rejects Max >= ROP >= Min, so a Min
+    // left above the new ROP would bounce the submit with a confusing error.
+    setFMin(String(Math.min(Number(fMin) || 0, assist.suggested_rop)));
+  }
+
   async function approve() {
     setPending("approve"); setErr(null); setNote(null);
     try {
@@ -248,9 +262,33 @@ export default function ItemPage({ params }: {
                     <ReasonCodes codes={assist.reasons.join(",")} max={12} />
                   </div>
                 )}
+                {assist.suggested_max != null && assist.suggested_rop != null && (
+                  <div className="mt-4 p-3 rounded flex flex-wrap items-center gap-x-4 gap-y-2"
+                       style={{ background: "var(--seq-soft)" }}>
+                    <div className="mr-auto">
+                      <div className="text-sm tnum">
+                        <strong>Max {assist.suggested_max.toLocaleString()}</strong>
+                        {" · "}
+                        <strong>ROP {assist.suggested_rop.toLocaleString()}</strong>
+                      </div>
+                      <div className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
+                        {assist.suggestion_basis === "prior_accepted"
+                          ? "The last numbers accepted on this part — the engine has been "
+                            + "overridden here before, so its figure is not the safer start."
+                          : "The engine's own sizing for this cycle."}
+                      </div>
+                    </div>
+                    {can.review(role) && (
+                      <button className="btn btn-primary text-xs" onClick={takeSuggestion}>
+                        Use these numbers
+                      </button>
+                    )}
+                  </div>
+                )}
                 <p className="text-[11px] mt-3" style={{ color: "var(--text-muted)" }}>
-                  Decided by rules ({assist.model_version}), not by the model. Advisory
-                  only — it never changes Min/ROP/Max.
+                  Verdict and suggested numbers are decided by rules
+                  ({assist.model_version}), not by the model — it only writes the
+                  sentence. Nothing is applied until you record a decision below.
                 </p>
               </>
             )}

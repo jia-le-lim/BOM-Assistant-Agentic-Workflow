@@ -134,3 +134,76 @@ def test_garbage_inputs_do_not_raise():
     for junk in ({}, {"n_cycles": None}, {"n_cycles": "3", "exposure_usd": "x"},
                  {"n_cycles": float("nan")}):
         assert rules.evaluate(junk)["verdict"] in rules.VERDICTS
+
+
+# --- the suggested number --------------------------------------------------
+
+def suggestion(**kw):
+    """suggest() over the same evidence the verdict was decided on."""
+    evidence = ev(**kw)
+    return rules.suggest(evidence, rules.evaluate(evidence))
+
+
+def test_the_default_suggestion_is_the_engine_number():
+    """The engine already sized this cycle. A suggestion only earns its place
+    by differing from it, so anything unremarkable must land here."""
+    out = suggestion(engine_max=40, engine_rop=15)
+    assert (out["suggested_max"], out["suggested_rop"]) == (40, 15)
+    assert out["suggestion_basis"] == "engine"
+
+
+def test_a_diverge_streak_suggests_the_last_accepted_number():
+    """Two cycles of the engineer overriding this engine number: their own last
+    accepted pair is the better opening bid, and it is what they would type."""
+    out = suggestion(diverge_streak=2, agreements=["diverge", "diverge"],
+                     engine_max=40, engine_rop=15,
+                     last_final_max=22, last_final_rop=8)
+    assert (out["suggested_max"], out["suggested_rop"]) == (22, 8)
+    assert out["suggestion_basis"] == "prior_accepted"
+
+
+def test_a_bulk_withdraw_history_disqualifies_the_prior_number():
+    """That number was sized off a one-off event, not a demand pattern -- the
+    exact case BULK_WITHDRAW_MARKERS exists to catch."""
+    out = suggestion(diverge_streak=2, agreements=["diverge", "diverge"],
+                     justifications=["bulk withdraw for shutdown", ""],
+                     engine_max=40, engine_rop=15,
+                     last_final_max=22, last_final_rop=8)
+    assert (out["suggested_max"], out["suggested_rop"]) == (40, 15)
+    assert out["suggestion_basis"] == "engine"
+
+
+def test_max_and_rop_always_come_from_the_same_source():
+    """A Max from this cycle's engine with a ROP from an old review is a policy
+    nobody chose, so a half-present prior falls back whole."""
+    out = suggestion(diverge_streak=2, agreements=["diverge", "diverge"],
+                     engine_max=40, engine_rop=15,
+                     last_final_max=22, last_final_rop=None)
+    assert (out["suggested_max"], out["suggested_rop"]) == (40, 15)
+    assert out["suggestion_basis"] == "engine"
+
+
+@pytest.mark.parametrize("mx,rp", [(-1, 0), (10, -2), (5, 9), (None, 3), ("x", 1)])
+def test_an_unusable_pair_is_never_suggested(mx, rp):
+    """rop > max, negatives and junk are refused rather than passed on: this
+    number goes straight into a decision form."""
+    out = suggestion(engine_max=mx, engine_rop=rp,
+                     last_final_max=None, last_final_rop=None)
+    assert out["suggested_max"] is None and out["suggestion_basis"] == ""
+
+
+def test_peer_medians_are_never_suggested():
+    """get_similar_parts stamps them 'never a stock level to apply', and a
+    suggestion IS a stock level to apply."""
+    out = suggestion(engine_max=40, engine_rop=15, analogue_max_median=999,
+                     analogue_rop_median=888)
+    assert out["suggested_max"] == 40
+
+
+def test_suggest_is_deterministic():
+    evidence = ev(diverge_streak=2, agreements=["diverge", "diverge"],
+                  last_final_max=22, last_final_rop=8, engine_rop=15)
+    decision = rules.evaluate(evidence)
+    seen = {tuple(rules.suggest(dict(evidence), decision).values())
+            for _ in range(100)}
+    assert len(seen) == 1

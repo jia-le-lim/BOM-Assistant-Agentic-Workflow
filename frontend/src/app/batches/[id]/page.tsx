@@ -57,7 +57,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [filters, setFilters] = useState<Record<string, string>>(() => ({
     status: searchParams.get("status") ?? "pending_review",
     risk_level: searchParams.get("risk_level") ?? "",
-    action: searchParams.get("action") ?? "",
     consumable: searchParams.get("consumable") ?? "",
     agreement: searchParams.get("agreement") ?? "",
     min_exposure: searchParams.get("min_exposure") ?? "",
@@ -407,15 +406,15 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
             <Filter label="Status" value={filters.status} set={(v) => setFilter({ status: v })}
                     opts={[["", "All"], ["pending_review", "Pending"], ["awaiting_senior", "Awaiting senior"],
                            ["reviewed", "Reviewed"], ["auto_cleared", "Auto-cleared"]]} />
+            {/* The engine can still classify a row "sporadic"; it is simply not
+                a lane anyone filters by here, and Any still reaches those rows. */}
             <Filter label="Demand" value={filters.consumable} set={(v) => setFilter({ consumable: v })}
-                    opts={[["", "Any"], ["constant", "Constant"], ["sporadic", "Sporadic"],
+                    opts={[["", "Any"], ["constant", "Constant"],
                            ["dying", "Dying"], ["none", "Dormant"]]} />
             <Filter label="Agreement" value={filters.agreement} set={(v) => setFilter({ agreement: v })}
                     opts={[["", "Any"], ["match", "Matches"], ["diverge", "Diverges"], ["none", "No benchmark"]]} />
             <Filter label="Risk" value={filters.risk_level} set={(v) => setFilter({ risk_level: v })}
                     opts={[["", "Any"], ["High", "High"], ["Medium", "Medium"], ["Low", "Low"]]} />
-            <Filter label="Action" value={filters.action} set={(v) => setFilter({ action: v })}
-                    opts={[["", "Any"], ["Increase", "Increase"], ["Maintain", "Maintain"], ["Decrease", "Decrease"]]} />
             <label className="flex flex-col gap-1 text-xs">
               <span style={{ color: "var(--text-secondary)" }}>Min exposure $</span>
               <input className="field w-28" type="number" value={filters.min_exposure}

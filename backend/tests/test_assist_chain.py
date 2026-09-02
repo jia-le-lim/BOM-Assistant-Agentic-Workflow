@@ -277,3 +277,32 @@ def test_assist_can_be_read_for_one_item(client, monkeypatch):
     # says "not assisted yet" rather than erroring the page.
     assert client.get(f"/assist/{bid}?item_id=NOPE",
                       headers=VIEWER).json()["items"] == []
+
+
+def test_the_suggested_pair_reaches_the_api(client, monkeypatch):
+    """The item page renders this straight into a decision form, so it has to
+    survive the round trip -- both numbers and the basis that explains them."""
+    bid = _scored(client, monkeypatch, [_live("L1")])
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    row = client.get(f"/assist/{bid}?item_id=L1", headers=VIEWER).json()["items"][0]
+    assert row["suggestion_basis"] in ("engine", "prior_accepted", "")
+    if row["suggested_max"] is not None:
+        assert row["suggested_rop"] <= row["suggested_max"]
+
+
+def test_the_model_is_never_shown_a_suggested_number(client, monkeypatch, db_file):
+    """The narration prompt bans proposing a Min/ROP/Max. Keeping the numbers
+    out of the payload is what makes that cheap to hold."""
+    seen: list[str] = []
+
+    class Spy:
+        name = "spy"
+
+        def chat(self, messages, tools):
+            seen.append(messages[-1].content)
+            return Response(content="ok", model="spy-1", provider="spy")
+
+    monkeypatch.setattr(chain, "get_provider", lambda: Spy())
+    bid = _scored(client, monkeypatch, [_live("L1")])
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    assert seen and all("suggested_max" not in payload for payload in seen)

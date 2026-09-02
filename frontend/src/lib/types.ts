@@ -280,6 +280,11 @@ export interface AssistResult {
   verdict: AssistVerdict;
   reasons: string[];
   narrative: string | null;
+  /** Written by assist/rules.suggest, never by the model. Both numbers come
+   *  from the same source, or both are null. */
+  suggested_max: number | null;
+  suggested_rop: number | null;
+  suggestion_basis: "engine" | "prior_accepted" | "";
   model_version: string;
   assisted_at: string;
 }
