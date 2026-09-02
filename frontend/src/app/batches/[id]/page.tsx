@@ -463,14 +463,14 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           ) : (
             <div className={refreshing ? "is-refreshing" : undefined}>
               <div className="scroll-x">
-                <table className="w-full text-sm min-w-[1000px]">
+                <table className="w-full text-sm min-w-[1180px]">
                   <thead>
                     <tr>
                       <th className="w-8">
                         <input type="checkbox" checked={allSelected} onChange={toggleAll}
                                aria-label="Select all on page" />
                       </th>
-                      <th>Part</th><th>Category</th><th>Demand</th>
+                      <th>Item</th><th>Description</th><th>Category</th><th>Demand</th>
                       <th className="text-right">Exposure</th>
                       <th className="w-6" title="Status">St</th>
                       <th className="w-6" title="Risk level">Rk</th>
@@ -495,17 +495,16 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                                    onChange={() => toggle(k)}
                                    aria-label={`Select ${r.item_id}`} />
                           </td>
-                          <td className="max-w-[220px]">
+                          <td>
                             {/* A real link, not just the row handler: row click is
                                 mouse-only, and this row has to be reachable by
                                 keyboard and announced as a destination. */}
                             <Link href={href} className="font-mono text-xs"
                                   onClick={(e) => e.stopPropagation()}>{r.item_id}</Link>
-                            {r.item_desc && (
-                              <span className="block text-[11px] truncate"
-                                    style={{ color: "var(--text-muted)" }}
-                                    title={r.item_desc}>{r.item_desc}</span>
-                            )}
+                          </td>
+                          <td className="max-w-[240px] text-xs truncate"
+                              title={r.item_desc || undefined}>
+                            {r.item_desc || "—"}
                           </td>
                           <td className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
                             {r.part_category || "—"}
