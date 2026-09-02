@@ -37,6 +37,9 @@ from app import dormant_rules as DR          # noqa: E402
 from app import engine_statistical as E      # noqa: E402
 from app.part_category import DEFAULT_RULES as CAT_RULES  # noqa: E402
 from app.part_category import categorise     # noqa: E402
+# Shared with s20: one copy of the scorecard rule, so it cannot drift from the
+# engine's own tolerance.
+from scorecard import matched as _matched, num as _n, pair as _pair  # noqa: E402
 
 PKL = ROOT / "analysis" / "output" / "s20_payloads.pkl"
 OUT = ROOT / "analysis" / "output" / "s22_dormant_backtest.csv"
@@ -63,21 +66,6 @@ ARMS: dict[str, list[dict]] = {
         _rule("default", policy="hold_current", priority=900),
     ],
 }
-
-
-def _n(df: pd.DataFrame, c: str) -> pd.Series:
-    return pd.to_numeric(df.get(c), errors="coerce")
-
-
-def _pair(out: pd.DataFrame) -> np.ndarray:
-    """Max and ROP only -- Min is a derived floor, not a replenishment lever."""
-    return np.c_[out.factory_recommended_new_max,
-                 out.factory_recommended_new_rop].astype(float)
-
-
-def _matched(engine: np.ndarray, bench: np.ndarray) -> np.ndarray:
-    """Vectorised close_enough over Max and ROP, using the engine's own tolerance."""
-    return (np.abs(engine - bench) <= E.AGREE_TOL * np.abs(bench)).all(axis=1)
 
 
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:

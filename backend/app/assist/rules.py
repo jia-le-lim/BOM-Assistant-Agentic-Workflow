@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from ..engine_statistical import AGREE_TOL
 
-MODEL_VERSION = "assist-v1"
+MODEL_VERSION = "assist-v2"
 
 VERDICTS = ("flag_for_review", "bulk_accept_candidate", "needs_context")
 
@@ -133,3 +133,56 @@ def evaluate(evidence: dict, cfg: dict | None = None) -> dict:
         reasons.append("ENGINE_MOVED_FROM_PRIOR_ACCEPTED")
     return {"verdict": "flag_for_review",
             "reasons": reasons or ["UNMATCHED"], "inputs": inputs}
+
+
+# Where a suggested number came from. Always shown beside it: a figure whose
+# origin a reviewer cannot see is one they have to re-derive anyway, which is
+# the friction this exists to remove.
+SUGGESTION_BASES = ("engine", "prior_accepted")
+
+
+def _pair(max_value, rop_value) -> tuple[int, int] | None:
+    """Max and ROP from ONE source, or nothing.
+
+    Mixing a Max from this cycle's engine with a ROP from an old review is a
+    stocking policy nobody chose. Also rejects rop > max and negatives, which
+    no downstream code should have to defend against.
+    """
+    try:
+        mx, rp = int(round(float(max_value))), int(round(float(rop_value)))
+    except (TypeError, ValueError):
+        return None
+    if mx != mx or rp != rp or mx < 0 or rp < 0 or rp > mx:   # NaN, negative
+        return None
+    return mx, rp
+
+
+def suggest(evidence: dict, decision: dict) -> dict:
+    """The number to put in front of the reviewer. Deterministic, like the verdict.
+
+    Only two candidates are ever offered, and both are numbers somebody already
+    stood behind: what the engine sized this cycle, and what this same part was
+    last accepted at. Peer medians are deliberately NOT a candidate -- tools.
+    get_similar_parts returns them stamped "advisory peer evidence; never a
+    stock level to apply", and a suggestion IS a stock level to apply.
+
+    The prior accepted pair wins in exactly one case: the engineer has overridden
+    this engine number for `assist_diverge_streak_flag` cycles running, so their
+    own last number is the better opening bid -- unless that number was itself
+    sized off a one-off withdrawal, which BULK_WITHDRAW_HISTORY marks.
+    """
+    reasons = decision.get("reasons") or []
+    engine = _pair(evidence.get("engine_max"), evidence.get("engine_rop"))
+    prior = _pair(evidence.get("last_final_max"), evidence.get("last_final_rop"))
+
+    prefer_prior = (decision.get("verdict") == "flag_for_review"
+                    and "DIVERGE_STREAK" in reasons
+                    and "BULK_WITHDRAW_HISTORY" not in reasons)
+    chosen, basis = ((prior, "prior_accepted") if prefer_prior and prior
+                     else (engine, "engine") if engine
+                     else (None, ""))
+    if chosen is None:
+        return {"suggested_max": None, "suggested_rop": None,
+                "suggestion_basis": ""}
+    return {"suggested_max": chosen[0], "suggested_rop": chosen[1],
+            "suggestion_basis": basis}

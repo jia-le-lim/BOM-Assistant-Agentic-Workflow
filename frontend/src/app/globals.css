@@ -1149,3 +1149,8 @@ tbody tr:hover { background: var(--hover); }
 @media (min-width: 1700px) {
   .page-wide .work-split { grid-template-columns: minmax(0, 1fr) 360px; }
 }
+
+/* Review-queue rows open the item on click. The checkbox and the row actions
+   stop propagation, so only the informational cells navigate. */
+.row-link { cursor: pointer; }
+.row-link:hover { background: var(--seq-soft); }

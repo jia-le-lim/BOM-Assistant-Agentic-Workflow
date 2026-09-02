@@ -1,14 +1,15 @@
-"""The fixed four-step assist chain, built on `langchain_core` runnables only.
+"""The fixed four-step assist chain.
 
-    resolve -> evidence (parallel fan-out) -> evaluate -> narrate -> persist
+    gather evidence -> evaluate -> narrate -> persist
 
 Fixed order is the requirement, not a simplification: free-form tool calling
 gives a different evidence set on every run, and an evidence set that moves
 cannot support a verdict that has to be reproducible.
 
-Only `langchain_core` is imported. The `langchain` umbrella is NOT installed
-and must not be added -- pulling it in needs an offline-mirror install on the
-Intel network, the risk docs/ML_Implementation_Plan_TCB.md section 4 flags.
+Plain function calls carry that order. No agent framework is imported here --
+not `langchain`, not `langchain_core`: the steps never branch, stream or retry,
+so a pipe operator would add a dependency and hide which step runs when. Which
+step may see a model is the safety property, and four named calls state it.
 
 The LangGraph triage in agent/graph.py is untouched and keeps running. It does
 a different job (conditional routing to save specialist calls on the expensive
@@ -18,8 +19,6 @@ path); this chain runs every live row through the same five sources.
 from __future__ import annotations
 
 import json
-
-from langchain_core.runnables import RunnableLambda, RunnableParallel
 
 from ..agent.specialists import _plain
 from ..agent.tools import (ToolContext, get_agreement_history, get_item_notes,
@@ -34,19 +33,16 @@ from .prompts import ASSIST_NARRATE_SYSTEM
 # call to say "a rule set this".
 LIVE_ROUTES = ("active", "dying")
 
-# Every branch of the fan-out, in a fixed order. The count is asserted in
-# test_assist_chain: a branch quietly dropped would change the verdict without
-# changing the rules.
+# Every source, in a fixed order. The count is asserted in test_assist_chain:
+# a source quietly dropped would change the verdict without changing the rules.
 EVIDENCE_KEYS = ("recommendation", "agreement", "notes", "peers", "procurement")
 
 
 def _ctx(state: dict) -> ToolContext:
-    """A fresh ToolContext per branch.
+    """A fresh ToolContext per source, so each one's provenance stays its own.
 
-    RunnableParallel branches receive the same input and may run concurrently,
-    so they must not share one -- `ctx.sources` is a plain list and two threads
-    appending to the same one is how provenance goes missing. Sources are
-    merged in `_merge` instead.
+    `ctx.sources` is a plain list; one shared context would make it impossible
+    to say which source produced which entry. `_gather` concatenates them.
     """
     return ToolContext(conn=state["conn"], actor=state["actor"],
                        batch_id=state["batch_id"], question="assist")
@@ -56,69 +52,33 @@ def _empty(value) -> bool:
     return not value or value.get("_empty") is True
 
 
-def _fetch_recommendation(state: dict) -> dict:
-    ctx = _ctx(state)
-    data = get_triage_context(ctx, state["item_id"], state["batch_id"],
-                              state["stockroom_id"])
-    return {"data": data, "sources": ctx.sources}
+EVIDENCE_FETCHERS = {
+    "recommendation": lambda ctx, s: get_triage_context(
+        ctx, s["item_id"], s["batch_id"], s["stockroom_id"]),
+    "agreement": lambda ctx, s: get_agreement_history(
+        ctx, s["item_id"], s["stockroom_id"]),
+    "notes": lambda ctx, s: get_item_notes(ctx, s["item_id"]),
+    "peers": lambda ctx, s: get_similar_parts(
+        ctx, s["item_id"], s["batch_id"], s["stockroom_id"]),
+    "procurement": lambda ctx, s: get_procurement_context(
+        ctx, s["item_id"], s["batch_id"], s["stockroom_id"]),
+}
 
 
-def _fetch_agreement(state: dict) -> dict:
-    ctx = _ctx(state)
-    data = get_agreement_history(ctx, state["item_id"], state["stockroom_id"])
-    return {"data": data, "sources": ctx.sources}
+def _gather(state: dict) -> dict:
+    """Step 2. Every source, every row, in a fixed order.
 
-
-def _fetch_notes(state: dict) -> dict:
-    ctx = _ctx(state)
-    data = get_item_notes(ctx, state["item_id"])
-    return {"data": data, "sources": ctx.sources}
-
-
-def _fetch_peers(state: dict) -> dict:
-    ctx = _ctx(state)
-    data = get_similar_parts(ctx, state["item_id"], state["batch_id"],
-                             state["stockroom_id"])
-    return {"data": data, "sources": ctx.sources}
-
-
-def _fetch_procurement(state: dict) -> dict:
-    ctx = _ctx(state)
-    data = get_procurement_context(ctx, state["item_id"], state["batch_id"],
-                                   state["stockroom_id"])
-    return {"data": data, "sources": ctx.sources}
-
-
-def _resolve_row(state: dict) -> dict:
-    """Step 1. Nothing is fetched here; this only fixes what we are talking about."""
-    return dict(state)
-
-
-def _merge(state: dict) -> dict:
-    """Collapse the fan-out back into one state, keeping every branch's sources."""
+    Sequential on purpose. These share one `Conn`, so fanning them out over a
+    thread pool would serialise on its lock anyway -- the fixed SET of sources
+    is what the verdict needs, not concurrent fetching of them.
+    """
     evidence, sources = {}, []
     for key in EVIDENCE_KEYS:
-        branch = state.get(key) or {}
-        data = branch.get("data")
+        ctx = _ctx(state)
+        data = EVIDENCE_FETCHERS[key](ctx, state)
         evidence[key] = {} if _empty(data) else data
-        sources.extend(branch.get("sources") or [])
-    base = state[EVIDENCE_KEYS[0]]["state"]
-    return {**base, "evidence": evidence, "sources": sources}
-
-
-def _peer_override_rate(peers: dict) -> float:
-    """How often the engineer overrode the engine on this part's peers.
-
-    Derived from the retrieved neighbours rather than stored: similarity_result
-    keeps the peers, not a rate, and a rate computed over the peers actually
-    shown is the one that matches the evidence the reviewer sees.
-    """
-    rows = peers.get("neighbours") or []
-    decided = [str(r.get("neighbour_decision") or "").lower() for r in rows]
-    decided = [d for d in decided if d]
-    if not decided:
-        return 0.0
-    return sum(1 for d in decided if d == "override") / len(decided)
+        sources.extend(ctx.sources)
+    return {**state, "evidence": evidence, "sources": sources}
 
 
 def _facts(evidence: dict) -> dict:
@@ -135,10 +95,12 @@ def _facts(evidence: dict) -> dict:
         "agreements": [c.get("agreement") for c in cycles],
         "justifications": [c.get("justification") for c in cycles],
         "engine_max": None,
+        "engine_rop": None,
         "last_final_max": agr.get("last_final_max"),
+        "last_final_rop": agr.get("last_final_rop"),
         "exposure_usd": rec.get("exposure_usd"),
         "criticality": proc.get("criticality"),
-        "peer_override_rate": _peer_override_rate(peers),
+        "peer_override_rate": peers.get("historical_override_rate"),
         "open_notes": len(notes),
     }
 
@@ -150,10 +112,15 @@ def _evaluate(state: dict) -> dict:
     # stock quantities -- so the scored row's own value is carried through from
     # the batch query rather than asked of a model.
     facts["engine_max"] = state.get("engine_max")
+    facts["engine_rop"] = state.get("engine_rop")
     if state.get("exposure_usd") is not None:
         facts["exposure_usd"] = state["exposure_usd"]
-    return {**state, "facts": facts,
-            "decision": rules.evaluate(facts, state["cfg"])}
+    decision = rules.evaluate(facts, state["cfg"])
+    # The suggested number is part of the deterministic step for the same
+    # reason the verdict is: a reviewer accepts it with one click, so it must
+    # be reproducible and backtestable, and the model must not author it.
+    decision.update(rules.suggest(facts, decision))
+    return {**state, "facts": facts, "decision": decision}
 
 
 def _narrate(state: dict) -> dict:
@@ -165,6 +132,10 @@ def _narrate(state: dict) -> dict:
     """
     decision = state["decision"]
     provider = get_provider()
+    # The suggested numbers are deliberately NOT in this payload. The prompt
+    # bans the model from proposing a Min/ROP/Max, and the cheapest way to keep
+    # that true is to never put one in front of it. The UI shows the suggestion
+    # beside the sentence.
     payload = {"item_id": state["item_id"], "verdict": decision["verdict"],
                "reasons": decision["reasons"], "evidence": state["facts"]}
     messages = [Message(role="system", content=ASSIST_NARRATE_SYSTEM),
@@ -185,48 +156,46 @@ def _persist(state: dict) -> dict:
     decision = state["decision"]
     state["conn"].execute(
         "INSERT INTO assist_result (batch_id, item_id, stockroom_id, verdict, "
-        "reasons_json, narrative, evidence_json, model_version, provider, model) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?) "
+        "reasons_json, narrative, suggested_max, suggested_rop, "
+        "suggestion_basis, evidence_json, model_version, provider, model) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(batch_id, item_id, stockroom_id) DO UPDATE SET "
         "verdict=excluded.verdict, reasons_json=excluded.reasons_json, "
-        "narrative=excluded.narrative, evidence_json=excluded.evidence_json, "
+        "narrative=excluded.narrative, suggested_max=excluded.suggested_max, "
+        "suggested_rop=excluded.suggested_rop, "
+        "suggestion_basis=excluded.suggestion_basis, "
+        "evidence_json=excluded.evidence_json, "
         "model_version=excluded.model_version, provider=excluded.provider, "
         "model=excluded.model, assisted_at=datetime('now')",
         (state["batch_id"], state["item_id"], state["stockroom_id"],
          decision["verdict"], json.dumps(decision["reasons"]),
-         state["narrative"] or None,
+         state["narrative"] or None, decision["suggested_max"],
+         decision["suggested_rop"], decision["suggestion_basis"],
          json.dumps({"inputs": decision["inputs"],
                      "sources": state["sources"]}, default=str),
          rules.MODEL_VERSION, state["provider"], state["model"]))
     return state
 
 
-# Each branch is handed the whole state and returns its own slice, plus the
-# state itself once, so _merge can rebuild without a closure over mutable data.
-evidence = RunnableParallel(
-    recommendation=RunnableLambda(
-        lambda s: {**_fetch_recommendation(s), "state": s}),
-    agreement=RunnableLambda(_fetch_agreement),
-    notes=RunnableLambda(_fetch_notes),
-    peers=RunnableLambda(_fetch_peers),
-    procurement=RunnableLambda(_fetch_procurement),
-)
+def assist_row(state: dict) -> dict:
+    """The chain. Fixed order, and the order IS the contract.
 
-assist_chain = (
-    RunnableLambda(_resolve_row)        # step 1 -- fix the row
-    | evidence                          # step 2 -- the same five sources, always
-    | RunnableLambda(_merge)
-    | RunnableLambda(_evaluate)         # step 3 -- DETERMINISTIC, no model
-    | RunnableLambda(_narrate)          # step 4 -- the only LLM call
-    | RunnableLambda(_persist)
-)
+    Written as four calls rather than composed runnables: nothing here streams,
+    batches, retries, or carries a run config, so a framework's pipe operator
+    would only hide which step runs when -- and which step is allowed to see a
+    model is the whole safety property (`_evaluate` decides, `_narrate` writes).
+    """
+    state = _gather(state)      # step 2 -- the same five sources, always
+    state = _evaluate(state)    # step 3 -- DETERMINISTIC, no model
+    state = _narrate(state)     # step 4 -- the only LLM call
+    return _persist(state)
 
 
 def live_rows(conn, batch_id: int) -> list[dict]:
     """The active/dying rows of a batch. Dormant rows belong to Layer 1."""
     marks = ",".join("?" for _ in LIVE_ROUTES)
     return [dict(r) for r in conn.execute(
-        f"SELECT item_id, stockroom_id, new_max, exposure_usd, route "
+        f"SELECT item_id, stockroom_id, new_max, new_rop, exposure_usd, route "
         f"FROM recommendation_result WHERE batch_id=? AND route IN ({marks}) "
         f"ORDER BY exposure_usd DESC", (batch_id, *LIVE_ROUTES))]
 
@@ -236,10 +205,11 @@ def run_batch(conn, batch_id: int, actor: dict, cfg: dict | None = None) -> dict
     rows = live_rows(conn, batch_id)
     counts = {verdict: 0 for verdict in rules.VERDICTS}
     for row in rows:
-        state = assist_chain.invoke({
+        state = assist_row({
             "conn": conn, "actor": actor, "batch_id": batch_id,
             "item_id": row["item_id"], "stockroom_id": row["stockroom_id"],
-            "engine_max": row["new_max"], "exposure_usd": row["exposure_usd"],
+            "engine_max": row["new_max"], "engine_rop": row["new_rop"],
+            "exposure_usd": row["exposure_usd"],
             "cfg": cfg or {},
         })
         counts[state["decision"]["verdict"]] += 1

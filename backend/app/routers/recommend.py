@@ -1,6 +1,7 @@
 """Recommendation endpoints -- run the engine, list/inspect results."""
 
 import json
+from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -12,6 +13,50 @@ from ..services import (AmbiguousItem, build_export, derive_status,
                         latest_reviews, resolve_rec)
 
 router = APIRouter()
+
+
+def _qty(value):
+    """A quantity from the upload, or None. '' and junk are both 'not stated'."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _enrich(conn, batch_id: int, rows: list[dict]) -> None:
+    """Attach the queue's display-only fields to ONE page of rows.
+
+    These live outside recommendation_result: the description and the current
+    Wings settings are in the upload payload, the part category is written by
+    the similarity run. Enriching the page rather than the whole result set
+    keeps the JSON parse off the 2.8k-row scan above.
+    """
+    if not rows:
+        return
+    items = sorted({r["item_id"] for r in rows})
+    marks = ",".join(["?"] * len(items))
+    payloads = {
+        (x["item_id"], x["stockroom_id"]): json.loads(x["payload"])
+        for x in conn.execute(
+            "SELECT item_id, stockroom_id, payload FROM bom_rows "
+            f"WHERE batch_id=? AND item_id IN ({marks})", [batch_id, *items])}
+    cats = {
+        (x["item_id"], x["stockroom_id"]): x["part_category"]
+        for x in conn.execute(
+            "SELECT item_id, stockroom_id, part_category FROM similarity_result "
+            f"WHERE batch_id=? AND item_id IN ({marks})", [batch_id, *items])}
+    for r in rows:
+        key = (r["item_id"], r["stockroom_id"])
+        p = payloads.get(key, {})
+        r["item_desc"] = str(p.get("item_desc") or "")
+        r["part_category"] = cats.get(key) or ""
+        r["current_max"] = _qty(p.get("max_qty"))
+        r["current_rop"] = _qty(p.get("rop_qty"))
+        # The engineer's own number for this cycle, when the upload carried one.
+        # `agreement_source` already says whether it was this or a prior review
+        # that the engine was graded against.
+        r["bench_max"] = _qty(p.get("factory_recommended_new_max"))
+        r["bench_rop"] = _qty(p.get("factory_recommended_new_rop"))
 
 
 @router.get("/batches")
@@ -37,30 +82,28 @@ def batch_summary(batch_id: int, actor: dict = Depends(any_role())):
         recs = conn.execute(
             "SELECT * FROM recommendation_result WHERE batch_id=?", (batch_id,)).fetchall()
 
-        statuses: dict[str, int] = {}
-        risk: dict[str, int] = {}
-        actions: dict[str, int] = {}
-        codes: dict[str, int] = {}
-        consumables: dict[str, int] = {}
-        routes: dict[str, int] = {}
-        agreements: dict[str, int] = {}
+        # Counter, not dict.get(k, 0) + 1 seven times over. A Counter IS a dict,
+        # so the JSON response shape is unchanged.
+        statuses: Counter[str] = Counter()
+        risk: Counter[str] = Counter()
+        actions: Counter[str] = Counter()
+        codes: Counter[str] = Counter()
+        consumables: Counter[str] = Counter()
+        routes: Counter[str] = Counter()
+        agreements: Counter[str] = Counter()
         exposure_total = exposure_pending = 0.0
         bulk_acceptable = 0
         exposures: list[float] = []
         for r in recs:
             st = derive_status(r, reviews.get((r["item_id"], r["stockroom_id"])))
-            statuses[st] = statuses.get(st, 0) + 1
-            risk[r["risk_level"]] = risk.get(r["risk_level"], 0) + 1
-            actions[r["action"]] = actions.get(r["action"], 0) + 1
-            cons = r["consumable"] or "none"
-            consumables[cons] = consumables.get(cons, 0) + 1
-            rt = r["route"] or "none"
-            routes[rt] = routes.get(rt, 0) + 1
             ag = r["agreement"] or "none"
-            agreements[ag] = agreements.get(ag, 0) + 1
-            for c in (r["reason_code"] or "").split(","):
-                if c:
-                    codes[c] = codes.get(c, 0) + 1
+            statuses[st] += 1
+            risk[r["risk_level"]] += 1
+            actions[r["action"]] += 1
+            consumables[r["consumable"] or "none"] += 1
+            routes[r["route"] or "none"] += 1
+            agreements[ag] += 1
+            codes.update(c for c in (r["reason_code"] or "").split(",") if c)
             exp = r["exposure_usd"] or 0
             exposure_total += exp
             exposures.append(exp)
@@ -98,7 +141,7 @@ def batch_summary(batch_id: int, actor: dict = Depends(any_role())):
             "consumables": consumables,
             "routes": routes,
             "agreements": agreements,
-            "reason_codes": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
+            "reason_codes": dict(codes.most_common()),
             "exposure_total_usd": round(exposure_total, 2),
             "exposure_pending_usd": round(exposure_pending, 2),
             "bulk_acceptable": bulk_acceptable,
@@ -198,8 +241,9 @@ def list_recommendations(
         # applied in Python because status is derived from review joins; page
         # slicing therefore happens after the full batch scan. Fine at 2.8k rows;
         # must move into SQL (view or status column) before multi-module scale.
-        return {"total": total, "limit": limit, "offset": offset,
-                "items": rows[offset:offset + limit]}
+        page = rows[offset:offset + limit]
+        _enrich(conn, batch_id, page)
+        return {"total": total, "limit": limit, "offset": offset, "items": page}
     finally:
         conn.close()
 

@@ -4,9 +4,12 @@
  * Triage lanes: the review queue grouped by PRD v3 consumable class.
  *
  * Constant consumers are the engineer's stated priority, so that lane leads.
- * Each lane offers a single bulk action -- accept every high-confidence,
- * non-diverging, non-High-risk row in the class -- which is the lever that
- * turns thousands of individual clicks into a handful of decisions.
+ * Read-only shape of the queue. The per-lane bulk accept was removed: it
+ * cleared on engine confidence alone, while assist's bulk_accept_candidate
+ * decides the same rows on their agreement history -- the stronger signal
+ * (58.3% acceptance when the engine reproduces the last accepted Max, against
+ * 23.3% past a 50% gap). Two bulk paths disagreeing on the same row is worse
+ * than one.
  */
 
 import Link from "next/link";
@@ -21,12 +24,7 @@ const LANES: { key: string; label: string; blurb: string }[] = [
   { key: "none",     label: "Dormant / no data",  blurb: "insurance or flagged" },
 ];
 
-export function TriageLanes({ summary, busy, canReview, onAcceptLane }: {
-  summary: BatchSummary;
-  busy: boolean;
-  canReview: boolean;
-  onAcceptLane: (consumable: string) => void;
-}) {
+export function TriageLanes({ summary }: { summary: BatchSummary }) {
   const lanes = LANES.filter((l) => (summary.consumables[l.key] ?? 0) > 0);
   if (!lanes.length) return null;
 
@@ -39,8 +37,8 @@ export function TriageLanes({ summary, busy, canReview, onAcceptLane }: {
         </span>
       </div>
       <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
-        &ldquo;Accept safe&rdquo; clears the high-confidence agreements the engine is sure of
-        (excludes High-risk and rows that diverge from the engineer&rsquo;s own number).
+        How the queue splits by demand pattern. Run review assist to get the
+        bulk-accept candidates themselves.
       </p>
       <div className="flex flex-col gap-2.5">
         {lanes.map((l) => (
@@ -51,17 +49,9 @@ export function TriageLanes({ summary, busy, canReview, onAcceptLane }: {
               <div className="text-sm font-medium">{l.label}</div>
               <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>{l.blurb}</div>
             </div>
-            <div className="flex items-center gap-3">
-              <span className="text-sm tnum" style={{ color: "var(--text-secondary)" }}>
-                {(summary.consumables[l.key] ?? 0).toLocaleString()}
-              </span>
-              <button className="btn text-xs" disabled={busy || !canReview}
-                      onClick={() => onAcceptLane(l.key)}
-                      title={canReview ? "Accept safe agreements in this lane"
-                                       : "Needs engineer, senior or admin role"}>
-                Accept safe
-              </button>
-            </div>
+            <span className="text-sm tnum" style={{ color: "var(--text-secondary)" }}>
+              {(summary.consumables[l.key] ?? 0).toLocaleString()}
+            </span>
           </div>
         ))}
       </div>

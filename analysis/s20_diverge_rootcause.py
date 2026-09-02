@@ -31,31 +31,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app import engine_statistical as E  # noqa: E402
+# The scorecard rule lives in one module, not one copy per script. The whole
+# point of it is that it cannot drift from the engine's own tolerance, which a
+# third hand-written copy would quietly undo.
+from scorecard import matched as _matched, num as _n, pair as _pair  # noqa: E402
 
 PKL = ROOT / "analysis" / "output" / "s20_payloads.pkl"
 OUT = ROOT / "analysis" / "output" / "s20_ablation.csv"
 
 SL_LEGACY = {"h": 0.99, "m": 0.95, "l": 0.90, "d": 0.90}
 SL_LEGACY_DEFAULT = 0.95
-
-
-def _n(df: pd.DataFrame, c: str) -> pd.Series:
-    return pd.to_numeric(df.get(c), errors="coerce")
-
-
-def _pair(out: pd.DataFrame) -> np.ndarray:
-    """Max and ROP only -- Min is a derived floor, not a replenishment lever."""
-    return np.c_[out.factory_recommended_new_max,
-                 out.factory_recommended_new_rop].astype(float)
-
-
-def _matched(engine: np.ndarray, bench: np.ndarray) -> np.ndarray:
-    """Vectorised engine_statistical.close_enough over Max and ROP.
-
-    The tolerance comes from the engine so this harness cannot drift from it;
-    _selfcheck asserts the two agree row by row.
-    """
-    return (np.abs(engine - bench) <= E.AGREE_TOL * np.abs(bench)).all(axis=1)
 
 
 def _sl_run(df: pd.DataFrame, table: dict, default: float, cfg: dict | None = None):

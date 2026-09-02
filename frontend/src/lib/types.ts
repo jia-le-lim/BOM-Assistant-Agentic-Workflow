@@ -62,6 +62,14 @@ export interface Recommendation {
    *  engineer's own number in this upload; "prior_review" = their last decision
    *  on this part; "" = no benchmark existed. */
   agreement_source: "factory" | "prior_review" | "";
+  /* Queue-display fields. Attached per page by /recommendations (_enrich) and
+   * absent from the single-item detail payload, hence optional. */
+  item_desc?: string;
+  part_category?: string;
+  current_max?: number | null;
+  current_rop?: number | null;
+  bench_max?: number | null;
+  bench_rop?: number | null;
 }
 
 export interface BatchSummary {
@@ -288,6 +296,8 @@ export interface AssistRunSummary {
   rows_assisted: number;
   counts: Record<AssistVerdict, number>;
   model_version: string;
+  /** Null when the batch already had peer matches and none were rebuilt. */
+  similarity: SimilarityRunSummary | null;
 }
 
 export type DormantPolicy = "hold_current" | "fixed_qty" | "zero";
@@ -321,17 +331,6 @@ export interface DormantRuleCoverage {
   proposed_book_usd: number;
   delta_usd: number;
   confirmed_rules: number;
-}
-
-export interface PartCategoryCoverage {
-  batch_id: number;
-  total: number;
-  categorised: number;
-  uncategorised: number;
-  pct: number;
-  by_category: Record<string, number>;
-  uncategorised_samples: string[];
-  broken_rules: string[];
 }
 
 export interface ChatResponse {

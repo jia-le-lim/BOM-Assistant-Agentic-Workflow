@@ -194,7 +194,8 @@ def get_agreement_history(ctx: ToolContext, item_id: str,
         params.append(stockroom_id)
     rows = [dict(r) for r in ctx.conn.execute(
         "SELECT r.batch_id, r.stockroom_id, r.agreement, r.agreement_source, "
-        "r.new_max AS engine_max, h.final_max, h.justification, h.reviewed_at "
+        "r.new_max AS engine_max, h.final_max, h.final_rop, h.justification, "
+        "h.reviewed_at "
         "FROM recommendation_result r JOIN review_history h "
         "ON h.batch_id=r.batch_id AND h.item_id=r.item_id "
         "AND h.stockroom_id=r.stockroom_id "
@@ -211,13 +212,18 @@ def get_agreement_history(ctx: ToolContext, item_id: str,
         streak += 1
     last_final = next((r["final_max"] for r in rows if r["final_max"] is not None),
                       None)
+    # The ROP from the SAME cycle as last_final_max, not the newest non-null of
+    # each independently -- a Max from one review and a ROP from another is a
+    # policy nobody approved.
+    last_pair = next((r for r in rows if r["final_max"] is not None), None)
     ctx.sources.append({"type": "recommendation_result", "item_id": item_id,
                         "count": len(rows)})
     return {"item_id": item_id, "cycles": rows, "n_cycles": len(rows),
             "n_diverge": sum(1 for r in rows
                              if str(r.get("agreement") or "") == "diverge"),
             "diverge_streak": streak,
-            "last_final_max": last_final}
+            "last_final_max": last_final,
+            "last_final_rop": last_pair["final_rop"] if last_pair else None}
 
 
 def get_item_notes(ctx: ToolContext, item_id: str) -> dict:
@@ -269,6 +275,10 @@ def get_similar_parts(ctx: ToolContext, item_id: str,
                         "neighbour_count": res["neighbour_count"]})
     return {"item_id": item_id, "neighbour_count": res["neighbour_count"],
             "pool_size": res["pool_size"], "is_outlier": res["is_outlier"],
+            # Already computed and stored by the similarity run, and already
+            # read this way by agent/graph.py:intake. Recomputing it over the
+            # returned neighbours would be a second, quietly different number.
+            "historical_override_rate": res["historical_override_rate"],
             "advisory_codes": res["advisory_codes"],
             "analogue_max_median": res["analogue_max_median"],
             "analogue_max_p25": res["analogue_max_p25"],

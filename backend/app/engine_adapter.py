@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -207,10 +208,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     conn.commit()
 
     review_y = int((res.review_required == "Y").sum())
-    codes: dict[str, int] = {}
-    for cs in res.reason_code:
-        for c in cs.split(","):
-            codes[c] = codes.get(c, 0) + 1
+    codes = Counter(c for cs in res.reason_code for c in cs.split(","))
     return {
         "batch_id": batch_id,
         "rows_scored": len(res),
@@ -219,7 +217,7 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
         "review_required_N": len(res) - review_y,
         "actions": res.factory_recommendation_action.value_counts().to_dict(),
         "risk_levels": res.risk_level.value_counts().to_dict(),
-        "top_reason_codes": dict(sorted(codes.items(), key=lambda kv: -kv[1])[:8]),
+        "top_reason_codes": dict(codes.most_common(8)),
         "rule_version": cfg["rule_version"],
         "config_hash": cfg_hash,
     }

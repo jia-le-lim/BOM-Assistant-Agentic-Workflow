@@ -5,17 +5,13 @@ import { useRouter } from "next/navigation";
 import { ApiError, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
-  ItemDetail, JustificationTemplate, JustificationTemplatePage, Review,
-  SimilarityResult, TriageResult,
+  AssistPage, AssistResult, ItemDetail, JustificationTemplate,
+  JustificationTemplatePage, Review, SimilarityResult,
 } from "@/lib/types";
 import {
-  ActionChip, AgreementChip, Banner, BusyLabel, CardSkeleton, ConsumableChip,
-  ReasonCodes, RiskChip, Skeleton, StatusChip, TriageChip,
+  ActionChip, AgreementChip, AssistChip, ASSIST_VERDICT, Banner, BusyLabel,
+  CardSkeleton, ConsumableChip, ReasonCodes, RiskChip, Skeleton, StatusChip,
 } from "@/components/ui";
-import {
-  emptyRunStream, reduceTriageStream, RunStream,
-  type RunStreamState, type TriageStreamEvent,
-} from "@/components/RunStream";
 
 const CONTEXT_LABELS: Record<string, string> = {
   item_desc: "Description", machine_type: "Machine type", aging_status: "Aging status",
@@ -31,23 +27,22 @@ export default function ItemPage({ params }: {
 }) {
   const { id, itemId } = use(params);
   const batchId = Number(id);
-  const { call, stream } = useApi();
+  const { call } = useApi();
   const { role, user } = useSession();
   const router = useRouter();
 
   const [d, setD] = useState<ItemDetail | null>(null);
   const [history, setHistory] = useState<Review[]>([]);
-  const [triage, setTriage] = useState<TriageResult | null>(null);
   const [similar, setSimilar] = useState<SimilarityResult | null>(null);
+  const [assist, setAssist] = useState<AssistResult | null>(null);
   const [justificationTemplates, setJustificationTemplates] = useState<JustificationTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   // Which action is running, not merely that one is. One shared boolean made
   // every button on the page say "Working…" at once, so the engineer could not
   // tell which of them they were waiting for.
-  const [pending, setPending] = useState<"decision" | "triage" | "approve" | null>(null);
+  const [pending, setPending] = useState<"decision" | "approve" | null>(null);
   const busy = pending !== null;
-  const [runStream, setRunStream] = useState<RunStreamState | null>(null);
 
   const [decision, setDecision] = useState<"accept" | "override" | "reject">("accept");
   const [fMax, setFMax] = useState(""); const [fRop, setFRop] = useState(""); const [fMin, setFMin] = useState("");
@@ -56,19 +51,13 @@ export default function ItemPage({ params }: {
   const load = useCallback(async () => {
     try {
       const detail = await call<ItemDetail>(`recommendations/${itemId}?batch_id=${batchId}`);
-      const triagePath = `triage/${batchId}/${itemId}?stockroom_id=${encodeURIComponent(
-        detail.recommendation.stockroom_id)}`;
-      const similarPath = `similarity/${batchId}/${itemId}?stockroom_id=${encodeURIComponent(
-        detail.recommendation.stockroom_id)}`;
-      const [h, templatePage, triageResult, similarResult] = await Promise.all([
+      const room = encodeURIComponent(detail.recommendation.stockroom_id);
+      const similarPath = `similarity/${batchId}/${itemId}?stockroom_id=${room}`;
+      const [h, templatePage, assistPage, similarResult] = await Promise.all([
         call<{ reviews: Review[] }>(`history/${itemId}`),
         call<JustificationTemplatePage>("review/justification-templates"),
-        can.review(role)
-          ? call<TriageResult>(triagePath).catch((e) => {
-              if (e instanceof ApiError && e.status === 404) return null;
-              throw e;
-            })
-          : Promise.resolve(null),
+        call<AssistPage>(`assist/${batchId}?item_id=${encodeURIComponent(itemId)}`
+                         + `&stockroom_id=${room}`),
         can.review(role)
           ? call<SimilarityResult>(similarPath).catch((e) => {
               if (e instanceof ApiError && e.status === 404) return null;
@@ -82,7 +71,7 @@ export default function ItemPage({ params }: {
       setFMin(String(detail.recommendation.new_min));
       setHistory(h.reviews);
       setJustificationTemplates(templatePage.templates);
-      setTriage(triageResult);
+      setAssist(assistPage.items[0] ?? null);
       setSimilar(similarResult);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
@@ -109,40 +98,6 @@ export default function ItemPage({ params }: {
         : `Recorded as ${decision}. Status: ${r.status}.`);
       await load();
     } catch (e) { setErr((e as Error).message); }
-    finally { setPending(null); }
-  }
-
-  /**
-   * Triage is the only step that spends model calls — 3 to 7 per item — so it
-   * runs here, on demand, for the row actually being read. Never for the batch.
-   */
-  async function runTriage() {
-    setPending("triage"); setErr(null); setNote(null);
-    // Held in a local as well as in state: the stream callback fires faster
-    // than React commits, so folding onto the state variable would drop events.
-    let live = emptyRunStream("Triaging this row");
-    setRunStream(live);
-    try {
-      await stream<TriageStreamEvent>("triage/run/stream", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batch_id: batchId, item_id: itemId,
-          stockroom_id: d?.recommendation.stockroom_id, refresh: true,
-        }),
-      }, (event) => {
-        live = reduceTriageStream(live, event);
-        setRunStream(live);
-        if (event.type === "complete") {
-          const { triaged, llm_calls_used: calls } = event.summary;
-          setNote(triaged
-            ? `Triaged this item using ${calls} model call${calls === 1 ? "" : "s"}.`
-            : "Nothing to triage for this item.");
-        }
-      });
-      if (live.error) setErr(live.error);
-      await load();
-      setRunStream(null);          // the triage card below is now the result
-    } catch (e) { setErr((e as Error).message); setRunStream(null); }
     finally { setPending(null); }
   }
 
@@ -268,88 +223,38 @@ export default function ItemPage({ params }: {
             </div>
           </div>
 
-          {can.review(role) && !triage && (
-            <div className="card p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="mr-auto">
-                  <h2 className="text-sm font-semibold">Advisory triage</h2>
-                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                    Not run for this item yet. Triage is the only step that calls the
-                    model — 3 to 7 calls — so it runs per item, when you ask for it.
-                  </p>
-                </div>
-                <button className="btn btn-primary" onClick={runTriage} disabled={busy}>
-                  <BusyLabel busy={pending === "triage"} running="Triaging…"
-                             idle="Run triage for this item" />
-                </button>
-              </div>
+          <div className="card p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+              <h2 className="text-sm font-semibold">Review assist</h2>
+              {assist && <AssistChip verdict={assist.verdict} />}
             </div>
-          )}
-
-          {runStream && <RunStream state={runStream} />}
-
-          {triage && (
-            <div className="card p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                <h2 className="text-sm font-semibold">Advisory triage</h2>
-                <div className="flex items-center gap-3">
-                  <TriageChip tier={triage.triage_tier} />
-                  <span className="text-xs tnum" style={{ color: "var(--text-secondary)" }}>
-                    priority {triage.priority_score.toFixed(0)} · confidence {Math.round(triage.confidence * 100)}%
-                  </span>
-                  {can.review(role) && (
-                    <button className="btn text-xs" onClick={runTriage} disabled={busy}
-                            title="Re-run triage for this item only">
-                      <BusyLabel busy={pending === "triage"} running="Re-running…" idle="Re-run" />
-                    </button>
-                  )}
-                </div>
-              </div>
-              <p className="text-sm" style={{ lineHeight: 1.5 }}>{triage.rationale}</p>
-              {triage.focus_question && (
-                <p className="text-sm mt-3 p-3 rounded" style={{ background: "var(--seq-soft)" }}>
-                  <strong>Decide:</strong> {triage.focus_question}
+            {!assist ? (
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                Not assisted yet. Run review assist on the batch — dormant rows are
+                sized by the dormant rules instead and never get a verdict.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  {ASSIST_VERDICT[assist.verdict].hint}
                 </p>
-              )}
-              {/* The rationale and focus question above ARE the conclusion. The
-                  specialist lines are the working behind it — available, but not
-                  competing with it for attention. */}
-              {(() => {
-                const evidence = ([
-                  ["History", triage.history_narrative],
-                  ["Demand", triage.demand_narrative],
-                  ["Procurement", triage.procurement_narrative],
-                ] as const).filter(([, n]) => n);
-                if (!evidence.length) return null;
-                return (
-                  <details className="mt-4">
-                    <summary className="text-xs" style={{ color: "var(--text-muted)", cursor: "pointer" }}>
-                      Specialist evidence ({evidence.length})
-                    </summary>
-                    <div className="flex flex-col gap-3 mt-3">
-                      {evidence.map(([label, narrative]) => (
-                        <div key={label} style={{ borderLeft: "2px solid var(--seq)", paddingLeft: 10 }}>
-                          <div className="text-xs font-medium mb-1">{label}</div>
-                          <p className="text-xs" style={{ color: "var(--text-secondary)",
-                                                          whiteSpace: "pre-wrap" }}>
-                            {narrative}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                );
-              })()}
-              <details className="text-xs mt-4">
-                <summary style={{ color: "var(--text-muted)", cursor: "pointer" }}>
-                  {triage.sources.length} grounded sources · {triage.provider}:{triage.model}
-                </summary>
-                <pre className="mt-2 p-3 rounded scroll-x" style={{ background: "var(--seq-soft)" }}>
-                  {JSON.stringify(triage.sources, null, 2)}
-                </pre>
-              </details>
-            </div>
-          )}
+                {assist.narrative && (
+                  <p className="text-sm mt-3" style={{ lineHeight: 1.5 }}>{assist.narrative}</p>
+                )}
+                {/* The reasons ARE the verdict -- rules.py returns them with it.
+                    The sentence above is only the model's wording of them. */}
+                {assist.reasons.length > 0 && (
+                  <div className="mt-3">
+                    <ReasonCodes codes={assist.reasons.join(",")} max={12} />
+                  </div>
+                )}
+                <p className="text-[11px] mt-3" style={{ color: "var(--text-muted)" }}>
+                  Decided by rules ({assist.model_version}), not by the model. Advisory
+                  only — it never changes Min/ROP/Max.
+                </p>
+              </>
+            )}
+          </div>
 
           <div className="card p-5">
             <h2 className="text-sm font-semibold mb-3">Decision</h2>
@@ -631,7 +536,7 @@ function ItemSkeleton() {
       <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
         <div className="flex flex-col gap-5">
           <CardSkeleton lines={5} label="Loading engine recommendation" />
-          <CardSkeleton lines={3} label="Loading advisory triage" />
+          <CardSkeleton lines={3} label="Loading review assist" />
           <CardSkeleton lines={4} label="Loading decision form" />
         </div>
         <div className="flex flex-col gap-5">

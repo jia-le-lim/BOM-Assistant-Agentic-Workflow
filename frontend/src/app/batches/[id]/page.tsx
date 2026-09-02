@@ -6,27 +6,18 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { fmtCompact, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
-  AssistPage, AssistRunSummary, AssistVerdict,
+  AssistPage, AssistRunSummary,
   BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RuleConfig, RunSummary,
-  SimilarityRunSummary, Status, TriagePage,
+  Status, TriagePage,
 } from "@/lib/types";
 import {
-  AgreementChip, Banner, BusyLabel, ConsumableChip, Progress, ReasonCodes,
-  RiskChip, StatTile, StatusChip, TableSkeleton,
+  AgreementChip, ASSIST_VERDICT, Banner, BusyLabel, ConsumableChip, Progress,
+  ReasonCodes, RiskChip, StatTile, StatusChip, TableSkeleton,
 } from "@/components/ui";
 import { WorkflowPipeline } from "@/components/WorkflowPipeline";
 import { AgentTriage, PriorityCallout, TriageLanes } from "@/components/TriageLanes";
 
 const PAGE = 25;
-
-/* What each verdict tells the reviewer, in the order attention should go.
- * The chain decides these deterministically (backend/app/assist/rules.py); the
- * page only groups by them. */
-const VERDICT: Record<AssistVerdict, { label: string; hint: string }> = {
-  flag_for_review: { label: "Needs review", hint: "The engine's history on this part argues against taking it as read" },
-  needs_context: { label: "No prior cycle", hint: "Never reviewed before — nothing to check the engine against" },
-  bulk_accept_candidate: { label: "Bulk accept", hint: "Matched the last cycles and the engine has not moved off the accepted value" },
-};
 
 /** Composite key: an item can sit in more than one stockroom. */
 const keyOf = (r: { item_id: string; stockroom_id: string }) =>
@@ -59,55 +50,49 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [refreshing, setRefreshing] = useState(false);
   const [similarityRefresh, setSimilarityRefresh] = useState(false);
 
-  // Initialize filter state from URL query parameters
-  const [status, setStatus] = useState<Status | "">(
-    (searchParams.get("status") as Status) || "pending_review"
-  );
-  const [risk, setRisk] = useState(searchParams.get("risk_level") || "");
-  const [action, setAction] = useState(searchParams.get("action") || "");
-  const [consumable, setConsumable] = useState(searchParams.get("consumable") || "");
-  const [agreement, setAgreement] = useState(searchParams.get("agreement") || "");
-  const [minExp, setMinExp] = useState(searchParams.get("min_exposure") || "");
-  const [q, setQ] = useState(searchParams.get("q") || "");
+  // One record, not eight useStates plus an eight-positional-argument updater.
+  // The keys ARE the query-string names, so the URL and the /recommendations
+  // request are both `new URLSearchParams(filters)` with the blanks dropped --
+  // there is no third list to keep in step when a filter is added.
+  const [filters, setFilters] = useState<Record<string, string>>(() => ({
+    status: searchParams.get("status") ?? "pending_review",
+    risk_level: searchParams.get("risk_level") ?? "",
+    action: searchParams.get("action") ?? "",
+    consumable: searchParams.get("consumable") ?? "",
+    agreement: searchParams.get("agreement") ?? "",
+    min_exposure: searchParams.get("min_exposure") ?? "",
+    q: searchParams.get("q") ?? "",
+    offset: searchParams.get("offset") ?? "",
+  }));
   // What is in the box vs. what the queue is filtered by. They differ only while
   // you are still typing -- committing per keystroke would push a history entry
   // and refetch the whole batch for every character.
-  const [qDraft, setQDraft] = useState(q);
-  const [offset, setOffset] = useState(Number(searchParams.get("offset")) || 0);
+  const [qDraft, setQDraft] = useState(filters.q);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // Helper to update URL with current filters
-  const updateUrl = useCallback((
-    newStatus?: Status | "",
-    newRisk?: string,
-    newAction?: string,
-    newConsumable?: string,
-    newAgreement?: string,
-    newMinExp?: string,
-    newOffset?: number,
-    newQ?: string,
-  ) => {
-    const params = new URLSearchParams();
-    const s = newStatus ?? status;
-    const r = newRisk ?? risk;
-    const a = newAction ?? action;
-    const c = newConsumable ?? consumable;
-    const ag = newAgreement ?? agreement;
-    const m = newMinExp ?? minExp;
-    const o = newOffset ?? offset;
-    const query = newQ ?? q;
+  const offset = Number(filters.offset) || 0;
+  const query = useMemo(() => new URLSearchParams(
+    Object.entries(filters).filter(([, v]) => v)).toString(), [filters]);
 
-    if (s) params.set("status", s);
-    if (r) params.set("risk_level", r);
-    if (a) params.set("action", a);
-    if (c) params.set("consumable", c);
-    if (ag) params.set("agreement", ag);
-    if (m) params.set("min_exposure", m);
-    if (query) params.set("q", query);
-    if (o > 0) params.set("offset", String(o));
+  // Changing any filter but the page resets to the first page and drops the
+  // selection. Ticks surviving a filter change is how someone bulk-accepts rows
+  // they can no longer see.
+  const setFilter = useCallback((patch: Record<string, string>) => {
+    setFilters((prev) => ({ ...prev, offset: "", ...patch }));
+    if (!("offset" in patch)) setSelected(new Set());
+  }, []);
 
-    router.push(`/batches/${batchId}?${params.toString()}`);
-  }, [batchId, router, status, risk, action, consumable, agreement, minExp, offset, q]);
+  // push, not replace: a filter change is a place you can go Back from, and
+  // that is how the original eight-argument updater behaved. scroll:false keeps
+  // the toolbar under your cursor instead of jumping to the top of the page.
+  // The mount run is skipped -- the URL already says this, and pushing it again
+  // would put a duplicate entry in the history on every page load.
+  const urlSynced = useRef(false);
+  useEffect(() => {
+    if (!urlSynced.current) { urlSynced.current = true; return; }
+    router.push(query ? `/batches/${batchId}?${query}` : `/batches/${batchId}`,
+                { scroll: false });
+  }, [router, batchId, query]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await call<BatchSummary>(`batches/${batchId}/summary`)); }
@@ -115,21 +100,17 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   }, [call, batchId]);
 
   const loadPage = useCallback(async () => {
-    const params = new URLSearchParams({ batch_id: String(batchId), limit: String(PAGE), offset: String(offset) });
-    if (status) params.set("status", status);
-    if (risk) params.set("risk_level", risk);
-    if (action) params.set("action", action);
-    if (consumable) params.set("consumable", consumable);
-    if (agreement) params.set("agreement", agreement);
-    if (minExp) params.set("min_exposure", minExp);
-    if (q.trim()) params.set("q", q.trim());
+    const params = new URLSearchParams(query);
+    params.set("batch_id", String(batchId));
+    params.set("limit", String(PAGE));
+    params.set("offset", String(offset));
     setRefreshing(true);
     try {
       setPage(await call<RecommendationPage>(`recommendations?${params}`));
       setErr(null);
     } catch (e) { setErr((e as Error).message); setPage(null); }
     finally { setRefreshing(false); }
-  }, [call, batchId, status, risk, action, consumable, agreement, minExp, offset, q]);
+  }, [call, batchId, query, offset]);
 
   const loadTriage = useCallback(async () => {
     if (!canReview) { setTriage(null); return; }
@@ -147,66 +128,12 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     catch (e) { setErr((e as Error).message); }
   }, [call]);
 
-  // Create wrapper functions for filter setters that update both state and URL
-  const handleStatusChange = useCallback((value: string) => {
-    const v = value as Status | "";
-    setStatus(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(v, risk, action, consumable, agreement, minExp, 0);
-  }, [updateUrl, risk, action, consumable, agreement, minExp]);
-
-  const handleRiskChange = useCallback((v: string) => {
-    setRisk(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(status, v, action, consumable, agreement, minExp, 0);
-  }, [updateUrl, status, action, consumable, agreement, minExp]);
-
-  const handleActionChange = useCallback((v: string) => {
-    setAction(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(status, risk, v, consumable, agreement, minExp, 0);
-  }, [updateUrl, status, risk, consumable, agreement, minExp]);
-
-  const handleConsumableChange = useCallback((v: string) => {
-    setConsumable(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(status, risk, action, v, agreement, minExp, 0);
-  }, [updateUrl, status, risk, action, agreement, minExp]);
-
-  const handleAgreementChange = useCallback((v: string) => {
-    setAgreement(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(status, risk, action, consumable, v, minExp, 0);
-  }, [updateUrl, status, risk, action, consumable, minExp]);
-
-  const handleMinExpChange = useCallback((v: string) => {
-    setMinExp(v);
-    setOffset(0);
-    setSelected(new Set());
-    updateUrl(status, risk, action, consumable, agreement, v, 0);
-  }, [updateUrl, status, risk, action, consumable, agreement]);
-
-  const handleOffsetChange = useCallback((v: number) => {
-    setOffset(v);
-    updateUrl(status, risk, action, consumable, agreement, minExp, v);
-  }, [updateUrl, status, risk, action, consumable, agreement, minExp]);
-
   // Commit the search box 300ms after the last keystroke.
   useEffect(() => {
-    if (qDraft === q) return;
-    const t = window.setTimeout(() => {
-      setQ(qDraft);
-      setOffset(0);
-      setSelected(new Set());
-      updateUrl(status, risk, action, consumable, agreement, minExp, 0, qDraft);
-    }, 300);
+    if (qDraft === filters.q) return;
+    const t = window.setTimeout(() => setFilter({ q: qDraft }), 300);
     return () => window.clearTimeout(t);
-  }, [qDraft, q, updateUrl, status, risk, action, consumable, agreement, minExp]);
+  }, [qDraft, filters.q, setFilter]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => { void loadSummary(); });
@@ -255,40 +182,32 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     finally { setBusyAction(null); }
   }
 
-  async function runSimilarity() {
-    setBusyAction("similarity"); setErr(null); setNote(null);
-    try {
-      const s = await call<SimilarityRunSummary>("similarity/run", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batch_id: batchId, refresh: similarityRefresh }),
-      });
-      setNote(s.neighbour_pool === 0
-        ? "No reviewed history yet — every row is flagged as having no reliable "
-          + "analogue. Run again once this month's reviews are recorded."
-        : `Matched ${s.scored.toLocaleString()} rows against `
-          + `${s.neighbour_pool.toLocaleString()} reviewed peers — `
-          + `${s.outliers.toLocaleString()} unusual, `
-          + `${s.diverging.toLocaleString()} diverging from peer median. `
-          + `${s.categorised.toLocaleString()} of ${s.scored.toLocaleString()} `
-          + `had a part category.`);
-      setSimilarityRefresh(false);
-      await refresh();
-    } catch (e) { setErr((e as Error).message); }
-    finally { setBusyAction(null); }
-  }
-
   async function runAssist() {
     setBusyAction("assist"); setErr(null); setNote(null);
     try {
-      const s = await call<AssistRunSummary>(`assist/run?batch_id=${batchId}`,
-                                             { method: "POST" });
-      setNote(s.rows_assisted === 0
+      const s = await call<AssistRunSummary>(
+        `assist/run?batch_id=${batchId}&refresh_peers=${similarityRefresh}`,
+        { method: "POST" });
+      // The peer line only appears when this run built peers -- on a re-run
+      // over existing ones the backend returns null and there is nothing new
+      // to report.
+      const peers = s.similarity === null ? ""
+        : s.similarity.neighbour_pool === 0
+          ? " No reviewed history yet, so every row is flagged as having no"
+            + " reliable analogue."
+          : ` Matched ${s.similarity.scored.toLocaleString()} rows against `
+            + `${s.similarity.neighbour_pool.toLocaleString()} reviewed peers `
+            + `(${s.similarity.outliers.toLocaleString()} unusual, `
+            + `${s.similarity.diverging.toLocaleString()} diverging from peer `
+            + `median).`;
+      setNote((s.rows_assisted === 0
         ? "No active or dying rows in this batch — dormant rows are sized by the "
           + "dormant rules instead."
         : `Assisted ${s.rows_assisted.toLocaleString()} rows — `
           + `${s.counts.flag_for_review} need review, `
           + `${s.counts.bulk_accept_candidate} bulk-accept candidates, `
-          + `${s.counts.needs_context} with no prior cycle.`);
+          + `${s.counts.needs_context} with no prior cycle.`) + peers);
+      setSimilarityRefresh(false);
       await refresh();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusyAction(null); }
@@ -300,24 +219,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     if (r.skipped) bits.push(`${r.skipped} already decided`);
     if (r.failed.length) bits.push(`${r.failed.length} failed`);
     return bits.join(", ");
-  }
-
-  async function acceptLane(cons: string) {
-    setBusyAction(`lane:${cons}`); setErr(null); setNote(null);
-    try {
-      const r = await call<BulkReviewResult>("review/bulk", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batch_id: batchId, decision: "accept",
-          justification: "bulk: safe agreements in lane",
-          filters: { consumable: cons, min_confidence: 0.8, exclude_high_risk: true },
-        }),
-      });
-      setNote(`${cons} lane — ${summarise(r)}.`);
-      setSelected(new Set());
-      await refresh();
-    } catch (e) { setErr((e as Error).message); }
-    finally { setBusyAction(null); }
   }
 
   async function acceptGuardedTriage() {
@@ -503,28 +404,29 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                      aria-label="Search the review queue by item or stockroom"
                      onChange={(e) => setQDraft(e.target.value)} />
             </label>
-            <Filter label="Status" value={status} set={handleStatusChange}
+            <Filter label="Status" value={filters.status} set={(v) => setFilter({ status: v })}
                     opts={[["", "All"], ["pending_review", "Pending"], ["awaiting_senior", "Awaiting senior"],
                            ["reviewed", "Reviewed"], ["auto_cleared", "Auto-cleared"]]} />
-            <Filter label="Demand" value={consumable} set={handleConsumableChange}
+            <Filter label="Demand" value={filters.consumable} set={(v) => setFilter({ consumable: v })}
                     opts={[["", "Any"], ["constant", "Constant"], ["sporadic", "Sporadic"],
                            ["dying", "Dying"], ["none", "Dormant"]]} />
-            <Filter label="Agreement" value={agreement} set={handleAgreementChange}
+            <Filter label="Agreement" value={filters.agreement} set={(v) => setFilter({ agreement: v })}
                     opts={[["", "Any"], ["match", "Matches"], ["diverge", "Diverges"], ["none", "No benchmark"]]} />
-            <Filter label="Risk" value={risk} set={handleRiskChange}
+            <Filter label="Risk" value={filters.risk_level} set={(v) => setFilter({ risk_level: v })}
                     opts={[["", "Any"], ["High", "High"], ["Medium", "Medium"], ["Low", "Low"]]} />
-            <Filter label="Action" value={action} set={handleActionChange}
+            <Filter label="Action" value={filters.action} set={(v) => setFilter({ action: v })}
                     opts={[["", "Any"], ["Increase", "Increase"], ["Maintain", "Maintain"], ["Decrease", "Decrease"]]} />
             <label className="flex flex-col gap-1 text-xs">
               <span style={{ color: "var(--text-secondary)" }}>Min exposure $</span>
-              <input className="field w-28" type="number" value={minExp} placeholder="0"
-                     onChange={(e) => handleMinExpChange(e.target.value)} />
+              <input className="field w-28" type="number" value={filters.min_exposure}
+                     placeholder="0"
+                     onChange={(e) => setFilter({ min_exposure: e.target.value })} />
             </label>
           </div>
 
           <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-            Sorted by exposure, highest first. Tick rows to accept or reject in bulk, or use the
-            inline actions. Overrides still open the item detail.
+            Sorted by exposure, highest first. Tick rows to accept or reject in bulk, or use
+            the ✓ / ✕ on a row. Click a row to open the item — overrides live there.
           </p>
 
           {selected.size > 0 && (
@@ -556,7 +458,8 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           ) : page.items.length === 0 ? (
             <p className="text-sm py-6" style={{ color: "var(--text-muted)" }}>
               No rows match these filters.
-              {q && status ? " That part may sit under a different status — try Status: All." : ""}
+              {filters.q && filters.status
+                ? " That part may sit under a different status — try Status: All." : ""}
             </p>
           ) : (
             <div className={refreshing ? "is-refreshing" : undefined}>
@@ -568,9 +471,15 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                         <input type="checkbox" checked={allSelected} onChange={toggleAll}
                                aria-label="Select all on page" />
                       </th>
-                      <th>Item</th><th>Demand</th><th className="text-right">Exposure</th>
-                      <th>Status</th><th>Risk</th><th>Agreement</th><th>Assist</th>
-                      <th className="text-right">Max</th><th>Why</th><th></th>
+                      <th>Part</th><th>Category</th><th>Demand</th>
+                      <th className="text-right">Exposure</th>
+                      <th className="w-6" title="Status">St</th>
+                      <th className="w-6" title="Risk level">Rk</th>
+                      <th className="w-6" title="Agreement with the engineer">Ag</th>
+                      <th>Assist</th>
+                      <th className="text-right">Max now → new</th>
+                      <th className="text-right">ROP now → new</th>
+                      <th>Why</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -578,51 +487,66 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                       const k = keyOf(r);
                       const pending = r.status === "pending_review";
                       const a = verdicts.get(k);
+                      const href = `/batches/${batchId}/items/${r.item_id}`;
                       return (
-                        <tr key={k}>
-                          <td>
+                        <tr key={k} className="row-link" onClick={() => router.push(href)}>
+                          <td onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" checked={selected.has(k)}
                                    disabled={!pending}
                                    onChange={() => toggle(k)}
                                    aria-label={`Select ${r.item_id}`} />
                           </td>
-                          <td className="font-mono text-xs">{r.item_id}</td>
+                          <td className="max-w-[220px]">
+                            {/* A real link, not just the row handler: row click is
+                                mouse-only, and this row has to be reachable by
+                                keyboard and announced as a destination. */}
+                            <Link href={href} className="font-mono text-xs"
+                                  onClick={(e) => e.stopPropagation()}>{r.item_id}</Link>
+                            {r.item_desc && (
+                              <span className="block text-[11px] truncate"
+                                    style={{ color: "var(--text-muted)" }}
+                                    title={r.item_desc}>{r.item_desc}</span>
+                            )}
+                          </td>
+                          <td className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                            {r.part_category || "—"}
+                          </td>
                           <td><ConsumableChip value={r.consumable} /></td>
                           <td className="text-right tnum">{fmtUsd(r.exposure_usd)}</td>
-                          <td><StatusChip status={r.status} /></td>
-                          <td><RiskChip level={r.risk_level} /></td>
-                          <td><AgreementChip value={r.agreement} source={r.agreement_source} /></td>
-                          <td className="text-xs" title={a ? VERDICT[a.verdict].hint : undefined}
+                          <td><StatusChip status={r.status} compact /></td>
+                          <td><RiskChip level={r.risk_level} compact /></td>
+                          <td><AgreementChip value={r.agreement} source={r.agreement_source}
+                                             compact /></td>
+                          <td className="text-xs" title={a ? ASSIST_VERDICT[a.verdict].hint : undefined}
                               style={{ color: a?.verdict === "flag_for_review"
                                 ? "var(--warning)" : "var(--text-secondary)" }}>
-                            {a ? VERDICT[a.verdict].label : "—"}
+                            {a ? ASSIST_VERDICT[a.verdict].label : "—"}
                             {a?.narrative && (
                               <span className="block mt-0.5" style={{ color: "var(--text-muted)" }}>
                                 {a.narrative}
                               </span>
                             )}
                           </td>
-                          <td className="text-right tnum">{r.new_max}</td>
+                          <td className="text-right">
+                            <Swing now={r.current_max} next={r.new_max} bench={r.bench_max} />
+                          </td>
+                          <td className="text-right">
+                            <Swing now={r.current_rop} next={r.new_rop} bench={r.bench_rop} />
+                          </td>
                           <td className="max-w-[240px]"><ReasonCodes codes={r.reason_code} /></td>
-                          <td>
-                            <div className="flex gap-1.5 justify-end">
-                              {pending && canReview && (
-                                <>
-                                  <button className="btn text-xs" disabled={busy}
-                                          onClick={() => quickReview(r, "accept")}>
-                                    <BusyLabel busy={busyAction === `accept:${k}`}
-                                               running="Accepting…" idle="Accept" />
-                                  </button>
-                                  <button className="btn text-xs" disabled={busy}
-                                          onClick={() => quickReview(r, "reject")}>
-                                    <BusyLabel busy={busyAction === `reject:${k}`}
-                                               running="Rejecting…" idle="Reject" />
-                                  </button>
-                                </>
-                              )}
-                              <Link className="btn text-xs"
-                                    href={`/batches/${batchId}/items/${r.item_id}`}>Open</Link>
-                            </div>
+                          <td onClick={(e) => e.stopPropagation()}>
+                            {pending && canReview && (
+                              <div className="flex gap-1.5 justify-end">
+                                <IconAction glyph="✓" colour="var(--good)"
+                                            label={`Accept ${r.item_id}`}
+                                            busy={busyAction === `accept:${k}`} disabled={busy}
+                                            onClick={() => quickReview(r, "accept")} />
+                                <IconAction glyph="✕" colour="var(--critical)"
+                                            label={`Reject ${r.item_id}`}
+                                            busy={busyAction === `reject:${k}`} disabled={busy}
+                                            onClick={() => quickReview(r, "reject")} />
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );
@@ -636,9 +560,9 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                 </span>
                 <div className="flex gap-2">
                   <button className="btn text-xs" disabled={offset === 0}
-                          onClick={() => handleOffsetChange(Math.max(0, offset - PAGE))}>Previous</button>
+                          onClick={() => setFilter({ offset: String(Math.max(0, offset - PAGE)) })}>Previous</button>
                   <button className="btn text-xs" disabled={offset + PAGE >= page.total}
-                          onClick={() => handleOffsetChange(offset + PAGE)}>Next</button>
+                          onClick={() => setFilter({ offset: String(offset + PAGE) })}>Next</button>
                 </div>
               </div>
             </div>
@@ -659,34 +583,13 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                 <div className="card p-5">
                   <div className="flex flex-wrap items-end gap-3">
                     <div className="mr-auto">
-                      <h2 className="text-sm font-semibold">Run peer similarity</h2>
-                      <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                        Matches each scored row against previously reviewed parts. Advisory
-                        evidence only — it never changes Min/ROP/Max or a risk level.
-                      </p>
-                    </div>
-                    <label className="flex items-center gap-2 text-xs pb-2">
-                      <input type="checkbox" checked={similarityRefresh}
-                             onChange={(e) => setSimilarityRefresh(e.target.checked)} />
-                      Rebuild existing results
-                    </label>
-                    <button className="btn btn-primary" onClick={runSimilarity}
-                            disabled={busy}>
-                      <BusyLabel busy={busyAction === "similarity"} running="Matching peers…"
-                                 idle="Run similarity" />
-                    </button>
-                  </div>
-                </div>
-              )}
-              {canReview && (
-                <div className="card p-5">
-                  <div className="flex flex-wrap items-end gap-3">
-                    <div className="mr-auto">
                       <h2 className="text-sm font-semibold">Run review assist</h2>
                       <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                        Gives every active or dying row a verdict from its own
+                        Matches every scored row against previously reviewed parts,
+                        then gives each active or dying row a verdict from its own
                         match/diverge history. The verdict is decided by rules, not by
-                        a model — the model only writes the sentence explaining it.
+                        a model — the model only writes the sentence explaining it, and
+                        neither one changes Min/ROP/Max or a risk level.
                         Dormant rows are sized by the{" "}
                         <Link href="/config/dormant" style={{ textDecoration: "underline" }}>
                           dormant rules
@@ -700,6 +603,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                           : " Pre-ticking is off — turn on guarded assistance in Rules & criticality to enable it."}
                       </p>
                     </div>
+                    <label className="flex items-center gap-2 text-xs pb-2">
+                      <input type="checkbox" checked={similarityRefresh}
+                             onChange={(e) => setSimilarityRefresh(e.target.checked)} />
+                      Rebuild peer matches
+                    </label>
                     <button className="btn btn-primary" onClick={runAssist} disabled={busy}>
                       <BusyLabel busy={busyAction === "assist"} running="Assisting rows…"
                                  idle="Run assist" />
@@ -707,13 +615,46 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                   </div>
                 </div>
               )}
-                <TriageLanes summary={summary} busy={busy} canReview={canReview}
-                             onAcceptLane={acceptLane} />
+                <TriageLanes summary={summary} />
                 <WorkflowPipeline counts={statuses} exported={summary.export_ready_rows} />
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+/** Current Wings setting -> what the engine proposes. The engineer's own
+ *  number for this cycle rides in the tooltip: it is what `agreement` was
+ *  graded against, and it is absent on a first cycle. */
+function Swing({ now, next, bench }: {
+  now?: number | null; next: number; bench?: number | null;
+}) {
+  const title = bench == null ? undefined
+    : `Engineer proposed ${bench.toLocaleString()} this upload`;
+  return (
+    <span className="tnum whitespace-nowrap" title={title}>
+      <span style={{ color: "var(--text-muted)" }}>
+        {now == null ? "—" : now.toLocaleString()} →{" "}
+      </span>
+      {next.toLocaleString()}
+      {bench != null && bench !== next && <span style={{ color: "var(--warning)" }}> *</span>}
+    </span>
+  );
+}
+
+/** Glyph-only row action. The label is the accessible name, never dropped --
+ *  a bare ✓ is unreadable to a screen reader and ambiguous under a tooltip. */
+function IconAction({ glyph, colour, label, busy, disabled, onClick }: {
+  glyph: string; colour: string; label: string;
+  busy: boolean; disabled: boolean; onClick: () => void;
+}) {
+  return (
+    <button className="btn px-2 py-0.5 text-sm leading-none" title={label}
+            aria-label={label} disabled={disabled} onClick={onClick}
+            style={{ color: busy ? "var(--text-muted)" : colour }}>
+      {busy ? "…" : glyph}
+    </button>
   );
 }
 

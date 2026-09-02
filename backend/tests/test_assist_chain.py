@@ -52,21 +52,30 @@ def _scored(client, monkeypatch, rows) -> int:
 
 # --- step order and evidence ----------------------------------------------
 
-def test_only_langchain_core_is_imported():
-    """The umbrella package is not installed, and adding it needs an
-    offline-mirror install on the Intel network."""
+def test_no_agent_framework_is_imported():
+    """Four ordered calls need no framework. langgraph stays where it earns its
+    keep (agent/graph.py); the langchain umbrella is not installed at all and
+    adding it needs an offline-mirror install on the Intel network."""
     from pathlib import Path
     source = Path(chain.__file__).read_text(encoding="utf-8")
-    assert "from langchain_core" in source
-    assert "import langchain\n" not in source
-    assert "langchain_openai" not in source
-    assert "from langchain " not in source
+    for banned in ("import langchain", "import langgraph", "langchain_openai"):
+        assert banned not in source, banned
 
 
 def test_evidence_sources_are_always_the_same_five():
-    """A branch quietly dropped would change a verdict without changing a rule."""
+    """A source quietly dropped would change a verdict without changing a rule."""
     assert len(chain.EVIDENCE_KEYS) == 5
-    assert set(chain.evidence.steps__) == set(chain.EVIDENCE_KEYS)
+    assert set(chain.EVIDENCE_FETCHERS) == set(chain.EVIDENCE_KEYS)
+
+
+def test_the_step_order_is_fixed():
+    """Evidence, then the deterministic verdict, then the model, then the write.
+    A model call before _evaluate would put the LLM upstream of the decision."""
+    import inspect
+    body = inspect.getsource(chain.assist_row)
+    order = [body.index(f"_{step}(") for step in
+             ("gather", "evaluate", "narrate", "persist")]
+    assert order == sorted(order)
 
 
 def test_run_assists_live_rows_and_skips_dormant(client, monkeypatch):
@@ -224,3 +233,47 @@ def test_bulk_can_filter_on_an_assist_verdict(client, monkeypatch):
     # Nothing qualifies on a first-ever batch. The filter must select nothing
     # rather than everything -- an empty join is the failure mode that matters.
     assert r.json()["reviewed"] == 0
+
+
+# --- peers ride on the assist run ------------------------------------------
+
+def test_assist_builds_peer_matches_when_the_batch_has_none(client, monkeypatch,
+                                                            db_file):
+    """`peers` is one of the five evidence sources and reads similarity_result.
+    A batch assisted without it loses a source silently, so the run builds it."""
+    from app.db import get_conn
+    bid = _scored(client, monkeypatch, [_live("L1")])
+    r = client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    assert r.status_code == 200, r.text
+    assert r.json()["similarity"]["batch_id"] == bid
+    conn = get_conn()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM similarity_result "
+                            "WHERE batch_id=?", (bid,)).fetchone()[0] > 0
+    finally:
+        conn.close()
+
+
+def test_a_second_assist_run_leaves_existing_peers_alone(client, monkeypatch):
+    """Rebuilding peers on every assist would re-run kNN over the whole batch
+    for nothing. Only refresh_peers=true pays that cost again."""
+    bid = _scored(client, monkeypatch, [_live("L1")])
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    again = client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    assert again.json()["similarity"] is None
+    forced = client.post(f"/assist/run?batch_id={bid}&refresh_peers=true",
+                         headers=ENG)
+    assert forced.json()["similarity"]["batch_id"] == bid
+
+
+def test_assist_can_be_read_for_one_item(client, monkeypatch):
+    """The item page renders one card; pulling the whole batch to do it would
+    ship 2.8k rows per open."""
+    bid = _scored(client, monkeypatch, [_live("L1"), _live("L2")])
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
+    one = client.get(f"/assist/{bid}?item_id=L1", headers=VIEWER).json()
+    assert [i["item_id"] for i in one["items"]] == ["L1"]
+    # A part that was never assisted is an empty list, not a 404 -- the card
+    # says "not assisted yet" rather than erroring the page.
+    assert client.get(f"/assist/{bid}?item_id=NOPE",
+                      headers=VIEWER).json()["items"] == []

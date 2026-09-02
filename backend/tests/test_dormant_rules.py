@@ -10,8 +10,6 @@ reproduce the engine's own answer exactly. Layer 1 is a stock-moving change
 moved", not "something slightly different".
 """
 
-import os
-
 import pandas as pd
 import pytest
 from conftest import ENG, SENIOR, VIEWER

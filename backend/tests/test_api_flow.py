@@ -336,3 +336,33 @@ def test_queue_search_by_item_id(client, synth_csv):
     assert client.get(f"/recommendations?batch_id={b}&q=%20", headers=VIEWER).json()["total"] == 7
     assert client.get(f"/recommendations?batch_id={b}&q=nosuchpart",
                       headers=VIEWER).json()["total"] == 0
+
+
+def test_queue_rows_carry_the_display_fields(client, synth_csv):
+    """The queue shows description, category and the current Wings settings
+    beside the engine's proposal. None of them lives in recommendation_result,
+    so a dropped join would silently blank a column rather than error."""
+    b, _ = scored_batch(client, synth_csv)
+    items = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"]
+    assert items and all(
+        {"item_desc", "part_category", "current_max", "current_rop",
+         "bench_max", "bench_rop"} <= set(i) for i in items)
+    assert any(i["item_desc"] for i in items)
+    # part_category is written by the similarity run, so it is "" until then --
+    # blank, never missing.
+    assert all(i["part_category"] == "" for i in items)
+
+
+def test_queue_shows_the_part_category_once_peers_are_built(client):
+    """part_category is written by the similarity run -- which now rides on the
+    assist button -- so the column fills in only after peers exist."""
+    csv_text = rows_to_csv([make_row(item_id="700001", item_desc="FLOW SENSOR ARM",
+                                     max_qty="12", rop_qty="4")])
+    b = upload(client, csv_text).json()["batch_id"]
+    client.post(f"/run-recommendation?batch_id={b}", headers=ENG)
+    before = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"][0]
+    assert before["part_category"] == ""
+    assert (before["current_max"], before["current_rop"]) == (12, 4)
+    client.post("/similarity/run", headers=ENG, json={"batch_id": b})
+    after = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"][0]
+    assert after["part_category"] == "sensor"

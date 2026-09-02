@@ -252,6 +252,11 @@ CREATE TABLE IF NOT EXISTS assist_result (
     verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
   reasons_json TEXT NOT NULL DEFAULT '[]',
   narrative TEXT,
+  -- The number to put in front of the reviewer. Written by assist/rules.suggest
+  -- (deterministic), never by the model, and never applied without a decision.
+  suggested_max INTEGER,
+  suggested_rop INTEGER,
+  suggestion_basis TEXT NOT NULL DEFAULT '',
   evidence_json TEXT NOT NULL DEFAULT '{}',
   model_version TEXT NOT NULL,
   provider TEXT,
@@ -561,6 +566,11 @@ CREATE TABLE IF NOT EXISTS assist_result (
     verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
   reasons_json TEXT NOT NULL DEFAULT '[]',
   narrative TEXT,
+  -- The number to put in front of the reviewer. Written by assist/rules.suggest
+  -- (deterministic), never by the model, and never applied without a decision.
+  suggested_max INTEGER,
+  suggested_rop INTEGER,
+  suggestion_basis TEXT NOT NULL DEFAULT '',
   evidence_json TEXT NOT NULL DEFAULT '{{}}',
   model_version TEXT NOT NULL,
   provider TEXT,
@@ -944,6 +954,10 @@ def _ensure_columns(conn) -> None:
         # IF NOT EXISTS will never add this one.
         conn.execute("ALTER TABLE similarity_result ADD COLUMN IF NOT EXISTS "
                      "part_category TEXT DEFAULT ''")
+        for col, decl in (("suggested_max", "INTEGER"), ("suggested_rop", "INTEGER"),
+                          ("suggestion_basis", "TEXT DEFAULT ''")):
+            conn.execute("ALTER TABLE assist_result "
+                         f"ADD COLUMN IF NOT EXISTS {col} {decl}")
         return
     existing = {r["name"] for r in conn.execute(
         "PRAGMA table_info(recommendation_result)")}
@@ -960,6 +974,12 @@ def _ensure_columns(conn) -> None:
     if "part_category" not in sim_cols:
         conn.execute("ALTER TABLE similarity_result "
                      "ADD COLUMN part_category TEXT DEFAULT ''")
+    assist_cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(assist_result)")}
+    for col, decl in (("suggested_max", "INTEGER"), ("suggested_rop", "INTEGER"),
+                      ("suggestion_basis", "TEXT DEFAULT ''")):
+        if col not in assist_cols:
+            conn.execute(f"ALTER TABLE assist_result ADD COLUMN {col} {decl}")
 
 
 def init_db() -> None:
