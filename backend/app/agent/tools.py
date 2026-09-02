@@ -175,6 +175,51 @@ def get_item_history(ctx: ToolContext, item_id: str) -> dict:
     return {"item_id": item_id, "reviews": rows}
 
 
+def get_agreement_history(ctx: ToolContext, item_id: str,
+                          stockroom_id: str | None = None) -> dict:
+    """This item's engine-vs-engineer verdict, one row per past cycle.
+
+    Reads recommendation_result joined to the decision that was actually taken
+    on it, across ALL batches -- the monthly roster rotates, so an item's
+    history is not confined to the batch currently loaded (same reasoning as
+    get_item_history).
+
+    stockroom_id is part of the join, not an afterthought: one item was reviewed
+    twice in 2024-07 under two stockrooms with opposite verdicts, and keying on
+    item_id alone silently merges them into one incoherent streak.
+    """
+    where, params = ["r.item_id=?"], [item_id]
+    if stockroom_id is not None:
+        where.append("r.stockroom_id=?")
+        params.append(stockroom_id)
+    rows = [dict(r) for r in ctx.conn.execute(
+        "SELECT r.batch_id, r.stockroom_id, r.agreement, r.agreement_source, "
+        "r.new_max AS engine_max, h.final_max, h.justification, h.reviewed_at "
+        "FROM recommendation_result r JOIN review_history h "
+        "ON h.batch_id=r.batch_id AND h.item_id=r.item_id "
+        "AND h.stockroom_id=r.stockroom_id "
+        f"WHERE {' AND '.join(where)} ORDER BY r.batch_id DESC LIMIT 20",
+        params)]
+    if not rows:
+        return EMPTY
+    # Newest first, so the streak counts forward from the most recent cycle.
+    # Ordering by item_id (what the s20 SQL does) gives a meaningless number.
+    streak = 0
+    for row in rows:
+        if str(row.get("agreement") or "") != "diverge":
+            break
+        streak += 1
+    last_final = next((r["final_max"] for r in rows if r["final_max"] is not None),
+                      None)
+    ctx.sources.append({"type": "recommendation_result", "item_id": item_id,
+                        "count": len(rows)})
+    return {"item_id": item_id, "cycles": rows, "n_cycles": len(rows),
+            "n_diverge": sum(1 for r in rows
+                             if str(r.get("agreement") or "") == "diverge"),
+            "diverge_streak": streak,
+            "last_final_max": last_final}
+
+
 def get_item_notes(ctx: ToolContext, item_id: str) -> dict:
     """Item-keyed engineer context that survives batch rotation."""
     rows = [dict(r) for r in ctx.conn.execute(
@@ -481,6 +526,16 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
         "get_item_notes.",
         {"type": "object", "properties": {"item_id": _ITEM},
          "required": ["item_id"]}), get_item_history),
+
+    "get_agreement_history": (ToolSpec(
+        "get_agreement_history",
+        "Whether the engine AGREED with the engineer on this item in each past "
+        "cycle, with the divergence streak. Use for 'has the engine been right "
+        "on this part', 'does it keep getting overridden'. NOT the decisions "
+        "themselves -- that is get_item_history.",
+        {"type": "object", "properties": {"item_id": _ITEM,
+                                          "stockroom_id": _STOCK},
+         "required": ["item_id"]}), get_agreement_history),
 
     "get_item_notes": (ToolSpec(
         "get_item_notes",

@@ -208,6 +208,7 @@ body {
 .rail { display: none; }                     /* drawer below lg; see media query */
 .side {
   width: 264px;
+  transition: width 0.15s ease;
   height: 100vh;
   position: sticky;
   top: 0;
@@ -308,6 +309,7 @@ body {
 }
 .topbar-title { font-size: 0.875rem; font-weight: 600; }
 .topbar-burger { display: inline-flex; padding: 0.35rem 0.5rem; }
+.topbar-rail { display: none; padding: 0.35rem 0.5rem; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 0.4rem;
@@ -328,8 +330,29 @@ body {
 @media (min-width: 1024px) {
   .rail { display: block; }
   .topbar-burger { display: none; }
+  .topbar-rail { display: inline-flex; }
   .shell-content { padding-inline: 2rem; }
 }
+
+/* Collapsed rail: icons only. Scoped to .rail so the below-lg drawer, which
+   mounts the same Sidebar, always opens at full width. */
+:root[data-rail="collapsed"] .rail .side { width: 60px; }
+:root[data-rail="collapsed"] .rail .side-label,
+:root[data-rail="collapsed"] .rail .brand-name,
+:root[data-rail="collapsed"] .rail .side-search,
+:root[data-rail="collapsed"] .rail .side-history,
+:root[data-rail="collapsed"] .rail .side-role,
+:root[data-rail="collapsed"] .rail .side-note { display: none; }
+:root[data-rail="collapsed"] .rail .side-head,
+:root[data-rail="collapsed"] .rail .side-top,
+:root[data-rail="collapsed"] .rail .side-nav,
+:root[data-rail="collapsed"] .rail .side-foot { padding-inline: 0.4rem; }
+/* .side-history carried flex:1; without it the footer would ride up mid-rail. */
+:root[data-rail="collapsed"] .rail .side-nav { flex: 1; }
+:root[data-rail="collapsed"] .rail .side-link,
+:root[data-rail="collapsed"] .rail .side-new,
+:root[data-rail="collapsed"] .rail .side-user,
+:root[data-rail="collapsed"] .rail .brand { justify-content: center; padding-inline: 0; }
 
 /* ---- chat surface -------------------------------------------------------- */
 

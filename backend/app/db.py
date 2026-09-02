@@ -83,6 +83,10 @@ FOREIGN_KEYS = [
      ("batch_id", "item_id", "stockroom_id"),
      "similarity_result", ("batch_id", "item_id", "stockroom_id"),
      "CASCADE"),
+    ("assist_result_recommendation_fk", "assist_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
 ]
 
 # Postgres does not index the referencing side of a foreign key, so every
@@ -214,6 +218,49 @@ CREATE TABLE IF NOT EXISTS part_category_config (
   confirmed_by TEXT,
   confirmed INTEGER DEFAULT 0,
   updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- How much stock a DORMANT part keeps. Engineer-owned on the same terms as
+-- part_category_config: review rights may PROPOSE, an approver CONFIRMS, and
+-- the engine reads confirmed rows only. Lower priority wins; item beats
+-- category beats default. Seeded from what engineers actually decided -- the
+-- engine's own zero is wrong on 1,344 of 8,343 dormant rows in the TCB history.
+CREATE TABLE IF NOT EXISTS dormant_rule_config (
+  rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  criticality TEXT NOT NULL DEFAULT '', -- '' = any, else h|m|l|d
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (scope, match_key, criticality)
+);
+
+-- Advisory review assistance for the active/dying rows. The verdict is decided
+-- by assist/rules.py, not by a model: same evidence in, same verdict out, so it
+-- can be replayed and backtested. `narrative` is the only generated field and
+-- explains a decision that was already made. Never an input to sizing.
+CREATE TABLE IF NOT EXISTS assist_result (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  verdict TEXT NOT NULL CHECK (
+    verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  narrative TEXT,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  model_version TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  assisted_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -482,6 +529,49 @@ CREATE TABLE IF NOT EXISTS part_category_config (
   updated_at TEXT DEFAULT {PG_NOW}
 );
 
+-- How much stock a DORMANT part keeps. Engineer-owned on the same terms as
+-- part_category_config: review rights may PROPOSE, an approver CONFIRMS, and
+-- the engine reads confirmed rows only. Lower priority wins; item beats
+-- category beats default. Seeded from what engineers actually decided -- the
+-- engine's own zero is wrong on 1,344 of 8,343 dormant rows in the TCB history.
+CREATE TABLE IF NOT EXISTS dormant_rule_config (
+  rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  criticality TEXT NOT NULL DEFAULT '', -- '' = any, else h|m|l|d
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  UNIQUE (scope, match_key, criticality)
+);
+
+-- Advisory review assistance for the active/dying rows. The verdict is decided
+-- by assist/rules.py, not by a model: same evidence in, same verdict out, so it
+-- can be replayed and backtested. `narrative` is the only generated field and
+-- explains a decision that was already made. Never an input to sizing.
+CREATE TABLE IF NOT EXISTS assist_result (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  verdict TEXT NOT NULL CHECK (
+    verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  narrative TEXT,
+  evidence_json TEXT NOT NULL DEFAULT '{{}}',
+  model_version TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  assisted_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ts TEXT DEFAULT {PG_NOW},
@@ -643,6 +733,7 @@ IDENTITY_PK = {
     "conversation_turn": "turn_id",
     "item_note": "note_id",
     "model_prediction_log": "prediction_id",
+    "dormant_rule_config": "rule_id",
 }
 
 # `user` is a reserved word in Postgres: bare `user` parses as CURRENT_USER, so

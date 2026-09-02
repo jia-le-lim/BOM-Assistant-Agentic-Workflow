@@ -262,6 +262,67 @@ export interface PartCategoryPage {
   pending: number;
 }
 
+export type AssistVerdict =
+  | "flag_for_review" | "bulk_accept_candidate" | "needs_context";
+
+export interface AssistResult {
+  batch_id: number;
+  item_id: string;
+  stockroom_id: string;
+  verdict: AssistVerdict;
+  reasons: string[];
+  narrative: string | null;
+  model_version: string;
+  assisted_at: string;
+}
+
+export interface AssistPage {
+  batch_id: number;
+  items: AssistResult[];
+  counts: Record<AssistVerdict, number>;
+  model_version: string;
+}
+
+export interface AssistRunSummary {
+  batch_id: number;
+  rows_assisted: number;
+  counts: Record<AssistVerdict, number>;
+  model_version: string;
+}
+
+export type DormantPolicy = "hold_current" | "fixed_qty" | "zero";
+
+export interface DormantRule {
+  rule_id: number;
+  scope: "item" | "category" | "default";
+  match_key: string;
+  criticality: string;
+  policy: DormantPolicy;
+  fixed_qty: number | null;
+  priority: number;
+  set_by: string | null;
+  confirmed: number;
+  confirmed_by: string | null;
+  updated_at: string;
+}
+
+export interface DormantRulePage {
+  rules: DormantRule[];
+  confirmed: number;
+  pending: number;
+}
+
+export interface DormantRuleCoverage {
+  batch_id: number;
+  dormant_rows: number;
+  matched: number;
+  pct: number;
+  engine_book_usd: number;
+  proposed_book_usd: number;
+  delta_usd: number;
+  confirmed_rules: number;
+}
+
 export interface PartCategoryCoverage {
   batch_id: number;
   total: number;

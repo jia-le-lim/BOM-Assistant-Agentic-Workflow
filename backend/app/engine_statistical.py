@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import nbinom, poisson
 
+from . import dormant_rules as DR
+
 MODEL_VERSION = "stat-v1"
 
 WINDOWS = [5, 30, 90, 180, 365, 547]
@@ -38,8 +40,23 @@ HIGH_VOLUME_PER_DAY = 0.1      # mu_day above this -> human review
 REGULAR_FREQ = 6               # frequencymonthswithusage >= this -> Poisson candidate
 REGULAR_CV2 = 0.5              # ...and pseudo_cv2 below this
 BIG_CHANGE_FRAC = 0.5          # |new-cur| beyond this share of current -> review
-SL_BY_CRIT = {"h": 0.99, "m": 0.95, "l": 0.90, "d": 0.90}
-SL_DEFAULT = 0.95
+# Service level by criticality. Calibrated against 8 months of TCB engineer
+# decisions (analysis/s20_diverge_rootcause.py): their revealed target is ~0.85,
+# not the 0.99/0.95/0.90 this table shipped with. Under the old table active-part
+# agreement was 39.3% and the proposed book was $3.37M; this one reaches 54.5%
+# and $2.53M, and improves in all eight months independently.
+#
+# This is a stocking-risk decision, not only a fit: a lower service level is a
+# genuinely higher stockout probability, and no fill-rate backtest exists yet to
+# bound it (ML plan Phase 4). Set deliberately by the owner, 2026-08-28.
+SL_BY_CRIT = {"h": 0.90, "m": 0.85, "l": 0.80, "d": 0.80}
+SL_DEFAULT = 0.85
+
+# Agreement tolerance -- see close_enough(). Relative only, no absolute floor,
+# graded on Max and ROP. Every harness imports these rather than restating them
+# (analysis/common.py, s19, s20), so the scorecard cannot drift from the engine.
+AGREE_TOL = 0.10
+AGREE_FIELDS = ("max", "rop")
 
 # --- Demand-model + policy levers (PRD v3.2 A/B improvements). Every default
 # reproduces the current stat-v1 sizing, so a bare run() is unchanged; each is
@@ -74,6 +91,12 @@ AUTOCLEAR_RELIABLE = False      # reliable-stable lever: opt-in until calibrated
 # while demand has not moved out from under it -- beyond this drift the engine
 # would score a "match" for reproducing a decision the data has invalidated.
 PRIOR_BENCH_MAX_DRIFT = 0.25    # |c365_now - c365_then| as a fraction of then
+
+# Engineer-owned dormant stocking rules, resolved by engine_adapter and handed
+# in through cfg. Empty is today's behaviour exactly: no rule matches, the
+# existing dormant branch runs untouched. The engine holds no database handle
+# and this is how it stays that way (see dormant_rules).
+DORMANT_RULES: list[dict] = []
 
 
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
@@ -202,21 +225,36 @@ def _within(e: float, base: float, tol_abs: float, tol_rel: float) -> bool:
     return abs(e - base) <= max(tol_abs, tol_rel * abs(base))
 
 
+def close_enough(engine: float, bench: float) -> bool:
+    """THE agreement tolerance. One definition, imported by every harness.
+
+    A strict relative band with no absolute floor, so small quantities are held
+    to a tight tolerance: a benchmark of 2 admits only 2 (1.8-2.2), and a
+    benchmark of 0 admits only 0. The previous max(1, 10%) floor hid a 1-unit
+    disagreement on every small part -- on the TCB history that was 1,430 rows,
+    1,179 of them the engine zeroing a part the engineer chose to keep.
+
+    A missing benchmark is not a disagreement: there is nothing to grade
+    against, so it passes and _agreement's 'none' check decides the row.
+    """
+    return True if pd.isna(bench) else abs(engine - bench) <= AGREE_TOL * abs(bench)
+
+
 def _agreement(engine_vals, bench_vals) -> str:
-    """Engine Min/ROP/Max vs whichever benchmark _benchmark() selected.
+    """Engine vs whichever benchmark _benchmark() selected, on Max and ROP.
 
     A post-hoc scoring signal (PRD v3 6) that drives triage/confidence only --
     the benchmark is never an input to sizing, so there is no target leakage.
     Returns 'match' | 'diverge' | 'none' (no benchmark on the row).
+
+    Min is deliberately excluded: Max and ROP drive replenishment, Min is a
+    derived floor (rop - mu_L), so grading it double-counts the same error.
+    Callers still pass (max, rop, min) triples; the third is ignored.
     """
-    if not any(pd.notna(b) for b in bench_vals):
+    pairs = list(zip(engine_vals, bench_vals))[:len(AGREE_FIELDS)]
+    if not any(pd.notna(b) for _, b in pairs):
         return "none"
-
-    def close(e: float, b: float) -> bool:
-        return True if pd.isna(b) else abs(e - b) <= max(1.0, 0.10 * abs(b))
-
-    return ("match" if all(close(e, b) for e, b in zip(engine_vals, bench_vals))
-            else "diverge")
+    return "match" if all(close_enough(e, b) for e, b in pairs) else "diverge"
 
 
 def _drift_ok(c365_now: float, c365_then: float) -> bool:
@@ -264,6 +302,7 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     stockout_by_crit = cfg.get("stockout_cost_by_crit", STOCKOUT_COST_BY_CRIT)
     max_doi_days = float(cfg.get("policy_max_doi_days", POLICY_MAX_DOI_DAYS))
     excess_netting_on = bool(cfg.get("policy_excess_netting", POLICY_EXCESS_NETTING))
+    dormant_rules = cfg.get("dormant_rules", DORMANT_RULES)
 
     win = {w: _num(df, CONS[w]) for w in WINDOWS}
     lt = _num(df, "contractual_lead_time")
@@ -288,6 +327,10 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     own = df.get("ownership", pd.Series("", index=df.index)).astype(str)
     crit = df.get("sfm_criticality", pd.Series("", index=df.index)).astype(str)
     item = df.get("item_id", pd.Series("", index=df.index)).astype(str)
+    # Attached by engine_adapter from the confirmed part_category lexicon, the
+    # same way prior_final_* is attached. Resolved there rather than here
+    # because categorising needs the rule table, and the engine has no conn.
+    category = df.get("part_category", pd.Series("", index=df.index)).astype(str)
 
     out = []
     for i in range(len(df)):
@@ -330,7 +373,20 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
             reasons.append("NO_CONSUMPTION_DATA")
 
         elif route == "dormant":
-            if _is_critical(criticality):
+            # The engineer-owned rule wins over the engine here (owner decision,
+            # 2026-09-01). These are wear-and-tear parts: a constant quantity is
+            # kept regardless of consumption, and the engine's zero is wrong on
+            # 1,344 of 8,343 dormant rows across the TCB history.
+            _rule = DR.resolve(dormant_rules, item.iloc[i], category.iloc[i],
+                               criticality)
+            _applied = DR.apply(_rule, cur)
+            if _applied is not None:
+                new_min, new_rop, new_max = _applied
+                # review stays "Y": the rule changes the NUMBER, not whether a
+                # human looks. "N" here would silently clear 8,343 rows.
+                review, dist, conf, risk = "Y", "rule", 0.5, "Low"
+                reasons.append("DORMANT_RULE_APPLIED")
+            elif _is_critical(criticality):
                 new_min = KEEP_ALIVE
                 new_rop = KEEP_ALIVE
                 new_max = KEEP_ALIVE + moq

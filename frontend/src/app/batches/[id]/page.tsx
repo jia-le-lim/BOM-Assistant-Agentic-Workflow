@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { fmtCompact, fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
 import type {
+  AssistPage, AssistRunSummary, AssistVerdict,
   BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RuleConfig, RunSummary,
   SimilarityRunSummary, Status, TriagePage,
 } from "@/lib/types";
@@ -17,6 +18,15 @@ import { WorkflowPipeline } from "@/components/WorkflowPipeline";
 import { AgentTriage, PriorityCallout, TriageLanes } from "@/components/TriageLanes";
 
 const PAGE = 25;
+
+/* What each verdict tells the reviewer, in the order attention should go.
+ * The chain decides these deterministically (backend/app/assist/rules.py); the
+ * page only groups by them. */
+const VERDICT: Record<AssistVerdict, { label: string; hint: string }> = {
+  flag_for_review: { label: "Needs review", hint: "The engine's history on this part argues against taking it as read" },
+  needs_context: { label: "No prior cycle", hint: "Never reviewed before — nothing to check the engine against" },
+  bulk_accept_candidate: { label: "Bulk accept", hint: "Matched the last cycles and the engine has not moved off the accepted value" },
+};
 
 /** Composite key: an item can sit in more than one stockroom. */
 const keyOf = (r: { item_id: string; stockroom_id: string }) =>
@@ -34,6 +44,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [summary, setSummary] = useState<BatchSummary | null>(null);
   const [page, setPage] = useState<RecommendationPage | null>(null);
   const [triage, setTriage] = useState<TriagePage | null>(null);
+  const [assist, setAssist] = useState<AssistPage | null>(null);
   const [ruleConfig, setRuleConfig] = useState<RuleConfig | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -57,6 +68,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [consumable, setConsumable] = useState(searchParams.get("consumable") || "");
   const [agreement, setAgreement] = useState(searchParams.get("agreement") || "");
   const [minExp, setMinExp] = useState(searchParams.get("min_exposure") || "");
+  const [q, setQ] = useState(searchParams.get("q") || "");
+  // What is in the box vs. what the queue is filtered by. They differ only while
+  // you are still typing -- committing per keystroke would push a history entry
+  // and refetch the whole batch for every character.
+  const [qDraft, setQDraft] = useState(q);
   const [offset, setOffset] = useState(Number(searchParams.get("offset")) || 0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
@@ -69,6 +85,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     newAgreement?: string,
     newMinExp?: string,
     newOffset?: number,
+    newQ?: string,
   ) => {
     const params = new URLSearchParams();
     const s = newStatus ?? status;
@@ -78,6 +95,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     const ag = newAgreement ?? agreement;
     const m = newMinExp ?? minExp;
     const o = newOffset ?? offset;
+    const query = newQ ?? q;
 
     if (s) params.set("status", s);
     if (r) params.set("risk_level", r);
@@ -85,10 +103,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     if (c) params.set("consumable", c);
     if (ag) params.set("agreement", ag);
     if (m) params.set("min_exposure", m);
+    if (query) params.set("q", query);
     if (o > 0) params.set("offset", String(o));
 
     router.push(`/batches/${batchId}?${params.toString()}`);
-  }, [batchId, router, status, risk, action, consumable, agreement, minExp, offset]);
+  }, [batchId, router, status, risk, action, consumable, agreement, minExp, offset, q]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await call<BatchSummary>(`batches/${batchId}/summary`)); }
@@ -96,26 +115,32 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   }, [call, batchId]);
 
   const loadPage = useCallback(async () => {
-    const q = new URLSearchParams({ batch_id: String(batchId), limit: String(PAGE), offset: String(offset) });
-    if (status) q.set("status", status);
-    if (risk) q.set("risk_level", risk);
-    if (action) q.set("action", action);
-    if (consumable) q.set("consumable", consumable);
-    if (agreement) q.set("agreement", agreement);
-    if (minExp) q.set("min_exposure", minExp);
+    const params = new URLSearchParams({ batch_id: String(batchId), limit: String(PAGE), offset: String(offset) });
+    if (status) params.set("status", status);
+    if (risk) params.set("risk_level", risk);
+    if (action) params.set("action", action);
+    if (consumable) params.set("consumable", consumable);
+    if (agreement) params.set("agreement", agreement);
+    if (minExp) params.set("min_exposure", minExp);
+    if (q.trim()) params.set("q", q.trim());
     setRefreshing(true);
     try {
-      setPage(await call<RecommendationPage>(`recommendations?${q}`));
+      setPage(await call<RecommendationPage>(`recommendations?${params}`));
       setErr(null);
     } catch (e) { setErr((e as Error).message); setPage(null); }
     finally { setRefreshing(false); }
-  }, [call, batchId, status, risk, action, consumable, agreement, minExp, offset]);
+  }, [call, batchId, status, risk, action, consumable, agreement, minExp, offset, q]);
 
   const loadTriage = useCallback(async () => {
     if (!canReview) { setTriage(null); return; }
     try { setTriage(await call<TriagePage>(`triage/${batchId}`)); }
     catch (e) { setErr((e as Error).message); }
   }, [call, batchId, canReview]);
+
+  const loadAssist = useCallback(async () => {
+    try { setAssist(await call<AssistPage>(`assist/${batchId}`)); }
+    catch { setAssist(null); }
+  }, [call, batchId]);
 
   const loadRuleConfig = useCallback(async () => {
     try { setRuleConfig(await call<RuleConfig>("config/rules")); }
@@ -171,6 +196,18 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     updateUrl(status, risk, action, consumable, agreement, minExp, v);
   }, [updateUrl, status, risk, action, consumable, agreement, minExp]);
 
+  // Commit the search box 300ms after the last keystroke.
+  useEffect(() => {
+    if (qDraft === q) return;
+    const t = window.setTimeout(() => {
+      setQ(qDraft);
+      setOffset(0);
+      setSelected(new Set());
+      updateUrl(status, risk, action, consumable, agreement, minExp, 0, qDraft);
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [qDraft, q, updateUrl, status, risk, action, consumable, agreement, minExp]);
+
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => { void loadSummary(); });
     return () => window.cancelAnimationFrame(frame);
@@ -187,14 +224,24 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     const frame = window.requestAnimationFrame(() => { void loadRuleConfig(); });
     return () => window.cancelAnimationFrame(frame);
   }, [loadRuleConfig]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { void loadAssist(); });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadAssist]);
 
   const isScored = summary?.batch.status === "scored";
   const statuses = (summary?.statuses ?? {}) as Record<Status, number>;
   const needsHuman = (statuses.pending_review ?? 0) + (statuses.awaiting_senior ?? 0);
 
   const refresh = useCallback(async () => {
-    await Promise.all([loadSummary(), loadPage(), loadTriage()]);
-  }, [loadSummary, loadPage, loadTriage]);
+    await Promise.all([loadSummary(), loadPage(), loadTriage(), loadAssist()]);
+  }, [loadSummary, loadPage, loadTriage, loadAssist]);
+
+  const verdicts = useMemo(() => {
+    const out = new Map<string, AssistPage["items"][number]>();
+    for (const a of assist?.items ?? []) out.set(keyOf(a), a);
+    return out;
+  }, [assist]);
 
   async function runEngine() {
     setBusyAction("engine"); setErr(null); setNote(null);
@@ -225,6 +272,23 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           + `${s.categorised.toLocaleString()} of ${s.scored.toLocaleString()} `
           + `had a part category.`);
       setSimilarityRefresh(false);
+      await refresh();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusyAction(null); }
+  }
+
+  async function runAssist() {
+    setBusyAction("assist"); setErr(null); setNote(null);
+    try {
+      const s = await call<AssistRunSummary>(`assist/run?batch_id=${batchId}`,
+                                             { method: "POST" });
+      setNote(s.rows_assisted === 0
+        ? "No active or dying rows in this batch — dormant rows are sized by the "
+          + "dormant rules instead."
+        : `Assisted ${s.rows_assisted.toLocaleString()} rows — `
+          + `${s.counts.flag_for_review} need review, `
+          + `${s.counts.bulk_accept_candidate} bulk-accept candidates, `
+          + `${s.counts.needs_context} with no prior cycle.`);
       await refresh();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusyAction(null); }
@@ -329,6 +393,25 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     } finally { setBusyAction(null); }
   }
 
+  const preselectOn = Boolean(ruleConfig?.config.triage_guarded_assist_enabled);
+
+  const preselectKeys = useMemo(() => (page?.items ?? [])
+    .filter((r) => r.status === "pending_review"
+                   && verdicts.get(keyOf(r))?.verdict === "bulk_accept_candidate")
+    .map(keyOf), [page, verdicts]);
+
+  // Pre-tick once per rendered page, never again: re-seeding on every render
+  // would put the ticks back the moment someone pressed Clear, which is the one
+  // escape hatch that makes pre-ticking safe at all.
+  const seeded = useRef<string>("");
+  useEffect(() => {
+    if (!preselectOn || !canReview || !preselectKeys.length) return;
+    const signature = preselectKeys.join("|");
+    if (seeded.current === signature) return;
+    seeded.current = signature;
+    setSelected((prev) => new Set([...prev, ...preselectKeys]));
+  }, [preselectOn, canReview, preselectKeys]);
+
   const pageKeys = useMemo(() => (page?.items ?? []).map(keyOf), [page]);
   const allSelected = pageKeys.length > 0 && pageKeys.every((k) => selected.has(k));
 
@@ -413,6 +496,13 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
         <div className="card p-5">
           <div className="queue-toolbar flex flex-wrap items-end gap-3 mb-4">
             <h2 className="text-sm font-semibold mr-auto">Review queue</h2>
+            <label className="flex flex-col gap-1 text-xs">
+              <span style={{ color: "var(--text-secondary)" }}>Search part</span>
+              <input className="field w-44" type="search" value={qDraft}
+                     placeholder="Item or stockroom"
+                     aria-label="Search the review queue by item or stockroom"
+                     onChange={(e) => setQDraft(e.target.value)} />
+            </label>
             <Filter label="Status" value={status} set={handleStatusChange}
                     opts={[["", "All"], ["pending_review", "Pending"], ["awaiting_senior", "Awaiting senior"],
                            ["reviewed", "Reviewed"], ["auto_cleared", "Auto-cleared"]]} />
@@ -440,7 +530,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-3 p-2 rounded"
                  style={{ background: "var(--seq-soft)" }}>
-              <span className="text-sm">{selected.size} selected</span>
+              <span className="text-sm">
+                <strong>{selected.size}</strong> selected
+                {preselectOn && preselectKeys.length > 0
+                  && ` (${preselectKeys.length} pre-ticked by assist — check before accepting)`}
+              </span>
               <button className="btn btn-primary text-xs" disabled={busy || !canReview}
                       onClick={() => bulkSelected("accept")}>
                 <BusyLabel busy={busyAction === "bulk:accept"} running="Accepting…"
@@ -462,6 +556,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           ) : page.items.length === 0 ? (
             <p className="text-sm py-6" style={{ color: "var(--text-muted)" }}>
               No rows match these filters.
+              {q && status ? " That part may sit under a different status — try Status: All." : ""}
             </p>
           ) : (
             <div className={refreshing ? "is-refreshing" : undefined}>
@@ -474,7 +569,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                                aria-label="Select all on page" />
                       </th>
                       <th>Item</th><th>Demand</th><th className="text-right">Exposure</th>
-                      <th>Status</th><th>Risk</th><th>Agreement</th>
+                      <th>Status</th><th>Risk</th><th>Agreement</th><th>Assist</th>
                       <th className="text-right">Max</th><th>Why</th><th></th>
                     </tr>
                   </thead>
@@ -482,6 +577,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                     {page.items.map((r: Recommendation) => {
                       const k = keyOf(r);
                       const pending = r.status === "pending_review";
+                      const a = verdicts.get(k);
                       return (
                         <tr key={k}>
                           <td>
@@ -496,6 +592,16 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                           <td><StatusChip status={r.status} /></td>
                           <td><RiskChip level={r.risk_level} /></td>
                           <td><AgreementChip value={r.agreement} source={r.agreement_source} /></td>
+                          <td className="text-xs" title={a ? VERDICT[a.verdict].hint : undefined}
+                              style={{ color: a?.verdict === "flag_for_review"
+                                ? "var(--warning)" : "var(--text-secondary)" }}>
+                            {a ? VERDICT[a.verdict].label : "—"}
+                            {a?.narrative && (
+                              <span className="block mt-0.5" style={{ color: "var(--text-muted)" }}>
+                                {a.narrative}
+                              </span>
+                            )}
+                          </td>
                           <td className="text-right tnum">{r.new_max}</td>
                           <td className="max-w-[240px]"><ReasonCodes codes={r.reason_code} /></td>
                           <td>
@@ -568,6 +674,35 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                             disabled={busy}>
                       <BusyLabel busy={busyAction === "similarity"} running="Matching peers…"
                                  idle="Run similarity" />
+                    </button>
+                  </div>
+                </div>
+              )}
+              {canReview && (
+                <div className="card p-5">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="mr-auto">
+                      <h2 className="text-sm font-semibold">Run review assist</h2>
+                      <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                        Gives every active or dying row a verdict from its own
+                        match/diverge history. The verdict is decided by rules, not by
+                        a model — the model only writes the sentence explaining it.
+                        Dormant rows are sized by the{" "}
+                        <Link href="/config/dormant" style={{ textDecoration: "underline" }}>
+                          dormant rules
+                        </Link>{" "}instead.
+                        {assist && assist.items.length > 0
+                          && ` ${assist.counts.flag_for_review} flagged · `
+                             + `${assist.counts.bulk_accept_candidate} bulk-accept · `
+                             + `${assist.counts.needs_context} no prior cycle.`}
+                        {preselectOn
+                          ? " Bulk-accept rows arrive pre-ticked; nothing is submitted until you press Accept."
+                          : " Pre-ticking is off — turn on guarded assistance in Rules & criticality to enable it."}
+                      </p>
+                    </div>
+                    <button className="btn btn-primary" onClick={runAssist} disabled={busy}>
+                      <BusyLabel busy={busyAction === "assist"} running="Assisting rows…"
+                                 idle="Run assist" />
                     </button>
                   </div>
                 </div>

@@ -18,6 +18,13 @@ export default function RootLayout({
     // network blocks it. The palette specifies system-ui anyway.
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col">
+        {/* Runs before the rail is parsed, so it paints at its remembered
+            width. In an effect this lands after hydration and a collapsed rail
+            flashes open on every full page load. */}
+        <script dangerouslySetInnerHTML={{ __html:
+          'try{document.documentElement.dataset.rail='
+          + 'localStorage.getItem("bom.rail")==="collapsed"?"collapsed":"expanded"}'
+          + 'catch(e){}' }} />
         <SessionProvider>
           <AppShell>{children}</AppShell>
         </SessionProvider>

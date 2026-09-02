@@ -321,3 +321,18 @@ def test_everything_is_audited(client, synth_csv, db_file):
     conn.close()
     assert {"batch", "review", "chat"} <= entities
     assert "alice" in users
+
+
+def test_queue_search_by_item_id(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    hit = client.get(f"/recommendations?batch_id={b}&q=00005", headers=VIEWER).json()
+    assert {i["item_id"] for i in hit["items"]} == {"100005"}
+    assert hit["total"] == 1
+    # Search composes with the other filters rather than replacing them.
+    narrowed = client.get(f"/recommendations?batch_id={b}&q=00005&status=auto_cleared",
+                          headers=VIEWER).json()
+    assert narrowed["total"] == 0
+    # Case-insensitive, and blank means "no search" rather than "match nothing".
+    assert client.get(f"/recommendations?batch_id={b}&q=%20", headers=VIEWER).json()["total"] == 7
+    assert client.get(f"/recommendations?batch_id={b}&q=nosuchpart",
+                      headers=VIEWER).json()["total"] == 0

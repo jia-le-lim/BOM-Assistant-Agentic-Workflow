@@ -16,7 +16,8 @@ import pandas as pd
 
 from .config import ENGINE_DIR
 from .db import Conn, active_config
-from . import engine_statistical
+from . import dormant_rules, engine_statistical
+from .part_category import categorise, load_rules as load_category_rules
 
 sys.path.insert(0, str(ENGINE_DIR))
 import engine  # noqa: E402  (analysis/engine/engine.py)
@@ -138,10 +139,20 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     if df.empty:
         raise ValueError(f"Batch {batch_id} has no scoreable rows")
     df = _attach_prior_benchmark(conn, batch_id, df)
+    # The engine matches category-scoped dormant rules on this column. Resolved
+    # here, not in the engine: categorising needs the confirmed lexicon, and
+    # engine_statistical.run() holds no database handle by design.
+    category_rules, _broken = load_category_rules(conn)
+    df["part_category"] = [categorise(d, category_rules)
+                           for d in df.get("item_desc", pd.Series("", index=df.index))]
 
     cfg = active_config(conn)
+    # Engineer-owned dormant stocking rules travel in cfg for the same reason.
+    # Folded in BEFORE cfg_hash so editing a rule invalidates the fingerprint --
+    # otherwise a re-score would claim the same config produced a new number.
+    cfg = {**cfg, "dormant_rules": dormant_rules.load_rules(conn)}
     cfg_hash = hashlib.sha256(
-        json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+        json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     res = _select_engine().run(df, cfg)
 

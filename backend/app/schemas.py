@@ -98,6 +98,35 @@ class PartCategoryRequest(BaseModel):
         return self
 
 
+class DormantRuleRequest(BaseModel):
+    """One dormant stocking rule: who it applies to, and what quantity it keeps.
+
+    Lower priority wins, and within a priority the more specific scope wins, so
+    a per-item exception does not need the whole table renumbered.
+    """
+    scope: Literal["item", "category", "default"]
+    match_key: str = Field(default="", max_length=64,
+                           description="item_id, category name, or '' for default")
+    criticality: str = Field(default="", max_length=16,
+                             description="'' = any criticality, else h|m|l|d")
+    policy: Literal["hold_current", "fixed_qty", "zero"]
+    fixed_qty: int | None = Field(default=None, ge=0, le=10_000)
+    priority: int = Field(default=500, ge=1, le=9999)
+
+    @model_validator(mode="after")
+    def coherent(self):
+        # A fixed_qty rule with no quantity would size to 0 -- the exact silent
+        # zero this whole layer exists to stop. Rejected at the API, not
+        # discovered mid-batch.
+        if self.policy == "fixed_qty" and self.fixed_qty is None:
+            raise ValueError("policy 'fixed_qty' requires fixed_qty")
+        if self.scope == "default" and self.match_key:
+            raise ValueError("the default rule takes no match_key")
+        if self.scope != "default" and not self.match_key:
+            raise ValueError(f"scope '{self.scope}' requires a match_key")
+        return self
+
+
 class BulkReviewItem(BaseModel):
     item_id: str
     stockroom_id: str | None = None
@@ -120,6 +149,9 @@ class BulkReviewFilters(BaseModel):
     triage_tier: Literal["clear_candidate", "review", "escalate"] | None = None
     min_triage_confidence: float | None = Field(default=None, ge=0, le=1)
     triage_preselect: bool = False
+    assist_verdict: Literal["flag_for_review", "bulk_accept_candidate",
+                            "needs_context"] | None = None
+    assist_preselect: bool = False
     exclude_high_risk: bool = True
 
 

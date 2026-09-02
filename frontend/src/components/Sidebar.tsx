@@ -16,6 +16,8 @@ const LINKS = [
     hint: "Uploaded extracts and their review queues" },
   { href: "/config", label: "Rules & criticality", icon: "rules" as const,
     hint: "Thresholds the engine scores with" },
+  { href: "/config/dormant", label: "Dormant rules", icon: "rules" as const,
+    hint: "What a part with no consumption keeps on the shelf" },
   { href: "/chat", label: "Ask", icon: "ask" as const,
     hint: "Explain a decision, stage a proposal" },
 ];
@@ -76,6 +78,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     return () => { active = false; unsubscribe(); };
   }, [call, user]);
 
+  // The most specific matching link wins, so /config/dormant does not also
+  // light up /config -- two highlighted destinations is worse than none.
+  const activeHref = LINKS
+    .map((l) => l.href)
+    .filter((h) => (h === "/" ? path === "/" : path === h || path.startsWith(`${h}/`)))
+    .sort((a, b) => b.length - a.length)[0];
+
   const needle = filter.trim().toLowerCase();
   const loaded = history?.owner === user ? history : null;
   const sessions = loaded?.sessions ?? [];
@@ -99,7 +108,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="side-top">
         <Link href="/chat?new=1" className="btn btn-primary side-new" onClick={onNavigate}>
-          <Icon name="new" /> New chat
+          <Icon name="new" /> <span className="side-label">New chat</span>
         </Link>
 
         <div className="side-search">
@@ -113,12 +122,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
       <nav className="side-nav" aria-label="Sections">
         {LINKS.map((l) => {
-          const active = l.href === "/" ? path === "/" : path.startsWith(l.href);
+          const active = l.href === activeHref;
           return (
             <Link key={l.href} href={l.href} title={l.hint} onClick={onNavigate}
                   aria-current={active ? "page" : undefined}
                   className={`side-link${active ? " is-active" : ""}`}>
-              <Icon name={l.icon} /> {l.label}
+              <Icon name={l.icon} /> <span className="side-label">{l.label}</span>
             </Link>
           );
         })}

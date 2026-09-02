@@ -146,6 +146,7 @@ def list_recommendations(
                               pattern="^(active|dormant|dying|no-data)$"),
     agreement: str | None = Query(default=None, pattern="^(match|diverge|none)$"),
     reason_code: str | None = None,
+    q: str | None = Query(default=None, max_length=64),
     min_exposure: float | None = None,
     min_confidence: float | None = Query(default=None, ge=0, le=1),
     limit: int = Query(default=50, ge=1, le=500),
@@ -169,6 +170,13 @@ def list_recommendations(
             where.append("agreement=?"); params.append(agreement)
         if reason_code:
             where.append("reason_code LIKE ?"); params.append(f"%{reason_code}%")
+        if q and q.strip():
+            # Free-text part lookup. UPPER() on both sides because Postgres LIKE
+            # is case-sensitive and SQLite's is not -- without it the same search
+            # behaves differently on the two backends.
+            where.append("(UPPER(item_id) LIKE ? OR UPPER(stockroom_id) LIKE ?)")
+            needle = f"%{q.strip().upper()}%"
+            params += [needle, needle]
         if min_exposure is not None:
             where.append("exposure_usd>=?"); params.append(min_exposure)
         if min_confidence is not None:

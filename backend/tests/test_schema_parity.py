@@ -75,8 +75,9 @@ def test_same_tables():
 def test_expected_table_count():
     # 7 original + pending_change, conversation_turn, item_note,
     # model_prediction_log, triage_result, similarity_result,
-    # similarity_neighbour, part_category_config
-    assert len(SQLITE) == 15, sorted(SQLITE)
+    # similarity_neighbour, part_category_config, dormant_rule_config,
+    # assist_result
+    assert len(SQLITE) == 17, sorted(SQLITE)
 
 
 @pytest.mark.parametrize("table", sorted(SQLITE))

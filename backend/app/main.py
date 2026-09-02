@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from .db import init_db
 from .llm import get_provider
-from .routers import (chat, export, memory, recommend, review, rules_config,
+from .routers import (assist, chat, export, memory, recommend, review, rules_config,
                       similarity, triage, upload)
 
 API_VERSION = "0.2.0-agent"
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router, tags=["memory"])
     app.include_router(triage.router, tags=["triage"])
     app.include_router(similarity.router, tags=["similarity"])
+    app.include_router(assist.router, tags=["assist"])
 
     @app.get("/health", tags=["ops"])
     def health():

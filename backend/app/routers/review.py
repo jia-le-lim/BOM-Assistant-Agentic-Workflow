@@ -95,9 +95,13 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
     f = req.filters
     use_triage = bool(f.triage_tier or f.min_triage_confidence is not None
                       or f.triage_preselect)
+    use_assist = bool(f.assist_verdict or f.assist_preselect)
     join = (" JOIN triage_result t ON t.batch_id=r.batch_id "
             "AND t.item_id=r.item_id AND t.stockroom_id=r.stockroom_id"
             if use_triage else "")
+    join += (" JOIN assist_result a ON a.batch_id=r.batch_id "
+             "AND a.item_id=r.item_id AND a.stockroom_id=r.stockroom_id"
+             if use_assist else "")
     where, params = ["r.batch_id=?"], [req.batch_id]
     if f.risk_level:
         where.append("r.risk_level=?"); params.append(f.risk_level)
@@ -125,6 +129,16 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
             raise HTTPException(409, "guarded triage preselection is disabled")
         where.extend(("t.triage_tier='clear_candidate'", "t.confidence>=?"))
         params.append(float(cfg.get("triage_preselect_min_confidence", 0.9)))
+    if f.assist_verdict:
+        where.append("a.verdict=?"); params.append(f.assist_verdict)
+    if f.assist_preselect:
+        # Routed through the SAME gate as triage preselection, deliberately.
+        # Two independent preselection paths is how one part gets accepted
+        # twice under two different rules.
+        cfg = active_config(conn)
+        if not cfg.get("triage_guarded_assist_enabled", False):
+            raise HTTPException(409, "guarded preselection is disabled")
+        where.append("a.verdict='bulk_accept_candidate'")
     if f.exclude_high_risk:
         where.append("r.risk_level<>?"); params.append("High")
     sql = ("SELECT r.* FROM recommendation_result r" + join + " WHERE "

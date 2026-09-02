@@ -11,10 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..audit import audit
 from ..db import active_config, get_conn, stored_config
-from .. import engine_statistical, similarity
+from .. import dormant_rules, engine_statistical, similarity
 from ..part_category import categorise, load_rules
 from ..schemas import (ConfigUpdateRequest, CriticalityRequest,
-                       PartCategoryRequest)
+                       DormantRuleRequest, PartCategoryRequest)
 from ..security import APPROVE_ROLES, CONFIG_WRITE_ROLES, REVIEW_ROLES, any_role, require_role
 
 router = APIRouter()
@@ -278,5 +278,158 @@ def part_category_coverage(batch_id: int, limit: int = 20,
                                            key=lambda kv: -kv[1])),
                 "uncategorised_samples": samples,
                 "broken_rules": broken}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# dormant stocking rules (same propose -> confirm -> engine reads pattern)
+# ---------------------------------------------------------------------------
+
+def _dormant_rows(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT rule_id, scope, match_key, criticality, policy, fixed_qty, "
+        "priority, set_by, confirmed, confirmed_by, updated_at "
+        "FROM dormant_rule_config ORDER BY priority, scope, match_key")]
+
+
+@router.get("/config/dormant-rules")
+def list_dormant_rules(actor: dict = Depends(any_role())):
+    """Every rule, confirmed and pending. Only confirmed ones size anything."""
+    conn = get_conn()
+    try:
+        if dormant_rules.seed(conn):
+            conn.commit()
+        rows = _dormant_rows(conn)
+        return {"rules": rows,
+                "confirmed": sum(1 for r in rows if r["confirmed"]),
+                "pending": sum(1 for r in rows if not r["confirmed"])}
+    finally:
+        conn.close()
+
+
+@router.post("/config/dormant-rules")
+def propose_dormant_rule(body: DormantRuleRequest,
+                         actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO dormant_rule_config (scope, match_key, criticality, "
+            "policy, fixed_qty, priority, set_by, confirmed, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,0,datetime('now')) "
+            "ON CONFLICT(scope, match_key, criticality) DO UPDATE SET "
+            "policy=excluded.policy, fixed_qty=excluded.fixed_qty, "
+            "priority=excluded.priority, set_by=excluded.set_by, "
+            "confirmed=0, confirmed_by=NULL, updated_at=datetime('now')",
+            (body.scope, body.match_key, body.criticality, body.policy,
+             body.fixed_qty, body.priority, actor["user"]))
+        audit(conn, actor, "POST", "/config/dormant-rules", "dormant_rule",
+              f"{body.scope}:{body.match_key}:{body.criticality}",
+              body.model_dump())
+        conn.commit()
+        row = conn.execute(
+            "SELECT rule_id FROM dormant_rule_config WHERE scope=? AND "
+            "match_key=? AND criticality=?",
+            (body.scope, body.match_key, body.criticality)).fetchone()
+        return {"rule_id": row["rule_id"] if row else None,
+                **body.model_dump(), "confirmed": False,
+                "note": "proposal recorded; it sizes nothing until a different "
+                        "person with approval rights confirms it, and it takes "
+                        "effect on the next engine run"}
+    finally:
+        conn.close()
+
+
+@router.post("/config/dormant-rules/{rule_id}/confirm")
+def confirm_dormant_rule(rule_id: int,
+                         actor: dict = Depends(require_role(*APPROVE_ROLES))):
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT * FROM dormant_rule_config WHERE rule_id=?",
+                         (rule_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404, f"no dormant rule {rule_id}")
+        if r["set_by"] == actor["user"]:
+            raise HTTPException(403, "proposer cannot confirm their own rule")
+        conn.execute(
+            "UPDATE dormant_rule_config SET confirmed=1, confirmed_by=?, "
+            "updated_at=datetime('now') WHERE rule_id=?",
+            (actor["user"], rule_id))
+        audit(conn, actor, "POST", "/config/dormant-rules/confirm",
+              "dormant_rule", rule_id, {"confirmed": True})
+        conn.commit()
+        return {"rule_id": rule_id, "confirmed": True,
+                "confirmed_by": actor["user"],
+                "note": "applies from the next /run-recommendation; a batch "
+                        "already scored keeps the numbers its reviewer saw"}
+    finally:
+        conn.close()
+
+
+@router.delete("/config/dormant-rules/{rule_id}")
+def delete_dormant_rule(rule_id: int,
+                        actor: dict = Depends(require_role(*APPROVE_ROLES))):
+    conn = get_conn()
+    try:
+        if conn.execute("SELECT 1 FROM dormant_rule_config WHERE rule_id=?",
+                        (rule_id,)).fetchone() is None:
+            raise HTTPException(404, f"no dormant rule {rule_id}")
+        conn.execute("DELETE FROM dormant_rule_config WHERE rule_id=?", (rule_id,))
+        audit(conn, actor, "DELETE", "/config/dormant-rules", "dormant_rule",
+              rule_id, {"deleted": True})
+        conn.commit()
+        return {"rule_id": rule_id, "deleted": True}
+    finally:
+        conn.close()
+
+
+@router.get("/config/dormant-rules/coverage")
+def dormant_rule_coverage(batch_id: int,
+                          actor: dict = Depends(require_role(*REVIEW_ROLES))):
+    """How many dormant rows the confirmed rules match, and what that costs.
+
+    Q2 makes this a stock-moving change, so coverage alone is not the decision:
+    the book value against what the engine itself said is reported beside it. A
+    rule set that raises agreement while adding $400k of inventory is not
+    obviously a win, and the engineer is the one who gets to weigh that.
+    """
+    conn = get_conn()
+    try:
+        if conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
+                        (batch_id,)).fetchone() is None:
+            raise HTTPException(404, f"batch {batch_id} not found")
+        rules = dormant_rules.load_rules(conn)
+        category_rules, _broken = load_rules(conn)
+        matched = total = 0
+        engine_usd = rule_usd = 0.0
+        for row in conn.execute(
+                "SELECT r.new_max, b.payload FROM recommendation_result r "
+                "JOIN bom_rows b ON b.batch_id=r.batch_id "
+                "AND b.item_id=r.item_id AND b.stockroom_id=r.stockroom_id "
+                "WHERE r.batch_id=? AND r.route='dormant'", (batch_id,)):
+            payload = json.loads(row["payload"])
+            total += 1
+            try:
+                price = float(payload.get("unitprice") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            engine_max = int(row["new_max"] or 0)
+            engine_usd += price * engine_max
+            rule = dormant_rules.resolve(
+                rules, payload.get("item_id"),
+                categorise(payload.get("item_desc"), category_rules),
+                payload.get("sfm_criticality"))
+            applied = dormant_rules.apply(rule, payload.get("max_qty"))
+            if applied is None:
+                rule_usd += price * engine_max
+                continue
+            matched += 1
+            rule_usd += price * applied[2]
+        return {"batch_id": batch_id, "dormant_rows": total, "matched": matched,
+                "pct": round(100 * matched / total, 1) if total else 0.0,
+                "engine_book_usd": round(engine_usd, 2),
+                "proposed_book_usd": round(rule_usd, 2),
+                "delta_usd": round(rule_usd - engine_usd, 2),
+                "confirmed_rules": len(rules)}
     finally:
         conn.close()
