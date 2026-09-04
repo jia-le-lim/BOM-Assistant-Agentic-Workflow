@@ -22,7 +22,7 @@ MODEL_VERSION = "assist-v2"
 
 VERDICTS = ("flag_for_review", "bulk_accept_candidate", "needs_context")
 
-# Surfaced through rules_config the same way TRIAGE_DEFAULTS is, so none of
+# Surfaced through rules_config the same way the engine defaults are, so none of
 # these is a literal buried in a branch.
 DEFAULTS = {
     # Two consecutive overrides is the point the engine stops being a draft

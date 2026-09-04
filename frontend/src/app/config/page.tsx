@@ -27,12 +27,6 @@ const AUTOCLEAR = [
   ["autoclear_high_value_usd", "High-value gate ($)", "A material change at/above this always reaches a human"],
 ] as const;
 
-const TRIAGE = [
-  ["triage_clear_min_confidence", "Clear-candidate confidence", "Minimum synthesis confidence before a row may be labelled clear candidate"],
-  ["triage_clear_precision_bar", "Required validation precision", "Backtest precision bar for enabling guarded assistance"],
-  ["triage_preselect_min_confidence", "Guarded preselection confidence", "Minimum confidence used by the human-confirmed bulk action"],
-] as const;
-
 export default function ConfigPage() {
   const { call } = useApi();
   const { role } = useSession();
@@ -259,10 +253,10 @@ export default function ConfigPage() {
       </div>
 
       <div className="card p-5">
-        <h2 className="text-sm font-semibold mb-1">Advisory triage policy</h2>
+        <h2 className="text-sm font-semibold mb-1">Guarded bulk acceptance</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          Triage ranks review work but never changes Min/ROP/Max. Guarded assistance only
-          preselects validated clear candidates; an engineer still confirms the bulk action.
+          Review assist ranks review work but never changes Min/ROP/Max. Guarded assistance
+          only preselects its bulk-accept candidates; an engineer still confirms the action.
         </p>
         <div className="scroll-x">
           <table className="w-full text-sm min-w-[640px]">
@@ -271,22 +265,8 @@ export default function ConfigPage() {
                   <th className="text-right w-32">New value</th><th>What it does</th></tr>
             </thead>
             <tbody>
-              {TRIAGE.map(([key, label, hint]) => (
-                <tr key={key}>
-                  <td>{label}</td>
-                  <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
-                  <td className="text-right">
-                    <input className="field w-28 tnum text-right" type="number"
-                           min={0} max={1} step="0.01" disabled={!can.configWrite(role)}
-                           value={edits[key] ?? ""}
-                           placeholder={String(cfg.config[key] ?? "")}
-                           onChange={(e) => setEdits({ ...edits, [key]: e.target.value })} />
-                  </td>
-                  <td className="text-xs" style={{ color: "var(--text-muted)" }}>{hint}</td>
-                </tr>
-              ))}
               <tr>
-                <td>Guarded triage assistance</td>
+                <td>Guarded bulk acceptance</td>
                 <td className="text-right tnum">
                   {cfg.config.triage_guarded_assist_enabled ? "on" : "off"}
                 </td>
@@ -300,14 +280,16 @@ export default function ConfigPage() {
                   </select>
                 </td>
                 <td className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  Enables human-confirmed bulk acceptance of qualifying clear candidates. Off by default.
+                  Enables human-confirmed bulk acceptance of assist&apos;s bulk-accept
+                  candidates. Off by default.
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
         <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
-          Saving uses the same new-version box above. Re-run triage to rebuild existing results.
+          Saving uses the same new-version box above. Re-run review assist to rebuild
+          existing results.
         </p>
       </div>
 

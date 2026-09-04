@@ -30,10 +30,13 @@ AUTOCLEAR_DEFAULTS = {
     "autoclear_reliable": engine_statistical.AUTOCLEAR_RELIABLE,
 }
 
+# The one surviving triage-era key. It gates every pre-ticked bulk path --
+# today only assist_preselect -- and keeps its name because renaming a live
+# config key costs a migration for nothing. Its three companions
+# (triage_clear_min_confidence, triage_clear_precision_bar,
+# triage_preselect_min_confidence) went with the triage graph on 2026-09-04:
+# nothing read them once the synthesis node was gone.
 TRIAGE_DEFAULTS = {
-    "triage_clear_min_confidence": 0.8,
-    "triage_clear_precision_bar": 0.98,
-    "triage_preselect_min_confidence": 0.9,
     "triage_guarded_assist_enabled": False,
 }
 
@@ -65,9 +68,6 @@ EDITABLE = {
     "autoclear_immaterial_usd": (int, float),
     "autoclear_high_value_usd": (int, float),
     "autoclear_reliable": (bool,),
-    "triage_clear_min_confidence": (int, float),
-    "triage_clear_precision_bar": (int, float),
-    "triage_preselect_min_confidence": (int, float),
     "triage_guarded_assist_enabled": (bool,),
     "similarity_max_distance": (int, float),
     "similarity_min_neighbours": (int, float),
@@ -288,9 +288,10 @@ def part_category_coverage(batch_id: int, limit: int = 20,
 
 def _dormant_rows(conn) -> list[dict]:
     return [dict(r) for r in conn.execute(
-        "SELECT rule_id, scope, match_key, criticality, policy, fixed_qty, "
-        "priority, set_by, confirmed, confirmed_by, updated_at "
-        "FROM dormant_rule_config ORDER BY priority, scope, match_key")]
+        "SELECT rule_id, scope, match_key, policy, fixed_qty, "
+        "set_by, confirmed, confirmed_by, updated_at "
+        "FROM dormant_rule_config ORDER BY CASE scope WHEN 'item' THEN 0 "
+        "WHEN 'category' THEN 1 ELSE 2 END, match_key")]
 
 
 @router.get("/config/dormant-rules")
@@ -314,23 +315,22 @@ def propose_dormant_rule(body: DormantRuleRequest,
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO dormant_rule_config (scope, match_key, criticality, "
-            "policy, fixed_qty, priority, set_by, confirmed, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,0,datetime('now')) "
-            "ON CONFLICT(scope, match_key, criticality) DO UPDATE SET "
+            "INSERT INTO dormant_rule_config (scope, match_key, "
+            "policy, fixed_qty, set_by, confirmed, updated_at) "
+            "VALUES (?,?,?,?,?,0,datetime('now')) "
+            "ON CONFLICT(scope, match_key) DO UPDATE SET "
             "policy=excluded.policy, fixed_qty=excluded.fixed_qty, "
-            "priority=excluded.priority, set_by=excluded.set_by, "
+            "set_by=excluded.set_by, "
             "confirmed=0, confirmed_by=NULL, updated_at=datetime('now')",
-            (body.scope, body.match_key, body.criticality, body.policy,
-             body.fixed_qty, body.priority, actor["user"]))
+            (body.scope, body.match_key, body.policy,
+             body.fixed_qty, actor["user"]))
         audit(conn, actor, "POST", "/config/dormant-rules", "dormant_rule",
-              f"{body.scope}:{body.match_key}:{body.criticality}",
-              body.model_dump())
+              f"{body.scope}:{body.match_key}", body.model_dump())
         conn.commit()
         row = conn.execute(
             "SELECT rule_id FROM dormant_rule_config WHERE scope=? AND "
-            "match_key=? AND criticality=?",
-            (body.scope, body.match_key, body.criticality)).fetchone()
+            "match_key=?",
+            (body.scope, body.match_key)).fetchone()
         return {"rule_id": row["rule_id"] if row else None,
                 **body.model_dump(), "confirmed": False,
                 "note": "proposal recorded; it sizes nothing until a different "
@@ -417,8 +417,7 @@ def dormant_rule_coverage(batch_id: int,
             engine_usd += price * engine_max
             rule = dormant_rules.resolve(
                 rules, payload.get("item_id"),
-                categorise(payload.get("item_desc"), category_rules),
-                payload.get("sfm_criticality"))
+                categorise(payload.get("item_desc"), category_rules))
             applied = dormant_rules.apply(rule, payload.get("max_qty"))
             if applied is None:
                 rule_usd += price * engine_max

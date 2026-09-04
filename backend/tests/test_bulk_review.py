@@ -141,32 +141,18 @@ def test_bulk_requires_a_target(client, monkeypatch):
     assert r.status_code == 422
 
 
-def test_bulk_can_filter_by_triage_tier(client, monkeypatch):
+def test_guarded_preselection_is_config_gated(client, monkeypatch):
+    """One switch guards every pre-ticked bulk path. Named for the triage graph
+    that is gone (2026-09-04); assist_preselect is the caller that survives."""
     bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
-    triage = client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
-    assert triage.status_code == 200, triage.text
-    assert client.get(f"/triage/{bid}", headers=ENG).json()["items"][0][
-        "triage_tier"] == "clear_candidate"
-
-    reviewed = client.post("/review/bulk", headers=ENG, json={
-        "batch_id": bid, "decision": "accept",
-        "filters": {"triage_tier": "clear_candidate"}})
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["reviewed"] == 1
-
-
-def test_guarded_triage_preselection_is_config_gated(client, monkeypatch):
-    bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
-    client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
     body = {"batch_id": bid, "decision": "accept",
-            "filters": {"triage_preselect": True}}
-    disabled = client.post("/review/bulk", headers=ENG, json=body)
-    assert disabled.status_code == 409
+            "filters": {"assist_preselect": True}}
+    assert client.post("/review/bulk", headers=ENG, json=body).status_code == 409
 
     enabled = client.post("/config/rules", headers=ADMIN, json={
-        "rule_version": "triage-enabled-test",
+        "rule_version": "guarded-enabled-test",
         "updates": {"triage_guarded_assist_enabled": True}})
     assert enabled.status_code == 200, enabled.text
-    reviewed = client.post("/review/bulk", headers=ENG, json=body)
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["reviewed"] == 1
+    assert client.post("/review/bulk", headers=ENG,
+                       json=body).status_code == 200

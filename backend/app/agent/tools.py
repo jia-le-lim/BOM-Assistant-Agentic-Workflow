@@ -275,9 +275,9 @@ def get_similar_parts(ctx: ToolContext, item_id: str,
                         "neighbour_count": res["neighbour_count"]})
     return {"item_id": item_id, "neighbour_count": res["neighbour_count"],
             "pool_size": res["pool_size"], "is_outlier": res["is_outlier"],
-            # Already computed and stored by the similarity run, and already
-            # read this way by agent/graph.py:intake. Recomputing it over the
-            # returned neighbours would be a second, quietly different number.
+            # Already computed and stored by the similarity run. Recomputing
+            # it over the returned neighbours would be a second, quietly
+            # different number.
             "historical_override_rate": res["historical_override_rate"],
             "advisory_codes": res["advisory_codes"],
             "analogue_max_median": res["analogue_max_median"],

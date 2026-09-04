@@ -291,17 +291,22 @@ def test_tool_specs_exclude_writes_when_disallowed():
     assert {s.name for s in T.specs(allow_writes=True)} - names == {"propose_change"}
 
 
-def test_triage_cannot_write_decisions_or_recommendations(
+def test_assist_cannot_write_decisions_or_recommendations(
         client, synth_csv, db_file):
+    """The advisory layer reads and annotates; it never sizes or decides.
+
+    Replaces the same assertion against the LangGraph triage, removed
+    2026-09-04 -- nothing called it. assist is the only advisory writer left.
+    """
     batch_id = scored_batch(client, synth_csv)
     before = rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id")
 
-    r = client.post("/triage/run", json={"batch_id": batch_id}, headers=ENG)
+    r = client.post(f"/assist/run?batch_id={batch_id}", headers=ENG)
     assert r.status_code == 200, r.text
 
     assert rows(db_file, "SELECT COUNT(*) FROM review_history")[0][0] == 0
     assert rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id") == before
-    columns = {r[1] for r in rows(db_file, "PRAGMA table_info(triage_result)")}
+    columns = {r[1] for r in rows(db_file, "PRAGMA table_info(assist_result)")}
     assert not columns & {"new_max", "new_rop", "new_min",
                           "final_max", "final_rop", "final_min"}
 

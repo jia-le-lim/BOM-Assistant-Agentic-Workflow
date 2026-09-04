@@ -149,42 +149,6 @@ export interface RuleConfig {
   config: Record<string, unknown>;
 }
 
-export type TriageTier = "clear_candidate" | "review" | "escalate";
-
-export interface TriageResult {
-  batch_id: number;
-  item_id: string;
-  stockroom_id: string;
-  triage_tier: TriageTier;
-  priority_score: number;
-  rationale: string;
-  confidence: number;
-  focus_question: string | null;
-  history_narrative: string | null;
-  demand_narrative: string | null;
-  procurement_narrative: string | null;
-  sources: Record<string, unknown>[];
-  provider: string | null;
-  model: string | null;
-  triaged_at: string;
-}
-
-export interface TriagePage {
-  batch_id: number;
-  total: number;
-  items: TriageResult[];
-}
-
-export interface TriageRunSummary {
-  batch_id: number;
-  candidates: number;
-  triaged: number;
-  llm_calls_used: number;
-  specialist_calls_used: number;
-  llm_call_budget: number;
-  budget_exhausted: boolean;
-}
-
 /**
  * Advisory peer evidence. Never applied to Min/ROP/Max and never lowers a risk
  * level — the layer can only add evidence and raise review priority.
@@ -311,10 +275,8 @@ export interface DormantRule {
   rule_id: number;
   scope: "item" | "category" | "default";
   match_key: string;
-  criticality: string;
   policy: DormantPolicy;
   fixed_qty: number | null;
-  priority: number;
   set_by: string | null;
   confirmed: number;
   confirmed_by: string | null;

@@ -93,15 +93,10 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
         return recs, failures
 
     f = req.filters
-    use_triage = bool(f.triage_tier or f.min_triage_confidence is not None
-                      or f.triage_preselect)
     use_assist = bool(f.assist_verdict or f.assist_preselect)
-    join = (" JOIN triage_result t ON t.batch_id=r.batch_id "
-            "AND t.item_id=r.item_id AND t.stockroom_id=r.stockroom_id"
-            if use_triage else "")
-    join += (" JOIN assist_result a ON a.batch_id=r.batch_id "
-             "AND a.item_id=r.item_id AND a.stockroom_id=r.stockroom_id"
-             if use_assist else "")
+    join = (" JOIN assist_result a ON a.batch_id=r.batch_id "
+            "AND a.item_id=r.item_id AND a.stockroom_id=r.stockroom_id"
+            if use_assist else "")
     where, params = ["r.batch_id=?"], [req.batch_id]
     if f.risk_level:
         where.append("r.risk_level=?"); params.append(f.risk_level)
@@ -119,22 +114,13 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
         where.append("r.exposure_usd>=?"); params.append(f.min_exposure)
     if f.min_confidence is not None:
         where.append("r.confidence>=?"); params.append(f.min_confidence)
-    if f.triage_tier:
-        where.append("t.triage_tier=?"); params.append(f.triage_tier)
-    if f.min_triage_confidence is not None:
-        where.append("t.confidence>=?"); params.append(f.min_triage_confidence)
-    if f.triage_preselect:
-        cfg = active_config(conn)
-        if not cfg.get("triage_guarded_assist_enabled", False):
-            raise HTTPException(409, "guarded triage preselection is disabled")
-        where.extend(("t.triage_tier='clear_candidate'", "t.confidence>=?"))
-        params.append(float(cfg.get("triage_preselect_min_confidence", 0.9)))
     if f.assist_verdict:
         where.append("a.verdict=?"); params.append(f.assist_verdict)
     if f.assist_preselect:
-        # Routed through the SAME gate as triage preselection, deliberately.
-        # Two independent preselection paths is how one part gets accepted
-        # twice under two different rules.
+        # Gated on triage_guarded_assist_enabled, which outlived the triage
+        # graph it was named for: it is the single switch an admin flips to
+        # allow ANY pre-ticked bulk acceptance, and renaming a live config key
+        # costs a migration for nothing.
         cfg = active_config(conn)
         if not cfg.get("triage_guarded_assist_enabled", False):
             raise HTTPException(409, "guarded preselection is disabled")

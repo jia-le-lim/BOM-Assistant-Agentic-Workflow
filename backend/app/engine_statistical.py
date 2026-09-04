@@ -377,8 +377,7 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
             # 2026-09-01). These are wear-and-tear parts: a constant quantity is
             # kept regardless of consumption, and the engine's zero is wrong on
             # 1,344 of 8,343 dormant rows across the TCB history.
-            _rule = DR.resolve(dormant_rules, item.iloc[i], category.iloc[i],
-                               criticality)
+            _rule = DR.resolve(dormant_rules, item.iloc[i], category.iloc[i])
             _applied = DR.apply(_rule, cur)
             if _applied is not None:
                 new_min, new_rop, new_max = _applied

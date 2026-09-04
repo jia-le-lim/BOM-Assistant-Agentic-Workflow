@@ -28,33 +28,31 @@ MODEL_VERSION = "dormant-v1"
 #               deliberately switch a category back off
 POLICIES = ("hold_current", "fixed_qty", "zero")
 
+# Resolution order, most specific first. This tuple IS the contract: an item
+# rule always beats a category rule, which always beats the default. There is
+# no priority number and no criticality filter -- (scope, match_key) is unique,
+# so at most one rule can match at each tier and the winner is never ambiguous.
 SCOPES = ("item", "category", "default")
 
 # Seeded on first read. Exactly one row: the measured median kept quantity is 1
 # and the modal decision is "leave it where it is", so hold_current is the
 # honest default. Category rules are NOT seeded -- inventing thresholds nobody
 # measured is how a rule table stops meaning anything.
-DEFAULT_RULES: list[tuple[int, str, str, str, str, int | None]] = [
-    # (priority, scope, match_key, criticality, policy, fixed_qty)
-    (900, "default", "", "", "hold_current", None),
+DEFAULT_RULES: list[tuple[str, str, str, int | None]] = [
+    # (scope, match_key, policy, fixed_qty)
+    ("default", "", "hold_current", None),
 ]
-
-# Lower priority wins, then the more specific scope. Ordering IS the contract:
-# an item rule must beat a category rule at the same priority, or a per-part
-# exception could never be written without renumbering the whole table.
-_SCOPE_RANK = {"item": 0, "category": 1, "default": 2}
 
 
 def load_rules(conn) -> list[dict]:
-    """Confirmed rules in resolution order. The only DB-touching function here.
+    """Confirmed rules. The only DB-touching function here.
 
     `WHERE confirmed=1` is the safety property, not a nicety: an unconfirmed
     proposal must not move a stock level.
     """
-    rows = [dict(r) for r in conn.execute(
-        "SELECT rule_id, scope, match_key, criticality, policy, fixed_qty, "
-        "priority, updated_at FROM dormant_rule_config WHERE confirmed=1")]
-    return sorted(rows, key=_order)
+    return [dict(r) for r in conn.execute(
+        "SELECT rule_id, scope, match_key, policy, fixed_qty, updated_at "
+        "FROM dormant_rule_config WHERE confirmed=1")]
 
 
 def seed(conn) -> int:
@@ -65,48 +63,29 @@ def seed(conn) -> int:
     """
     if conn.execute("SELECT 1 FROM dormant_rule_config LIMIT 1").fetchone():
         return 0
-    for priority, scope, key, crit, policy, qty in DEFAULT_RULES:
+    for scope, key, policy, qty in DEFAULT_RULES:
         conn.execute(
-            "INSERT INTO dormant_rule_config (scope, match_key, criticality, "
-            "policy, fixed_qty, priority, set_by, confirmed) "
-            "VALUES (?,?,?,?,?,?,'seed',0)",
-            (scope, key, crit, policy, qty, priority))
+            "INSERT INTO dormant_rule_config (scope, match_key, policy, "
+            "fixed_qty, set_by, confirmed) VALUES (?,?,?,?,'seed',0)",
+            (scope, key, policy, qty))
     return len(DEFAULT_RULES)
 
 
-def _order(rule: dict) -> tuple[int, int, str]:
-    return (int(rule.get("priority") or 500),
-            _SCOPE_RANK.get(str(rule.get("scope") or ""), 9),
-            str(rule.get("match_key") or ""))
-
-
-def _crit(value) -> str:
-    """First letter, lowercased -- the same normalisation the engine's _sl uses."""
-    return str(value or "").strip().lower()[:1]
-
-
-def resolve(rules, item_id, category, criticality) -> dict | None:
-    """First match wins; None when nothing matches and the engine keeps its own answer.
+def resolve(rules, item_id, category) -> dict | None:
+    """Item rule, else category rule, else default. None = engine keeps its answer.
 
     Takes plain data, never a connection: this is what lets engine_statistical
     stay database-free and re-runnable offline over history.
+
+    An empty `category` never matches a category rule -- an uncategorised part
+    is not silently every category.
     """
-    crit = _crit(criticality)
-    item = str(item_id or "")
-    cat = str(category or "")
-    for rule in sorted(rules, key=_order):
-        want = _crit(rule.get("criticality"))
-        if want and want != crit:
-            continue
-        scope = str(rule.get("scope") or "")
-        key = str(rule.get("match_key") or "")
-        if scope == "default":
-            return rule
-        if scope == "item" and key == item:
-            return rule
-        if scope == "category" and cat and key == cat:
-            return rule
-    return None
+    by = {(str(r.get("scope") or ""), str(r.get("match_key") or "")): r
+          for r in rules}
+    item, cat = str(item_id or ""), str(category or "")
+    return (by.get(("item", item)) if item else None) \
+        or (by.get(("category", cat)) if cat else None) \
+        or by.get(("default", ""))
 
 
 def apply(rule, current_max) -> tuple[int, int, int] | None:

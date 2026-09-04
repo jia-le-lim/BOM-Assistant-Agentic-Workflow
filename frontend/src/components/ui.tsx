@@ -1,6 +1,6 @@
 "use client";
 
-import type { AssistVerdict, Recommendation, Status, TriageTier } from "@/lib/types";
+import type { AssistVerdict, Recommendation, Status } from "@/lib/types";
 
 /* ---------------- status & risk chips (icon + label, never colour alone) ---- */
 
@@ -50,16 +50,6 @@ export function RiskChip({ level, compact }: {
 export function ActionChip({ action }: { action: Recommendation["action"] }) {
   const icon = action === "Increase" ? "↑" : action === "Decrease" ? "↓" : "=";
   return <Chip icon={icon} color="var(--text-muted)" label={action} />;
-}
-
-const TRIAGE_META: Record<TriageTier, { label: string; icon: string; color: string }> = {
-  clear_candidate: { label: "Clear candidate", icon: "✓", color: "var(--good)" },
-  review: { label: "Review", icon: "◐", color: "var(--warning)" },
-  escalate: { label: "Escalate", icon: "▲", color: "var(--critical)" },
-};
-
-export function TriageChip({ tier }: { tier: TriageTier }) {
-  return <Chip {...TRIAGE_META[tier]} />;
 }
 
 /* ---------------- PRD v3 statistical signals -------------------------------- */

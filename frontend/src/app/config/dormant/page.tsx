@@ -18,10 +18,6 @@ const POLICIES = [
   ["zero", "Zero", "The engine's own answer, stated explicitly, so a category can be switched back off without deleting the rule."],
 ] as const;
 
-const CRITICALITY = [
-  ["", "Any"], ["h", "High"], ["m", "Medium"], ["l", "Low"],
-] as const;
-
 export default function DormantRulesPage() {
   const { call } = useApi();
   const { role } = useSession();
@@ -33,10 +29,8 @@ export default function DormantRulesPage() {
 
   const [scope, setScope] = useState<DormantRule["scope"]>("category");
   const [matchKey, setMatchKey] = useState("");
-  const [criticality, setCriticality] = useState("");
   const [policy, setPolicy] = useState<DormantRule["policy"]>("hold_current");
   const [qty, setQty] = useState("");
-  const [priority, setPriority] = useState("500");
   const [batchId, setBatchId] = useState("");
 
   const load = useCallback(async () => {
@@ -66,9 +60,8 @@ export default function DormantRulesPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scope, match_key: scope === "default" ? "" : matchKey.trim(),
-          criticality, policy,
+          policy,
           fixed_qty: policy === "fixed_qty" ? Number(qty) : null,
-          priority: Number(priority),
         }),
       });
       setNote("Proposed. It sizes nothing until a different person with senior " +
@@ -156,22 +149,20 @@ export default function DormantRulesPage() {
       <div className="card p-5">
         <h2 className="text-sm font-semibold mb-1">Rules</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          Lower priority wins; within a priority an item rule beats a category rule
-          beats the default, so a per-part exception needs no renumbering. Same
-          two-person rule as criticality: propose, then a <strong>different</strong>{" "}
-          senior confirms.
+          An item rule beats a category rule beats the default, and each part
+          matches at most one rule per tier — a per-part exception is just an
+          item rule. Same two-person rule as criticality: propose, then a{" "}
+          <strong>different</strong> senior confirms.
           {page && ` ${page.confirmed} confirmed · ${page.pending} pending.`}
         </p>
 
         {page && page.rules.length > 0 && (
           <div className="scroll-x mb-4">
-            <table className="w-full text-sm min-w-[720px]">
+            <table className="w-full text-sm min-w-[560px]">
               <thead>
                 <tr>
-                  <th className="text-right">Pri</th>
                   <th className="text-left">Scope</th>
                   <th className="text-left">Matches</th>
-                  <th className="text-left">Criticality</th>
                   <th className="text-left">Policy</th>
                   <th className="text-right">Qty</th>
                   <th className="text-left">Status</th>
@@ -181,10 +172,8 @@ export default function DormantRulesPage() {
               <tbody>
                 {page.rules.map((r) => (
                   <tr key={r.rule_id}>
-                    <td className="text-right tnum">{r.priority}</td>
                     <td>{r.scope}</td>
                     <td className="font-mono text-xs">{r.match_key || "—"}</td>
-                    <td>{CRITICALITY.find(([v]) => v === r.criticality)?.[1] ?? r.criticality}</td>
                     <td>{POLICIES.find(([v]) => v === r.policy)?.[1] ?? r.policy}</td>
                     <td className="text-right tnum">{r.fixed_qty ?? "—"}</td>
                     <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
@@ -231,13 +220,6 @@ export default function DormantRulesPage() {
                    onChange={(e) => setMatchKey(e.target.value)} />
           </label>
           <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Criticality</span>
-            <select className="field" value={criticality} disabled={!can.review(role)}
-                    onChange={(e) => setCriticality(e.target.value)}>
-              {CRITICALITY.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
             <span style={{ color: "var(--text-secondary)" }}>Policy</span>
             <select className="field" value={policy} disabled={!can.review(role)}
                     onChange={(e) => setPolicy(e.target.value as DormantRule["policy"])}>
@@ -249,12 +231,6 @@ export default function DormantRulesPage() {
             <input className="field w-20 tnum" type="number" min={0} max={10000}
                    value={qty} disabled={!can.review(role) || policy !== "fixed_qty"}
                    onChange={(e) => setQty(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Priority</span>
-            <input className="field w-20 tnum" type="number" min={1} max={9999}
-                   value={priority} disabled={!can.review(role)}
-                   onChange={(e) => setPriority(e.target.value)} />
           </label>
           <button className="btn" onClick={propose}
                   disabled={busy || !can.review(role)

@@ -229,15 +229,13 @@ CREATE TABLE IF NOT EXISTS dormant_rule_config (
   rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
   match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
-  criticality TEXT NOT NULL DEFAULT '', -- '' = any, else h|m|l|d
   policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
   fixed_qty INTEGER,
-  priority INTEGER NOT NULL DEFAULT 500,
   set_by TEXT,
   confirmed_by TEXT,
   confirmed INTEGER DEFAULT 0,
   updated_at TEXT DEFAULT (datetime('now')),
-  UNIQUE (scope, match_key, criticality)
+  UNIQUE (scope, match_key)
 );
 
 -- Advisory review assistance for the active/dying rows. The verdict is decided
@@ -543,15 +541,13 @@ CREATE TABLE IF NOT EXISTS dormant_rule_config (
   rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
   match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
-  criticality TEXT NOT NULL DEFAULT '', -- '' = any, else h|m|l|d
   policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
   fixed_qty INTEGER,
-  priority INTEGER NOT NULL DEFAULT 500,
   set_by TEXT,
   confirmed_by TEXT,
   confirmed INTEGER DEFAULT 0,
   updated_at TEXT DEFAULT {PG_NOW},
-  UNIQUE (scope, match_key, criticality)
+  UNIQUE (scope, match_key)
 );
 
 -- Advisory review assistance for the active/dying rows. The verdict is decided

@@ -7,26 +7,60 @@ gives a different evidence set on every run, and an evidence set that moves
 cannot support a verdict that has to be reproducible.
 
 Plain function calls carry that order. No agent framework is imported here --
-not `langchain`, not `langchain_core`: the steps never branch, stream or retry,
-so a pipe operator would add a dependency and hide which step runs when. Which
-step may see a model is the safety property, and four named calls state it.
+not `langchain`, not `langgraph`: the steps never branch, stream or retry, so a
+pipe operator would add a dependency and hide which step runs when. Which step
+may see a model is the safety property, and four named calls state it.
 
-The LangGraph triage in agent/graph.py is untouched and keeps running. It does
-a different job (conditional routing to save specialist calls on the expensive
-path); this chain runs every live row through the same five sources.
 """
 
 from __future__ import annotations
 
 import json
+import re
 
-from ..agent.specialists import _plain
 from ..agent.tools import (ToolContext, get_agreement_history, get_item_notes,
                            get_procurement_context, get_similar_parts,
                            get_triage_context)
 from ..llm import Message, get_provider
 from . import rules
 from .prompts import ASSIST_NARRATE_SYSTEM
+
+# ASSIST_NARRATE_SYSTEM asks for one sentence of at most 40 words -- roughly
+# 200 characters. The cap leaves headroom for a long one without letting a
+# model that ignores the instruction recite the whole evidence payload back.
+# The prompt asks, this enforces: never rely on wording alone.
+MAX_NARRATIVE_CHARS = 320
+
+_TABLE_ROW = re.compile(r"^\s*\|.*$", re.MULTILINE)      # GFM row + separator
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
+# The model also writes headings mid-sentence ("for item 500794916: ## Review
+# History"), which the line-anchored pattern above cannot see. Require a run of
+# 2+ hashes AND a trailing space so ingestion's duplicate suffix (item#dup1)
+# and ordinary "#3" survive untouched.
+_INLINE_HEADING = re.compile(r"#{2,6}\s+")
+_BULLET = re.compile(r"^\s{0,3}[-*+]\s+", re.MULTILINE)
+_EMPHASIS = re.compile(r"(\*\*|__|\*|`)")
+_BLANKS = re.compile(r"\n{2,}")
+
+
+def _plain(text: str, limit: int = MAX_NARRATIVE_CHARS) -> str:
+    """Markdown source rendered as literal text is worse than no formatting.
+
+    Strips what the narration prompt forbids, then caps at a sentence boundary
+    so a truncation does not read as a thought cut in half.
+    """
+    out = _TABLE_ROW.sub("", str(text or ""))
+    out = _HEADING.sub("", out)
+    out = _INLINE_HEADING.sub("", out)
+    out = _BULLET.sub("", out)
+    out = _EMPHASIS.sub("", out)
+    out = _BLANKS.sub("\n", out).strip()
+    if len(out) <= limit:
+        return out
+    clipped = out[:limit]
+    stop = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
+    return clipped[:stop + 1] if stop > limit // 2 else clipped.rstrip() + "…"
+
 
 # The routes this layer speaks to. Dormant rows are Layer 1's problem and are
 # sized by an engineer's rule; running them through here would spend a model

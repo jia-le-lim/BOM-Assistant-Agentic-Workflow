@@ -1,8 +1,8 @@
 """Dormant stocking rules: resolution order, the confirm gate, and the override.
 
-Ordering is the contract, the same way it is for part_category: an item rule
-must beat a category rule which must beat the default, or a per-part exception
-could never be written without renumbering the table.
+Ordering is the contract: an item rule beats a category rule beats the default.
+Scope alone decides it -- (scope, match_key) is unique, so at most one rule can
+match at each tier and there is no tie for a priority number to break.
 
 The property that matters most is the last one: an EMPTY rule table must
 reproduce the engine's own answer exactly. Layer 1 is a stock-moving change
@@ -17,10 +17,9 @@ from conftest import ENG, SENIOR, VIEWER
 from app import dormant_rules as DR
 
 
-def rule(scope="default", key="", crit="", policy="hold_current", qty=None,
-         priority=500):
-    return {"scope": scope, "match_key": key, "criticality": crit,
-            "policy": policy, "fixed_qty": qty, "priority": priority}
+def rule(scope="default", key="", policy="hold_current", qty=None):
+    return {"scope": scope, "match_key": key, "policy": policy,
+            "fixed_qty": qty}
 
 
 # --- resolve ---------------------------------------------------------------
@@ -28,38 +27,28 @@ def rule(scope="default", key="", crit="", policy="hold_current", qty=None,
 def test_item_beats_category_beats_default():
     rules = [rule(), rule("category", "filter", policy="fixed_qty", qty=2),
              rule("item", "100005", policy="fixed_qty", qty=9)]
-    assert DR.resolve(rules, "100005", "filter", "m")["fixed_qty"] == 9
-    assert DR.resolve(rules, "999999", "filter", "m")["fixed_qty"] == 2
-    assert DR.resolve(rules, "999999", "cable", "m")["scope"] == "default"
+    assert DR.resolve(rules, "100005", "filter")["fixed_qty"] == 9
+    assert DR.resolve(rules, "999999", "filter")["fixed_qty"] == 2
+    assert DR.resolve(rules, "999999", "cable")["scope"] == "default"
 
 
-def test_lower_priority_wins_before_scope():
-    """Priority is the outer key: an explicit 10 outranks a specific scope at 500."""
-    rules = [rule("category", "filter", policy="fixed_qty", qty=2, priority=10),
-             rule("item", "100005", policy="fixed_qty", qty=9, priority=500)]
-    assert DR.resolve(rules, "100005", "filter", "m")["fixed_qty"] == 2
-
-
-def test_criticality_filter_excludes_a_non_matching_row():
-    rules = [rule("category", "filter", crit="h", policy="fixed_qty", qty=4)]
-    assert DR.resolve(rules, "100005", "filter", "h")["fixed_qty"] == 4
-    assert DR.resolve(rules, "100005", "filter", "m") is None
-
-
-def test_blank_criticality_matches_anything():
-    rules = [rule("category", "filter", crit="", policy="fixed_qty", qty=4)]
-    for crit in ("h", "m", "l", "", None):
-        assert DR.resolve(rules, "100005", "filter", crit) is not None
+def test_item_rule_wins_however_the_table_is_ordered():
+    """Scope is the whole contract. No priority number can invert it, which is
+    the point of deleting that column: a per-part exception always holds."""
+    rules = [rule("item", "100005", policy="fixed_qty", qty=9),
+             rule("category", "filter", policy="fixed_qty", qty=2)]
+    assert DR.resolve(rules, "100005", "filter")["fixed_qty"] == 9
+    assert DR.resolve(rules[::-1], "100005", "filter")["fixed_qty"] == 9
 
 
 def test_uncategorised_row_never_matches_a_category_rule():
     """'' is meaningful: an uncategorised part is not silently every category."""
     rules = [rule("category", "", policy="fixed_qty", qty=4)]
-    assert DR.resolve(rules, "100005", "", "m") is None
+    assert DR.resolve(rules, "100005", "") is None
 
 
 def test_no_rules_resolves_to_none():
-    assert DR.resolve([], "100005", "filter", "m") is None
+    assert DR.resolve([], "100005", "filter") is None
 
 
 # --- apply -----------------------------------------------------------------
@@ -151,8 +140,8 @@ def test_rule_beats_the_critical_keepalive_branch():
 
 # --- the API: propose -> confirm -> engine reads ---------------------------
 
-BODY = {"scope": "category", "match_key": "filter", "criticality": "",
-        "policy": "fixed_qty", "fixed_qty": 2, "priority": 100}
+BODY = {"scope": "category", "match_key": "filter",
+        "policy": "fixed_qty", "fixed_qty": 2}
 
 
 def test_propose_is_pending_and_confirm_needs_a_second_person(client):

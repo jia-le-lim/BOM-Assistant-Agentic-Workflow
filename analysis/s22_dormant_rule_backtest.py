@@ -45,9 +45,9 @@ PKL = ROOT / "analysis" / "output" / "s20_payloads.pkl"
 OUT = ROOT / "analysis" / "output" / "s22_dormant_backtest.csv"
 
 
-def _rule(scope, key="", crit="", policy="hold_current", qty=None, priority=500):
-    return {"scope": scope, "match_key": key, "criticality": crit,
-            "policy": policy, "fixed_qty": qty, "priority": priority}
+def _rule(scope, key="", policy="hold_current", qty=None):
+    return {"scope": scope, "match_key": key, "policy": policy,
+            "fixed_qty": qty}
 
 
 # Candidate rule sets, written the way dormant_rule_config stores them rather
@@ -57,14 +57,12 @@ def _rule(scope, key="", crit="", policy="hold_current", qty=None, priority=500)
 # would have cost.
 ARMS: dict[str, list[dict]] = {
     "engine_only": [],
-    "hold_current": [_rule("default", policy="hold_current", priority=900)],
-    "fixed_1": [_rule("default", policy="fixed_qty", qty=1, priority=900)],
-    "hold_current_non_critical": [
-        # High-criticality dormant parts keep the engine's KEEP_ALIVE insurance
-        # branch: that one is a safety decision, not a wear-and-tear judgement.
-        _rule("default", crit="h", policy="zero", priority=100),
-        _rule("default", policy="hold_current", priority=900),
-    ],
+    "hold_current": [_rule("default", policy="hold_current")],
+    "fixed_1": [_rule("default", policy="fixed_qty", qty=1)],
+    # A "hold_current except high-criticality" arm used to sit here. Rules no
+    # longer carry a criticality filter (owner decision, 2026-09-04: scope alone
+    # decides, no priority number), so the arm can no longer be expressed as a
+    # row an engineer would confirm -- and an arm you cannot ship is not an arm.
 }
 
 
@@ -140,10 +138,12 @@ def _selfcheck() -> None:
     rules = [_rule("default"),
              _rule("category", "filter", policy="fixed_qty", qty=2),
              _rule("item", "X", policy="fixed_qty", qty=9)]
-    assert DR.resolve(rules, "X", "filter", "m")["fixed_qty"] == 9
-    assert DR.resolve(rules, "Y", "filter", "m")["fixed_qty"] == 2
-    assert DR.resolve(rules, "Y", "cable", "m")["scope"] == "default"
-    assert DR.resolve([_rule("category", "filter", crit="h")], "Y", "filter", "m") is None
+    assert DR.resolve(rules, "X", "filter")["fixed_qty"] == 9
+    assert DR.resolve(rules, "Y", "filter")["fixed_qty"] == 2
+    assert DR.resolve(rules, "Y", "cable")["scope"] == "default"
+    # an uncategorised part skips the category tier rather than matching it
+    assert DR.resolve(rules, "Y", "")["scope"] == "default"
+    assert DR.resolve([_rule("category", "filter")], "Y", "") is None
 
     assert DR.apply(_rule("default", policy="hold_current"), 7) == (7, 7, 7)
     assert DR.apply(_rule("default", policy="hold_current"), float("nan")) is None

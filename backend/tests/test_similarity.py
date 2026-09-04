@@ -404,81 +404,6 @@ def test_search_similar_reviews_finds_a_comment(client, synth_csv):
     assert ctx.sources
 
 
-def test_outlier_blocks_clear_candidate(monkeypatch):
-    """Asymmetry: peer evidence may add risk, never cancel a rule."""
-    from app.agent.specialists import synthesis
-    from app.llm.provider import Response
-
-    class ClearProvider:
-        name, model = "stub", "stub-1"
-
-        def chat(self, messages, tools):
-            return Response(content='{"tier":"clear_candidate",'
-                                    '"priority_score":10,"rationale":"fine",'
-                                    '"confidence":1,"focus_question":"none"}')
-
-    monkeypatch.setattr("app.agent.specialists.get_provider",
-                        lambda: ClearProvider())
-    verdict = synthesis({
-        "recommendation": {"item_id": "X", "agreement": "match",
-                           "risk_level": "Low", "confidence": 0.95},
-        "features": {"critical": False, "high_exposure": False,
-                     "similarity_outlier": True, "similarity_elevated": False},
-        "clear_confidence_threshold": 0.8,
-    })
-    assert verdict["triage_tier"] == "review"
-
-
-def test_elevated_peers_raise_priority_only(monkeypatch):
-    from app.agent.specialists import synthesis
-    from app.llm.provider import Response
-
-    class Provider:
-        name, model = "stub", "stub-1"
-
-        def chat(self, messages, tools):
-            return Response(content='{"tier":"review","priority_score":50,'
-                                    '"rationale":"r","confidence":0.5,'
-                                    '"focus_question":"q"}')
-
-    monkeypatch.setattr("app.agent.specialists.get_provider", lambda: Provider())
-    state = {
-        "recommendation": {"item_id": "X", "agreement": "match",
-                           "risk_level": "Low", "confidence": 0.5},
-        "features": {"critical": False, "high_exposure": False,
-                     "similarity_outlier": False, "similarity_elevated": True},
-        "clear_confidence_threshold": 0.8,
-    }
-    assert synthesis(state)["priority_score"] == 65
-
-    state["features"]["similarity_elevated"] = False
-    assert synthesis(state)["priority_score"] == 50
-
-
-def test_synthesis_tolerates_absent_similarity_keys(monkeypatch):
-    """Callers that predate this feature pass a features dict without the two
-    similarity keys; .get() must keep them working."""
-    from app.agent.specialists import synthesis
-    from app.llm.provider import Response
-
-    class Provider:
-        name, model = "stub", "stub-1"
-
-        def chat(self, messages, tools):
-            return Response(content='{"tier":"review","priority_score":42,'
-                                    '"rationale":"r","confidence":0.5,'
-                                    '"focus_question":"q"}')
-
-    monkeypatch.setattr("app.agent.specialists.get_provider", lambda: Provider())
-    verdict = synthesis({
-        "recommendation": {"item_id": "X", "agreement": "match",
-                           "risk_level": "Low", "confidence": 0.5},
-        "features": {"critical": False, "high_exposure": False},
-        "clear_confidence_threshold": 0.8,
-    })
-    assert verdict["priority_score"] == 42
-
-
 def test_a_peer_appears_once_however_many_months_it_was_reviewed(client, db_file):
     """The roster repeats monthly. Without collapsing to the latest decision per
     stocking row, one part reviewed six times fills six of seven neighbour slots
@@ -678,14 +603,6 @@ def test_feature_weights_are_untouched_by_the_category():
     assert sum(S.FEATURE_WEIGHTS.values()) == pytest.approx(1.0)
     assert "part_category" not in S.FEATURE_WEIGHTS
     assert "part_category" not in S.FEATURES
-
-
-def test_triage_still_runs_without_similarity(client, synth_csv):
-    """Similarity is optional; triage must not depend on it having been run."""
-    batch_id = scored_batch(client, synth_csv)
-    r = client.post("/triage/run", json={"batch_id": batch_id}, headers=ENG)
-    assert r.status_code == 200, r.text
-    assert r.json()["triaged"] > 0
 
 
 def test_neighbours_carry_the_peer_description(client, synth_csv, db_file):

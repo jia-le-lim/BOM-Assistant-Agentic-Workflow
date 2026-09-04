@@ -53,9 +53,10 @@ def _scored(client, monkeypatch, rows) -> int:
 # --- step order and evidence ----------------------------------------------
 
 def test_no_agent_framework_is_imported():
-    """Four ordered calls need no framework. langgraph stays where it earns its
-    keep (agent/graph.py); the langchain umbrella is not installed at all and
-    adding it needs an offline-mirror install on the Intel network."""
+    """Four ordered calls need no framework. langgraph was removed with the
+    unused triage graph (2026-09-04) and the langchain umbrella was never
+    installed -- adding one needs an offline-mirror install on the Intel
+    network, so an accidental import must fail loudly here first."""
     from pathlib import Path
     source = Path(chain.__file__).read_text(encoding="utf-8")
     for banned in ("import langchain", "import langgraph", "langchain_openai"):
@@ -306,3 +307,37 @@ def test_the_model_is_never_shown_a_suggested_number(client, monkeypatch, db_fil
     bid = _scored(client, monkeypatch, [_live("L1")])
     client.post(f"/assist/run?batch_id={bid}", headers=ENG)
     assert seen and all("suggested_max" not in payload for payload in seen)
+
+
+# --- narrative formatting (moved here with _plain, 2026-09-04) -------------
+
+def test_narratives_are_plain_prose_and_capped():
+    """A model that returns markdown renders as literal source text in the card,
+    and one that ignores the length rule buries the sentence that matters."""
+    raw = ("## Review History\n\n| item | max |\n| --- | --- |\n"
+           "- **bold point** with `code`\n\nfor item 500794916: ## Findings\n\n"
+           + "Long sentence padding. " * 40)
+    out = chain._plain(raw)
+    assert len(out) <= chain.MAX_NARRATIVE_CHARS
+    for marker in ("|", "##", "**", "`"):
+        assert marker not in out
+    assert "- " not in out
+
+
+def test_plain_caps_at_a_sentence_boundary():
+    long = "First sentence here. " + "Padding sentence. " * 40
+    out = chain._plain(long)
+    assert len(out) <= chain.MAX_NARRATIVE_CHARS
+    assert out.endswith(".") or out.endswith("\u2026")
+
+
+def test_plain_handles_empty_and_none():
+    assert chain._plain("") == ""
+    assert chain._plain(None) == ""
+
+
+def test_ordinary_hashes_and_duplicate_suffixes_survive():
+    """Ingestion writes duplicate keys as item#dup1; '#3' is ordinary prose.
+    Only a run of 2+ hashes followed by a space is a heading."""
+    assert "500699364#dup1" in chain._plain("Row 500699364#dup1 diverged.")
+    assert "#3" in chain._plain("Cycle #3 was overridden.")

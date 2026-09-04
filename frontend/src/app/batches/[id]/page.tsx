@@ -8,14 +8,14 @@ import { can, useSession } from "@/lib/session";
 import type {
   AssistPage, AssistRunSummary,
   BatchSummary, BulkReviewResult, Recommendation, RecommendationPage, RuleConfig, RunSummary,
-  Status, TriagePage,
+  Status,
 } from "@/lib/types";
 import {
   AgreementChip, ASSIST_VERDICT, Banner, BusyLabel, ConsumableChip, Progress,
   ReasonCodes, RiskChip, StatTile, StatusChip, TableSkeleton,
 } from "@/components/ui";
 import { WorkflowPipeline } from "@/components/WorkflowPipeline";
-import { AgentTriage, PriorityCallout, TriageLanes } from "@/components/TriageLanes";
+import { PriorityCallout, TriageLanes } from "@/components/TriageLanes";
 
 const PAGE = 25;
 
@@ -34,7 +34,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
 
   const [summary, setSummary] = useState<BatchSummary | null>(null);
   const [page, setPage] = useState<RecommendationPage | null>(null);
-  const [triage, setTriage] = useState<TriagePage | null>(null);
   const [assist, setAssist] = useState<AssistPage | null>(null);
   const [ruleConfig, setRuleConfig] = useState<RuleConfig | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -111,12 +110,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     finally { setRefreshing(false); }
   }, [call, batchId, query, offset]);
 
-  const loadTriage = useCallback(async () => {
-    if (!canReview) { setTriage(null); return; }
-    try { setTriage(await call<TriagePage>(`triage/${batchId}`)); }
-    catch (e) { setErr((e as Error).message); }
-  }, [call, batchId, canReview]);
-
   const loadAssist = useCallback(async () => {
     try { setAssist(await call<AssistPage>(`assist/${batchId}`)); }
     catch { setAssist(null); }
@@ -143,10 +136,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     return () => window.cancelAnimationFrame(frame);
   }, [loadPage]);
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => { void loadTriage(); });
-    return () => window.cancelAnimationFrame(frame);
-  }, [loadTriage]);
-  useEffect(() => {
     const frame = window.requestAnimationFrame(() => { void loadRuleConfig(); });
     return () => window.cancelAnimationFrame(frame);
   }, [loadRuleConfig]);
@@ -160,8 +149,8 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const needsHuman = (statuses.pending_review ?? 0) + (statuses.awaiting_senior ?? 0);
 
   const refresh = useCallback(async () => {
-    await Promise.all([loadSummary(), loadPage(), loadTriage(), loadAssist()]);
-  }, [loadSummary, loadPage, loadTriage, loadAssist]);
+    await Promise.all([loadSummary(), loadPage(), loadAssist()]);
+  }, [loadSummary, loadPage, loadAssist]);
 
   const verdicts = useMemo(() => {
     const out = new Map<string, AssistPage["items"][number]>();
@@ -218,24 +207,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     if (r.skipped) bits.push(`${r.skipped} already decided`);
     if (r.failed.length) bits.push(`${r.failed.length} failed`);
     return bits.join(", ");
-  }
-
-  async function acceptGuardedTriage() {
-    setBusyAction("guarded"); setErr(null); setNote(null);
-    try {
-      const r = await call<BulkReviewResult>("review/bulk", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batch_id: batchId, decision: "accept",
-          justification: "bulk: human-confirmed guarded triage candidates",
-          filters: { triage_preselect: true },
-        }),
-      });
-      setNote(`Guarded triage selection — ${summarise(r)}.`);
-      setSelected(new Set());
-      await refresh();
-    } catch (e) { setErr((e as Error).message); }
-    finally { setBusyAction(null); }
   }
 
   async function bulkSelected(decision: "accept" | "reject") {
@@ -566,11 +537,6 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
             </div>
           )}
         </div>
-              {canReview && triage && (
-                <AgentTriage batchId={batchId} triage={triage} busy={busy}
-                             guardedAssist={Boolean(ruleConfig?.config.triage_guarded_assist_enabled)}
-                             onGuardedAccept={acceptGuardedTriage} />
-              )}
         </div>
 
         {summary && isScored && (
