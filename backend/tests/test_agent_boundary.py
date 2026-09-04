@@ -7,6 +7,12 @@ explicit tests rather than being implied by the happy path.
   4. no retrieved source -> "I don't know"
   5. read-only roles are never even offered the write tool
   6. mem0 stays off and uninvoked by default
+  7. an action card is staged, never executed
+
+Property 7 arrived with the intent router (agent/graph.py), which let chat reach
+the review queue. It is asserted next to the rest of the router's behaviour, in
+test_chat_graph.py::test_action_card_records_nothing -- it needs the graph's
+fixtures, and splitting it from the branch tests would hide what it guards.
 """
 
 import json

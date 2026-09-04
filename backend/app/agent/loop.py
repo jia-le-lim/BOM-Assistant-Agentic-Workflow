@@ -17,6 +17,19 @@ sources of truth for approval state, which the audit requirement rules out.
 So: one branch (call a tool or answer), depth capped, state in an explicit
 AgentState. That shape is LangGraph-compatible if this ever grows into a real
 multi-step planner -- the tool registry would not change, only the driver.
+
+What changed
+------------
+agent/graph.py now sits in front of this loop and decides which SUBSET of tools
+it is given, because the registry outgrew a single flat list -- 21 specs on
+every model call is more than a routing layer can discriminate. It was the
+driver that changed, exactly as the paragraph above predicted; run_agent's
+signature already carried system_prompt and tool_names, so nothing here moved.
+
+The rest of the argument stands and is not up for revisiting: that graph does
+not wrap the engine or the assist chain, and it does not checkpoint.
+Conversation state stays in `conversation_turn` and approval state stays in
+`review_history`, for the reasons given above.
 """
 
 from __future__ import annotations

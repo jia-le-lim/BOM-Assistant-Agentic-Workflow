@@ -300,12 +300,37 @@ export interface DormantRuleCoverage {
   confirmed_rules: number;
 }
 
+/** Which branch of the agent graph answered. Read-only detail for the trace
+ *  panel — the backend enforces what each branch may reach. */
+export type ChatIntent =
+  "lookup" | "assist" | "advisory" | "propose" | "action" | "unknown";
+
+/**
+ * A review-queue action the agent staged for a human to press. It is not a
+ * decision and it is not executed: pressing confirm calls the same review
+ * endpoint the console tray calls, under the engineer's own role. `executed`
+ * is typed as the literal `false` so a card claiming otherwise cannot compile.
+ */
+export interface StagedAction {
+  kind: "confirm_pending" | "discard_pending";
+  item_id: string;
+  batch_id: number | null;
+  stockroom_id: string | null;
+  pending_id: number | null;
+  proposed_max: number | null;
+  proposed_rop: number | null;
+  proposed_min: number | null;
+  executed: false;
+}
+
 export interface ChatResponse {
   answer: string;
   sources: Record<string, unknown>[];
   batch_id: number | null;
   session_id: string;
   turn_id: number;
+  intent: ChatIntent;
+  staged_action: StagedAction | null;
   next_steps?: NextStepPrediction | null;
 }
 
@@ -365,6 +390,8 @@ export interface ChatStreamComplete extends ChatResponse {
 export type ChatStreamEvent =
   | { type: "request"; query: string; batch_id: number | null;
       provider: string; model: string }
+  | { type: "classify"; intent: ChatIntent; provider: string; model: string }
+  | { type: "intent_downgraded"; from: ChatIntent; reason: string }
   | { type: "model_start"; attempt: number; phase: string;
       provider: string; model: string }
   | { type: "model_complete"; attempt: number; summary: string }

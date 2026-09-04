@@ -8,6 +8,13 @@ There is exactly one write tool, `propose_change`, and it writes only to
 `pending_change`. It cannot reach `review_history`, so it cannot produce a row
 that `build_export()` would ever put in a WINGS file. That boundary is the
 whole design; `tests/test_agent_boundary.py` asserts it.
+
+Two tools are gated rather than free. `run_assist` starts the assist chain,
+which spends one model call per live row, so it refuses until an engineer
+confirms the row count. `stage_review_action` builds an action CARD and
+executes nothing -- confirming it is a human click against the review endpoint,
+which is what keeps the boundary above true while chat can still reach the
+review queue.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from typing import Any, Callable
 from ..db import Conn, active_config
 from ..llm.provider import ToolSpec
 from ..redact import prompt_redaction_on, redact_for_prompt
+from ..security import REVIEW_ROLES
 from ..services import (AmbiguousItem, current_values, derive_status,
                         latest_reviews, resolve_rec)
 
@@ -41,6 +49,19 @@ class ToolError(Exception):
 
 
 EMPTY: dict[str, Any] = {"_empty": True}
+
+
+def _require_review_role(ctx: "ToolContext", what: str) -> None:
+    """Match the REST twin's gate.
+
+    Several of these tools are the chat-side copy of an endpoint that is
+    `require_role(*REVIEW_ROLES)` -- peer evidence and dormant coverage name
+    other engineers' decisions and batch book value. A tool that reads the same
+    rows without the same check makes /chat a way around the endpoint.
+    """
+    if ctx.actor.get("role") not in REVIEW_ROLES:
+        raise ToolError(f"{what} needs a review role; this account has "
+                        f"read-only access.")
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +440,159 @@ def recall_context(ctx: ToolContext, query: str) -> dict:
             "caveat": "recalled working context, not a system record"}
 
 
+def get_assist_verdict(ctx: ToolContext, item_id: str,
+                       batch_id: int | None = None,
+                       stockroom_id: str | None = None) -> dict:
+    """The assist layer's advisory verdict for one row.
+
+    Advisory on the same terms as the endpoint that serves the console
+    (routers/assist.py): it names which rows deserve attention first and never
+    changes a level. `suggested_max`/`suggested_rop` come from assist.rules,
+    never from a model -- see assist/chain._evaluate.
+    """
+    bid = batch_id or ctx.batch_id
+    rec = _resolve(ctx, bid, item_id, stockroom_id)
+    if rec is None:
+        return EMPTY
+    row = ctx.conn.execute(
+        "SELECT batch_id, item_id, stockroom_id, verdict, reasons_json, "
+        "narrative, suggested_max, suggested_rop, suggestion_basis, "
+        "model_version, assisted_at FROM assist_result "
+        "WHERE batch_id=? AND item_id=? AND stockroom_id=?",
+        (bid, rec["item_id"], rec["stockroom_id"])).fetchone()
+    if row is None:
+        return EMPTY
+    out = dict(row)
+    out["reasons"] = json.loads(out.pop("reasons_json") or "[]")
+    ctx.sources.append({"type": "assist_result", "batch_id": bid,
+                        "item_id": rec["item_id"]})
+    out["note"] = ("advisory verdict; it changes no stock level and records "
+                   "no decision")
+    return out
+
+
+def list_assist_queue(ctx: ToolContext, batch_id: int | None = None,
+                      verdict: str | None = None, limit: int = 10) -> dict:
+    """Assisted rows for a batch, optionally one verdict only.
+
+    Counts are over the whole batch, not the returned page: "how many are
+    flagged" and "show me the flagged ones" are the same question asked twice,
+    and a count that changed with `limit` would answer the first one wrongly.
+    """
+    from ..assist import rules as assist_rules
+
+    bid = batch_id or ctx.batch_id
+    if verdict is not None and verdict not in assist_rules.VERDICTS:
+        raise ToolError(f"verdict must be one of "
+                        f"{list(assist_rules.VERDICTS)}.")
+    limit = max(1, min(int(limit), 25))
+    counts = {v: 0 for v in assist_rules.VERDICTS}
+    for row in ctx.conn.execute(
+            "SELECT verdict, COUNT(*) AS n FROM assist_result "
+            "WHERE batch_id=? GROUP BY verdict", (bid,)):
+        if row["verdict"] in counts:
+            counts[row["verdict"]] = row["n"]
+    if not any(counts.values()):
+        return EMPTY
+
+    sql = ("SELECT item_id, stockroom_id, verdict, reasons_json, narrative, "
+           "suggested_max, suggested_rop, suggestion_basis FROM assist_result "
+           "WHERE batch_id=?")
+    params: list = [bid]
+    if verdict:
+        sql += " AND verdict=?"
+        params.append(verdict)
+    params.append(limit)
+    items = []
+    for row in ctx.conn.execute(sql + " ORDER BY item_id LIMIT ?", params):
+        out = dict(row)
+        out["reasons"] = json.loads(out.pop("reasons_json") or "[]")
+        items.append(out)
+    ctx.sources.append({"type": "assist_result", "batch_id": bid,
+                        "count": len(items)})
+    return {"batch_id": bid, "items": items, "counts": counts,
+            "note": "advisory verdicts; no row here has been decided"}
+
+
+def get_similarity_outliers(ctx: ToolContext, batch_id: int | None = None,
+                            limit: int = 10) -> dict:
+    """The batch's peer outliers, ranked.
+
+    The batch-level companion to get_similar_parts, which answers the same
+    question for ONE item. Advisory evidence: an outlier is a row whose peers
+    disagree with it, not a row whose level is wrong.
+    """
+    _require_review_role(ctx, "Peer outlier evidence")
+    bid = batch_id or ctx.batch_id
+    limit = max(1, min(int(limit), 25))
+    rows = [dict(r) for r in ctx.conn.execute(
+        "SELECT item_id, stockroom_id, neighbour_count, is_outlier, "
+        "outlier_score, historical_override_rate, advisory_codes "
+        "FROM similarity_result WHERE batch_id=? AND is_outlier=1 "
+        "ORDER BY outlier_score DESC, item_id LIMIT ?", (bid, limit))]
+    if not rows:
+        return EMPTY
+    ctx.sources.append({"type": "similarity_result", "batch_id": bid,
+                        "count": len(rows)})
+    return {"batch_id": bid, "items": rows,
+            "note": "advisory peer evidence; never a recommended level"}
+
+
+def get_dormant_coverage(ctx: ToolContext, batch_id: int | None = None) -> dict:
+    """How much of the dormant tail the confirmed rules cover, and what it costs.
+
+    The read half of GET /config/dormant-rules/coverage. Coverage alone is not
+    the decision, so the book value against what the engine itself said is
+    reported beside it -- a rule set that raises agreement while adding stock is
+    not obviously a win, and the engineer is the one who weighs that.
+    """
+    from .. import dormant_rules
+    from ..part_category import categorise
+    from ..part_category import load_rules as load_category_rules
+
+    _require_review_role(ctx, "Dormant-rule coverage")
+    bid = batch_id or ctx.batch_id
+    rules = dormant_rules.load_rules(ctx.conn)
+    category_rules, _broken = load_category_rules(ctx.conn)
+    matched = total = 0
+    engine_usd = rule_usd = 0.0
+    for row in ctx.conn.execute(
+            "SELECT r.new_max, b.payload FROM recommendation_result r "
+            "JOIN bom_rows b ON b.batch_id=r.batch_id "
+            "AND b.item_id=r.item_id AND b.stockroom_id=r.stockroom_id "
+            "WHERE r.batch_id=? AND r.route='dormant'", (bid,)):
+        payload = json.loads(row["payload"])
+        total += 1
+        try:
+            price = float(payload.get("unitprice") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        engine_max = int(row["new_max"] or 0)
+        engine_usd += price * engine_max
+        rule = dormant_rules.resolve(
+            rules, payload.get("item_id"),
+            categorise(payload.get("item_desc"), category_rules))
+        applied = dormant_rules.apply(rule, payload.get("max_qty"))
+        if applied is None:
+            rule_usd += price * engine_max
+            continue
+        matched += 1
+        rule_usd += price * applied[2]
+    if not total:
+        return EMPTY
+    ctx.sources.append({"type": "dormant_rule_config", "batch_id": bid,
+                        "confirmed_rules": len(rules)})
+    return {"batch_id": bid, "dormant_rows": total, "matched": matched,
+            "uncovered": total - matched,
+            "pct": round(100 * matched / total, 1),
+            "engine_book_usd": round(engine_usd, 2),
+            "proposed_book_usd": round(rule_usd, 2),
+            "delta_usd": round(rule_usd - engine_usd, 2),
+            "confirmed_rules": len(rules),
+            "note": "a rule takes effect on the next engine run; a scored "
+                    "batch keeps the numbers its reviewer saw"}
+
+
 # ---------------------------------------------------------------------------
 # the single write tool
 # ---------------------------------------------------------------------------
@@ -477,6 +651,135 @@ def propose_change(ctx: ToolContext, item_id: str,
             "proposed_min": proposed_min, "status": "pending",
             "note": "staged only; a human must confirm before this can be "
                     "reviewed, approved or exported"}
+
+
+# ---------------------------------------------------------------------------
+# gated tools
+#
+# Neither of these is a plain read, and neither is a decision. `run_assist`
+# spends real money, so it costs a confirmation. `stage_review_action` touches
+# the review queue, so it produces a CARD and stops -- the write itself is a
+# human click against routers/review.py, which is what keeps this module's
+# opening promise true while chat can still reach the queue.
+# ---------------------------------------------------------------------------
+
+def run_assist(ctx: ToolContext, batch_id: int | None = None,
+               confirm: bool = False, refresh_peers: bool = False) -> dict:
+    """Start the assist chain for a batch. Refuses until confirmed.
+
+    One model call per live row: on a real monthly extract that is thousands.
+    The gate is here rather than in the prompt because a prompt cannot stop a
+    model that has already decided to call the tool.
+
+    Peers run first when the batch has none, for the same reason
+    POST /assist/run does it: `peers` is one of the chain's five evidence
+    sources, so assisting without it silently drops a source and changes the
+    verdict.
+    """
+    from ..assist.chain import live_rows, run_batch
+    from ..audit import audit
+    from ..similarity import run_similarity
+
+    if ctx.actor.get("role") not in REVIEW_ROLES:
+        raise ToolError("Running assist needs a review role; this account has "
+                        "read-only access.")
+    bid = batch_id or ctx.batch_id
+    if bid is None:
+        raise ToolError("No scored batch to assist. Name a batch id.")
+    if ctx.conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
+                        (bid,)).fetchone() is None:
+        raise ToolError(f"Batch {bid} does not exist.")
+
+    rows = live_rows(ctx.conn, bid)
+    if not confirm:
+        # The row count IS retrieved data, so it is a source. Without one,
+        # loop.run_agent's no-source control (PRD section 8) replaces the whole
+        # answer with "I don't know" -- and the engineer never learns the count
+        # they are being asked to approve, which makes the gate unpassable.
+        ctx.sources.append({"type": "assist_gate", "batch_id": bid,
+                            "live_rows": len(rows), "ran": False})
+        return {"gated": True, "batch_id": bid, "live_rows": len(rows),
+                "estimated_model_calls": len(rows),
+                "note": "not run; tell the engineer the row count and ask them "
+                        "to confirm before calling this again with confirm=true"}
+
+    similarity = None
+    has_peers = ctx.conn.execute(
+        "SELECT 1 FROM similarity_result WHERE batch_id=? LIMIT 1",
+        (bid,)).fetchone() is not None
+    if refresh_peers or not has_peers:
+        try:
+            similarity = run_similarity(ctx.conn, bid, refresh_peers)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        audit(ctx.conn, ctx.actor, "POST", "/chat", "similarity", bid,
+              similarity)
+    summary = run_batch(ctx.conn, bid, ctx.actor, active_config(ctx.conn))
+    summary["similarity"] = similarity
+    audit(ctx.conn, ctx.actor, "POST", "/chat", "assist", bid, summary)
+    ctx.sources.append({"type": "assist_result", "batch_id": bid,
+                        "rows_assisted": summary["rows_assisted"]})
+    return summary
+
+
+# `open_review` is deliberately absent: a card that only says "go look at this
+# row" needs a navigation handler the console does not have, and one that
+# renders two live buttons doing nothing is worse than no card. Add it with the
+# handler, not before.
+ALLOWED_ACTIONS = ("confirm_pending", "discard_pending")
+
+
+def stage_review_action(ctx: ToolContext, kind: str, item_id: str,
+                        pending_id: int | None = None,
+                        batch_id: int | None = None,
+                        stockroom_id: str | None = None) -> dict:
+    """Build the card an engineer presses. Never press it.
+
+    The card is validated against the same three checks confirm_pending makes
+    (routers/review.py), so a card can never be offered for an action the
+    endpoint would reject -- an engineer who clicks must not get a 400.
+
+    What this does NOT do is call that endpoint. The write stays a human action
+    from the console session's own credentials, which is why `review_history`
+    is still unreachable from here.
+    """
+    if kind not in ALLOWED_ACTIONS:
+        raise ToolError(f"kind must be one of {list(ALLOWED_ACTIONS)}.")
+    bid = batch_id or ctx.batch_id
+    action: dict[str, Any] = {"kind": kind, "item_id": item_id,
+                              "batch_id": bid, "stockroom_id": stockroom_id,
+                              "pending_id": pending_id,
+                              "proposed_max": None, "proposed_rop": None,
+                              "proposed_min": None}
+
+    if pending_id is None:
+        raise ToolError(f"{kind} needs the pending_id of the staged proposal. "
+                        f"Ask which one they mean.")
+    p = ctx.conn.execute("SELECT * FROM pending_change WHERE pending_id=?",
+                         (pending_id,)).fetchone()
+    if p is None:
+        raise ToolError(f"There is no pending change {pending_id}.")
+    if p["status"] != "pending":
+        raise ToolError(f"Pending change {pending_id} is already "
+                        f"{p['status']}; it cannot be confirmed again.")
+    if p["item_id"] != item_id:
+        raise ToolError(f"Pending change {pending_id} is for item "
+                        f"{p['item_id']}, not {item_id}.")
+    action.update({"batch_id": p["batch_id"],
+                   "stockroom_id": p["stockroom_id"],
+                   "proposed_max": p["proposed_max"],
+                   "proposed_rop": p["proposed_rop"],
+                   "proposed_min": p["proposed_min"]})
+
+    # The whole card goes on ctx.sources, not just a breadcrumb. `sources` is
+    # the only channel out of a tool that reaches the HTTP response -- the
+    # return value below becomes a `tool` message and dies with the loop. A
+    # source carrying just the ids would render a card whose proposed levels
+    # are undefined, and the console would post those as zeros.
+    ctx.sources.append({"type": "staged_action", **action, "executed": False})
+    return {"staged_action": action, "executed": False,
+            "note": "nothing has been recorded; the engineer must press "
+                    "confirm, and an override still needs senior approval"}
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +926,78 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
         {"type": "object", "properties": {"query": {"type": "string"}},
          "required": ["query"]}), recall_context),
 
+    "get_assist_verdict": (ToolSpec(
+        "get_assist_verdict",
+        "The ADVISORY assist verdict for one item -- flag_for_review, "
+        "bulk_accept_candidate or needs_context -- with its reasons and the "
+        "one-sentence narrative. Use for 'what does assist say', 'should I "
+        "look at this row'. NOT what the ENGINE recommends -- that is "
+        "get_recommendation.",
+        {"type": "object", "properties": {"item_id": _ITEM, "batch_id": _BATCH,
+                                          "stockroom_id": _STOCK},
+         "required": ["item_id"]}), get_assist_verdict),
+
+    "list_assist_queue": (ToolSpec(
+        "list_assist_queue",
+        "LIST or COUNT assisted rows for a batch, optionally one verdict only. "
+        "Use for 'what did assist flag', 'how many are bulk-accept'. NOT the "
+        "engine's own queue or risk filters -- that is list_review_queue.",
+        {"type": "object", "properties": {
+            "batch_id": _BATCH,
+            "verdict": {"type": "string",
+                        "enum": ["flag_for_review", "bulk_accept_candidate",
+                                 "needs_context"]},
+            "limit": {"type": "integer", "description": "1-25"}}}),
+        list_assist_queue),
+
+    "get_similarity_outliers": (ToolSpec(
+        "get_similarity_outliers",
+        "The batch's peer OUTLIERS, ranked -- rows whose comparable parts "
+        "disagree with them. Use for 'which items are unusual', 'show me the "
+        "outliers'. NOT one item's own peers -- that is get_similar_parts.",
+        {"type": "object", "properties": {
+            "batch_id": _BATCH,
+            "limit": {"type": "integer", "description": "1-25"}}}),
+        get_similarity_outliers),
+
+    "get_dormant_coverage": (ToolSpec(
+        "get_dormant_coverage",
+        "How many dormant rows the confirmed dormant rules match, and the book "
+        "value that implies against the engine's own answer. Use for 'dormant "
+        "coverage', 'how much of the tail do our rules cover'. NOT the active "
+        "rule thresholds -- that is explain_rules.",
+        {"type": "object", "properties": {"batch_id": _BATCH}}),
+        get_dormant_coverage),
+
+    "run_assist": (ToolSpec(
+        "run_assist",
+        "Start the assist chain for a batch. It costs one model call per live "
+        "row, so calling it WITHOUT confirm returns the row count and runs "
+        "nothing -- report that count and ask the engineer before calling "
+        "again with confirm=true. Never pass confirm=true on your own "
+        "initiative.",
+        {"type": "object", "properties": {
+            "batch_id": _BATCH,
+            "confirm": {"type": "boolean",
+                        "description": "Only true after the engineer has "
+                                       "agreed to the row count"},
+            "refresh_peers": {"type": "boolean"}}}), run_assist),
+
+    "stage_review_action": (ToolSpec(
+        "stage_review_action",
+        "Stage a review-queue action as a CARD for the engineer to press: "
+        "confirm or discard a staged proposal. This records nothing and "
+        "decides nothing -- the engineer clicks. Use for 'confirm that "
+        "change', 'discard pending 4'. Treat 'cancel' as discard.",
+        {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": list(ALLOWED_ACTIONS)},
+            "item_id": _ITEM,
+            "pending_id": {"type": "integer",
+                           "description": "The staged proposal to act on"},
+            "batch_id": _BATCH,
+            "stockroom_id": _STOCK},
+         "required": ["kind", "item_id"]}), stage_review_action),
+
     "propose_change": (ToolSpec(
         "propose_change",
         "Stage a stock-level change the engineer has explicitly stated. Only "
@@ -641,6 +1016,38 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
 }
 
 READ_ONLY_TOOLS = frozenset(REGISTRY) - {"propose_change"}
+
+
+# Which tools each graph branch offers. Subsetting is the point of the graph:
+# 21 specs on every model call is more than the routing layer can discriminate,
+# and a branch that cannot SEE propose_change cannot stage anything, whatever
+# the model decides it wants. See agent/graph.py.
+INTENT_TOOLS: dict[str, frozenset[str]] = {
+    "lookup": frozenset({
+        "get_recommendation", "get_current_values", "get_item_history",
+        "get_item_notes", "get_agreement_history", "get_triage_context",
+        "get_procurement_context", "search_similar_reviews", "top_exposure",
+        "list_review_queue", "batch_summary", "explain_rules",
+        "recall_context"}),
+    "assist": frozenset({
+        "get_assist_verdict", "list_assist_queue", "run_assist",
+        "batch_summary"}),
+    "advisory": frozenset({
+        "get_similar_parts", "get_similarity_outliers", "get_dormant_coverage",
+        "explain_rules"}),
+    "propose": frozenset({
+        "propose_change", "get_current_values", "get_recommendation"}),
+    "action": frozenset({"stage_review_action", "get_current_values"}),
+    "unknown": frozenset(),
+}
+
+# Branches a read-only role may never be routed into. graph.classify downgrades
+# to `lookup` rather than refusing, so a viewer still gets an answer -- they
+# just cannot reach a tool that writes or stages.
+#
+# `assist` is deliberately absent: it also serves pure reads, and run_assist
+# carries its own role check rather than closing the branch to viewers.
+WRITE_INTENTS = frozenset({"propose", "action"})
 
 
 def specs(allow_writes: bool,

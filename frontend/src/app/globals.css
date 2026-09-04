@@ -327,6 +327,106 @@ body {
 .drawer { position: fixed; inset: 0 auto 0 0; z-index: 41; }
 .drawer .side { height: 100vh; }
 
+/* Batch-scoped assistant: native details owns expand/collapse and keyboard
+   semantics; the panel stays above the queue without changing its layout. */
+.assistant-float {
+  position: fixed; right: 1.5rem; bottom: 1.5rem; z-index: 30;
+  color: var(--text-primary);
+}
+.assistant-float > summary {
+  display: flex; align-items: center; gap: 0.5rem;
+  width: max-content; margin-left: auto; padding: 0.8rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--seq) 65%, var(--border));
+  border-radius: 999px; background: var(--seq); color: #fff;
+  box-shadow: 0 12px 35px rgba(11, 11, 11, 0.22);
+  font-size: 0.85rem; font-weight: 650; cursor: pointer; list-style: none;
+}
+.assistant-float > summary::-webkit-details-marker { display: none; }
+.assistant-float > summary:hover { filter: brightness(1.08); }
+.assistant-float > summary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3px; }
+.assistant-panel {
+  position: absolute; right: 0; bottom: calc(100% + 0.75rem);
+  width: min(400px, calc(100vw - 2rem));
+  height: min(620px, calc(100dvh - 7rem));
+  display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 16px;
+  background: var(--surface-1);
+  box-shadow: 0 18px 60px rgba(11, 11, 11, 0.24);
+}
+.assistant-head {
+  display: flex; align-items: center; gap: 0.65rem; padding: 0.8rem 0.9rem;
+  border-bottom: 1px solid var(--gridline); background: var(--surface-1);
+}
+.assistant-mark {
+  width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center;
+  border-radius: 10px; background: var(--seq-soft); color: var(--seq);
+}
+.assistant-head > div { min-width: 0; display: flex; flex: 1; flex-direction: column; }
+.assistant-head strong { font-size: 0.82rem; }
+.assistant-head div span { overflow: hidden; color: var(--text-muted); font-size: 0.65rem;
+  white-space: nowrap; text-overflow: ellipsis; }
+.assistant-online { display: flex; align-items: center; gap: 0.3rem; color: var(--text-muted); font-size: 0.62rem; }
+.assistant-online i { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+.assistant-messages {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.9rem;
+  overflow-y: auto; padding: 1rem; background: var(--page); scroll-behavior: smooth;
+}
+.assistant-empty {
+  margin: auto; display: flex; flex-direction: column; align-items: center;
+  padding: 1.25rem; text-align: center;
+}
+.assistant-empty strong { margin-top: 0.8rem; font-size: 0.9rem; }
+.assistant-empty p { margin: 0.35rem 0 0; color: var(--text-muted); font-size: 0.72rem; line-height: 1.5; }
+.assistant-empty button {
+  margin-top: 0.9rem; border: 0; background: transparent; color: var(--seq);
+  font: inherit; font-size: 0.72rem; cursor: pointer;
+}
+.assistant-empty button:hover { text-decoration: underline; }
+.assistant-turn { display: flex; flex-direction: column; gap: 0.55rem; }
+.assistant-question {
+  align-self: flex-end; max-width: 84%; margin: 0; padding: 0.55rem 0.7rem;
+  border-radius: 11px 11px 3px 11px; background: var(--seq); color: #fff;
+  font-size: 0.78rem; line-height: 1.45;
+}
+.assistant-answer {
+  padding: 0.75rem; border: 1px solid var(--border); border-radius: 3px 11px 11px;
+  background: var(--surface-1);
+}
+.assistant-answer .chat-answer { font-size: 0.77rem; line-height: 1.5; }
+.assistant-answer .chat-table-wrap { max-width: 100%; overflow-x: auto; }
+.assistant-sources { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.65rem; }
+.assistant-sources :where(a, span) {
+  max-width: 100%; overflow: hidden; padding: 0.22rem 0.4rem;
+  border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted);
+  font-size: 0.58rem; white-space: nowrap; text-overflow: ellipsis;
+}
+.assistant-sources a:hover { color: var(--seq); border-color: var(--seq); }
+.assistant-staged, .assistant-error {
+  margin: 0.65rem 0 0; padding: 0.5rem; border-radius: 7px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface-1));
+  color: var(--text-secondary); font-size: 0.65rem; line-height: 1.4;
+}
+.assistant-thinking { display: flex; align-items: center; gap: 0.6rem; color: var(--text-muted); font-size: 0.7rem; }
+.assistant-error { background: color-mix(in srgb, var(--critical) 10%, var(--surface-1)); color: var(--critical); }
+.assistant-composer { padding: 0.75rem; border-top: 1px solid var(--gridline); }
+.assistant-composer textarea {
+  width: 100%; resize: none; padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--page);
+  color: var(--text-primary); font: inherit; font-size: 0.78rem; line-height: 1.4;
+}
+.assistant-composer textarea::placeholder { color: var(--text-muted); }
+.assistant-composer > div { display: flex; align-items: center; justify-content: space-between; margin-top: 0.5rem; }
+.assistant-composer a { color: var(--text-muted); font-size: 0.65rem; }
+.assistant-composer a:hover { color: var(--seq); text-decoration: underline; }
+.assistant-composer .btn { padding: 0.38rem 0.75rem; font-size: 0.72rem; }
+
+@media (max-width: 640px) {
+  .assistant-float { right: 1rem; bottom: 1rem; }
+  .assistant-panel { height: min(560px, calc(100dvh - 6rem)); }
+  .assistant-float > summary span { display: none; }
+  .assistant-float > summary { padding: 0.85rem; }
+}
+
 @media (min-width: 1024px) {
   .rail { display: block; }
   .topbar-burger { display: none; }
@@ -604,6 +704,50 @@ body {
   display: grid; place-items: center; border-radius: 50%;
   background: var(--warning); color: #392600; font-size: 0.65rem; font-weight: 800;
 }
+/* The action branch's card. Warning-toned like .staged-notice on purpose: both
+   say the same thing -- nothing has been recorded yet. */
+.action-card {
+  margin-top: 0.9rem; padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--page));
+  animation: rise-in 0.2s ease-out both;
+}
+.action-card-head { display: flex; flex-direction: column; gap: 0.1rem; }
+.action-card-head strong { color: var(--text-primary); font-size: 0.73rem; font-weight: 650; }
+.action-card-head span { color: var(--text-muted); font-size: 0.64rem; }
+.action-card-levels { display: flex; gap: 0.5rem; margin-top: 0.6rem; }
+.action-card-levels > span {
+  display: flex; flex-direction: column; gap: 0.05rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-1);
+}
+.action-card-levels small { color: var(--text-muted); font-size: 0.58rem; }
+.action-card-levels strong {
+  color: var(--text-primary); font-size: 0.78rem; font-variant-numeric: tabular-nums;
+}
+.action-card-caveat {
+  margin: 0.6rem 0 0; color: var(--text-secondary);
+  font-size: 0.62rem; line-height: 1.4;
+}
+.action-card-buttons { display: flex; gap: 0.4rem; margin-top: 0.65rem; }
+.action-card-buttons button {
+  padding: 0.42rem 0.85rem;
+  border: 1px solid transparent; border-radius: 8px;
+  background: var(--warning); color: #392600;
+  font: inherit; font-size: 0.7rem; font-weight: 650; cursor: pointer;
+  transition: filter 0.14s, transform 0.14s;
+}
+.action-card-buttons button:hover:not(:disabled) {
+  filter: brightness(1.05); transform: translateY(-1px);
+}
+.action-card-buttons button.secondary {
+  border-color: var(--border); background: var(--surface-1);
+  color: var(--text-secondary); font-weight: 550;
+}
+.action-card-buttons button:disabled { opacity: 0.58; cursor: wait; }
+
 .chat-sources {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
   margin-top: 0.8rem; padding-top: 0.7rem;

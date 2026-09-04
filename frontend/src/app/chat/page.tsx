@@ -8,7 +8,8 @@ import { can } from "@/lib/session";
 import { notifyChatHistoryChanged } from "@/lib/history";
 import type {
   ChatHistoryTurn, ChatResponse, ChatSession, ChatStreamComplete, ChatStreamEvent,
-  ConfirmPendingResult, NextStepPrediction, PendingChange, PendingChangePage, UploadSummary,
+  ConfirmPendingResult, NextStepPrediction, PendingChange, PendingChangePage,
+  StagedAction, UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
@@ -16,6 +17,7 @@ import { AgentActivity, AgentToolCalls } from "@/components/AgentActivity";
 import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
 import { NextStepSuggestions } from "@/components/NextStepSuggestions";
 import { SuggestionCards } from "@/components/SuggestionCards";
+import { ActionCard } from "@/components/ActionCard";
 
 interface Turn {
   q: string;
@@ -24,6 +26,8 @@ interface Turn {
   staged: boolean;
   trace: AgentTrace;
   nextSteps?: NextStepPrediction;
+  /** Staged by the action branch; nothing is recorded until it is pressed. */
+  stagedAction?: StagedAction | null;
   error?: string;
 }
 
@@ -76,6 +80,24 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
       detail: event.batch_id ? `Using scored batch ${event.batch_id}` : "No scored batch selected",
       result: `${event.provider} · ${event.model}`,
       status: "done",
+    });
+  }
+  if (event.type === "classify") {
+    return upsertTraceStep({ ...trace, provider: event.provider, model: event.model }, {
+      id: "classify",
+      label: "Routing the question",
+      detail: `${event.provider} · ${event.model}`,
+      result: `${event.intent} branch`,
+      status: "done",
+    });
+  }
+  if (event.type === "intent_downgraded") {
+    return upsertTraceStep(trace, {
+      id: "classify-downgrade",
+      label: "Read-only route",
+      detail: event.reason,
+      result: `${event.from} not available`,
+      status: "warning",
     });
   }
   if (event.type === "model_start") {
@@ -490,6 +512,7 @@ function Chat() {
         staged,
         trace: finalTrace,
         nextSteps,
+        stagedAction: result.staged_action ?? null,
       }]);
       notifyChatHistoryChanged();
       if (staged) await refreshPending();
@@ -596,9 +619,14 @@ function Chat() {
           body: JSON.stringify({
             pending_id: p.pending_id,
             decision: "override",
+            // Nulls are sent as nulls, not coerced to 0. The endpoint merges
+            // each missing value with the staged proposal and then the item's
+            // current level; `?? 0` instead recorded ROP=0/Min=0 for a
+            // proposal that only stated a Max, and 3 >= 0 >= 0 passes the
+            // ordering check — a silent zero all the way to the export.
             final_max: p.proposed_max,
-            final_rop: p.proposed_rop ?? 0,
-            final_min: p.proposed_min ?? 0,
+            final_rop: p.proposed_rop,
+            final_min: p.proposed_min,
           }),
         });
       setNote(
@@ -618,6 +646,16 @@ function Chat() {
       await refreshPending();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
+  }
+
+  /** An action card carries the same fields the tray's handlers read, so the
+   *  card reuses them rather than posting to the review endpoints itself. The
+   *  card's own values are authoritative — the tray row is only a fallback for
+   *  fields the card does not carry. */
+  function asPendingChange(action: StagedAction): PendingChange | null {
+    if (action.pending_id === null) return null;
+    const tray = pending.find((p) => p.pending_id === action.pending_id);
+    return { ...(tray ?? {}), ...action } as unknown as PendingChange;
   }
 
   const empty = turns.length === 0 && !sending && !loadingHistory;
@@ -747,6 +785,17 @@ function Chat() {
                 <div className="chat-response">
                   <div className="chat-speaker">NYRA</div>
                   {turn.a && <ChatAnswer>{turn.a}</ChatAnswer>}
+                  {canReview && turn.stagedAction && (
+                    <ActionCard action={turn.stagedAction} busy={busy}
+                                onConfirm={(action) => {
+                                  const p = asPendingChange(action);
+                                  if (p) void confirm(p);
+                                }}
+                                onDiscard={(action) => {
+                                  const p = asPendingChange(action);
+                                  if (p) void discard(p);
+                                }} />
+                  )}
                   {index === turns.length - 1 && turn.nextSteps && (
                     <NextStepSuggestions prediction={turn.nextSteps} disabled={busy}
                                          onSelect={(prompt) => void ask(prompt)} />

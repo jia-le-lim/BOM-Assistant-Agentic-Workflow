@@ -1077,7 +1077,44 @@ Session listing is per username, limited to 40, titled by the first question,
 and ordered by latest activity. Reopening a session restores questions,
 answers, and recorded tool traces, but not the original source objects.
 
-### 20.2 Tool loop
+### 20.2 Intent router
+
+`POST /chat` and `POST /chat/stream` run a LangGraph `StateGraph`
+(`app/agent/graph.py`) before the tool loop:
+
+```
+request -> classify -> { lookup | assist | advisory | propose | action | unknown }
+        -> synthesize -> _record_turn
+```
+
+`classify` is one model call with no tools offered, so it can name a branch but
+cannot answer. It sees the last four turns of the session, rehydrated from
+`conversation_turn` — there is no checkpointer, and conversation state has one
+store. An unrecognised classification falls back to `lookup` rather than to
+`unknown`: a routing miss must not become a refusal.
+
+Each branch calls the same `run_agent` loop with its own system prompt and its
+own tool subset (`INTENT_TOOLS` in `app/agent/tools.py`). Subsetting is the
+reason the router is a graph: the registry is 21 tools, and offering all of
+them on every model call is more than the routing layer can discriminate. A
+branch also cannot call what it cannot see — the `lookup` branch has no path to
+`propose_change`.
+
+A read-only role classified into `propose` or `action` is downgraded to
+`lookup`, and the stream reports it as `intent_downgraded`. That check is in
+addition to, not instead of, the role filter in `specs(allow_writes=...)`.
+
+Two tools are gated rather than free:
+
+- `run_assist` starts the assist chain and spends one model call per live row.
+  Without `confirm=true` it runs nothing and returns the row count for the
+  engineer to approve. This is chat's path into the layer that was previously
+  reachable only through the console's Run Assist button.
+- `stage_review_action` builds an action card and executes nothing. Confirming
+  it is a human click that calls `POST /review/{item}/confirm-pending` under the
+  engineer's own role, so the agent still has no path to `review_history`.
+
+### 20.3 Tool loop
 
 The loop starts with a system prompt and the current user question. It asks the
 selected provider either to call a tool or answer. Intended maximum tool calls
@@ -1112,7 +1149,7 @@ response may contain several calls; the loop does not truncate that batch, so a
 provider returning multiple calls near the boundary can exceed five in
 practice.
 
-### 20.3 Offline EchoProvider
+### 20.4 Offline EchoProvider
 
 Without `LLM_BASE_URL`, regexes choose tools deterministically. More specific
 item intents run before broad queue/summary intents. It recognizes current
@@ -1123,7 +1160,7 @@ Echo renders tool JSON into concise text. For triage synthesis it calculates a
 deterministic score from risk, agreement, exposure, criticality, and engine
 confidence.
 
-### 20.4 Staging a change
+### 20.5 Staging a change
 
 `propose_change` can store Max, ROP, Min, or any combination, but at least one
 must be supplied. Every proposed integer must appear literally somewhere in
@@ -1142,7 +1179,7 @@ It resolves the item against the scored composite key, then inserts only into
 
 Nothing in `pending_change` is visible to export.
 
-### 20.5 Confirm or discard
+### 20.6 Confirm or discard
 
 The pending tray is globally queryable, optionally filtered by batch and status,
 and returns the newest 100 rows.
@@ -1170,7 +1207,7 @@ staged ROP or Min as zero. Thus the frontend, rather than the backend's
 current-value fallback, decides those missing levels for this particular path.
 Every override then needs senior approval.
 
-### 20.6 Streaming behavior
+### 20.7 Streaming behavior
 
 `POST /chat/stream` runs the agent in a worker thread and sends newline-delimited
 JSON events through a queue. Events expose model start/completion, tool start
@@ -1185,7 +1222,7 @@ chunking is presentation-level streaming.
 If the stream endpoint returns 404 or 405, the frontend retries with the normal
 `POST /chat` endpoint.
 
-### 20.7 First-turn suggestions
+### 20.8 First-turn suggestions
 
 Only the first stored turn for a user/session requests predicted next steps.
 The same provider receives the first question, grounded answer, and descriptions

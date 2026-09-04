@@ -24,7 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..agent import tools as agent_tools
-from ..agent.loop import log_turn, run_agent
+from ..agent.graph import run_chat
+from ..agent.loop import log_turn
 from ..agent.suggestions import predict_next_steps
 from ..audit import audit
 from ..db import get_conn
@@ -65,6 +66,8 @@ def _record_turn(conn, result: dict, actor: dict, question: str,
           {"question": question[:500],
            "answered": bool(result["sources"]),
            "tools": [c["name"] for c in result["tool_calls"]],
+           "intent": result.get("intent"),
+           "staged_action": bool(result.get("staged_action")),
            "turn_id": turn_id})
     conn.commit()
     return turn_id
@@ -80,10 +83,16 @@ def _is_first_turn(conn, session_id: str | None, user: str | None) -> bool:
 
 
 def _predict_next_steps(question: str, answer: str) -> dict:
+    # allow_writes=False drops propose_change but NOT the gated tools -- a
+    # suggestion chip reading "run assist on batch 7" would spend a model call
+    # per row on one click. The prompt forbids suggesting an action; this is
+    # what enforces it.
+    safe = (agent_tools.INTENT_TOOLS["lookup"]
+            | agent_tools.INTENT_TOOLS["advisory"])
     return predict_next_steps(
         question,
         answer,
-        agent_tools.specs(allow_writes=False),
+        agent_tools.specs(allow_writes=False, names=safe),
     )
 
 
@@ -98,10 +107,10 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
         # model for them.
         allow_writes = actor.get("role") in REVIEW_ROLES
 
-        result = run_agent(conn, question=body.question.strip(),
-                           batch_id=batch_id, actor=actor,
-                           session_id=body.session_id,
-                           allow_writes=allow_writes)
+        result = run_chat(conn, question=body.question.strip(),
+                          batch_id=batch_id, actor=actor,
+                          session_id=body.session_id,
+                          allow_writes=allow_writes)
 
         turn_id = _record_turn(conn, result, actor, body.question.strip(), batch_id)
 
@@ -117,6 +126,8 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
                 "batch_id": batch_id,
                 "session_id": result["session_id"],
                 "turn_id": turn_id,
+                "intent": result["intent"],
+                "staged_action": result.get("staged_action"),
                 "next_steps": next_steps}
     finally:
         conn.close()
@@ -178,7 +189,7 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
             batch_id = _resolve_batch(conn, body.batch_id)
             first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
             allow_writes = actor.get("role") in REVIEW_ROLES
-            result = run_agent(
+            result = run_chat(
                 conn, question=question, batch_id=batch_id, actor=actor,
                 session_id=body.session_id, allow_writes=allow_writes,
                 on_event=emit,
@@ -216,6 +227,8 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
                 "provider": result["provider"],
                 "model": result["model"],
                 "tool_calls": result["tool_calls"],
+                "intent": result["intent"],
+                "staged_action": result.get("staged_action"),
                 "next_steps": next_steps,
             })
         except Exception as exc:

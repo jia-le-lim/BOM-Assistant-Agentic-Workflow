@@ -36,6 +36,28 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
+class StagedAction(BaseModel):
+    """What the chat agent staged for a human to press.
+
+    Nothing here has been recorded. Confirming it is a click that calls the
+    same endpoint the console tray calls (routers/review.py confirm_pending),
+    under the engineer's own role -- which is why the agent staging one still
+    cannot reach `review_history`.
+
+    `executed` is a constant False by design. If it ever needs to be True, that
+    belongs to the review router, not to a chat payload.
+    """
+    kind: Literal["confirm_pending", "discard_pending"]
+    item_id: str
+    batch_id: int | None = None
+    stockroom_id: str | None = None
+    pending_id: int | None = None
+    proposed_max: int | None = None
+    proposed_rop: int | None = None
+    proposed_min: int | None = None
+    executed: bool = False
+
+
 class TriageRunRequest(BaseModel):
     """Triage one item, or the whole batch when item_id is omitted.
 

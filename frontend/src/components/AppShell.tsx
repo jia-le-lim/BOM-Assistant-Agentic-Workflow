@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "./Sidebar";
+import { FloatingAssistant } from "./FloatingAssistant";
 import { useApi } from "@/lib/api";
 
 /* Rail + top bar + content column.
@@ -62,6 +63,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // first render after hydration without a cascading setState.
   const railOpen = useSyncExternalStore(subscribeRail, railIsOpen, () => true);
   const [health, setHealth] = useState<Health | null>(null);
+  const reviewContext = path.match(/^\/batches\/(\d+)(?:\/items\/([^/]+))?/);
 
   const title = TITLES.find(([p]) => path.startsWith(p))?.[1] ?? "Batches";
 
@@ -136,6 +138,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="shell-content">{children}</main>
+        {reviewContext && (
+          <FloatingAssistant
+            batchId={Number(reviewContext[1])}
+            itemId={reviewContext[2] ? decodeURIComponent(reviewContext[2]) : undefined}
+          />
+        )}
       </div>
     </div>
   );
