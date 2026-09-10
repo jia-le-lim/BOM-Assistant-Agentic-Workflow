@@ -266,11 +266,18 @@ def get_similar_parts(ctx: ToolContext, item_id: str,
                       limit: int = 5) -> dict:
     """Historical PEER parts -- different items with comparable attributes.
 
+    Review-gated for the same reason GET /similarity/{batch}/{item} is
+    (routers/similarity.py): the rows name other engineers' decisions,
+    justifications and reason codes. Without this the advisory branch -- which
+    is not a WRITE_INTENT, so a read-only role is never downgraded out of it --
+    served that free text to a viewer or auditor through /chat.
+
     Not this item's own history; that is get_item_history (spec section 7).
     neighbour_stockroom_id is deliberately withheld: stockroom_id is on the PRD
     5.1 sensitive list, and redact.py masks by key name, so the prefixed column
     would slip past LLM_REDACT_PROMPTS.
     """
+    _require_review_role(ctx, "Peer evidence")
     bid = batch_id or ctx.batch_id
     rec = _resolve(ctx, bid, item_id, stockroom_id)
     if rec is None:
@@ -668,8 +675,16 @@ def run_assist(ctx: ToolContext, batch_id: int | None = None,
     """Start the assist chain for a batch. Refuses until confirmed.
 
     One model call per live row: on a real monthly extract that is thousands.
-    The gate is here rather than in the prompt because a prompt cannot stop a
-    model that has already decided to call the tool.
+
+    What `confirm` actually buys, stated honestly: the default is False, so the
+    cheapest path -- the model calling this the way it calls everything else --
+    costs nothing and returns a row count instead. It is NOT a structural gate.
+    `confirm` is an argument the model fills in, so a model that sets it on the
+    first call, or one steered by free text coming back from get_item_notes or
+    search_similar_reviews, spends the whole batch with no human in the loop.
+    Closing that needs server-side state -- a record that this session was shown
+    the count for this batch -- which ToolContext has no session id to key on.
+    Until then the real backstops are REVIEW_ROLES above and the audit row.
 
     Peers run first when the batch has none, for the same reason
     POST /assist/run does it: `peers` is one of the chain's five evidence
@@ -717,6 +732,13 @@ def run_assist(ctx: ToolContext, batch_id: int | None = None,
     summary = run_batch(ctx.conn, bid, ctx.actor, active_config(ctx.conn))
     summary["similarity"] = similarity
     audit(ctx.conn, ctx.actor, "POST", "/chat", "assist", bid, summary)
+    # Committed here, not left to the end of the turn, exactly as
+    # POST /assist/run commits straight after run_batch. Every other tool is
+    # cheap to redo; this one has already spent a model call per live row, and
+    # anything that raises later in the turn -- a provider timeout on the
+    # summarising pass, say -- reaches chat_stream's rollback and throws all of
+    # those rows away with the money already gone.
+    ctx.conn.commit()
     ctx.sources.append({"type": "assist_result", "batch_id": bid,
                         "rows_assisted": summary["rows_assisted"]})
     return summary
@@ -765,6 +787,18 @@ def stage_review_action(ctx: ToolContext, kind: str, item_id: str,
     if p["item_id"] != item_id:
         raise ToolError(f"Pending change {pending_id} is for item "
                         f"{p['item_id']}, not {item_id}.")
+    # confirm_pending's fourth check, which the three above do not cover: it
+    # re-resolves the row, 409s on an item that is now in two stockrooms and
+    # 404s on one the batch no longer scores. Without this a card staged against
+    # a re-scored batch renders fine and errors on click, which is the one thing
+    # this tool's docstring promises cannot happen.
+    if _resolve(ctx, p["batch_id"], item_id,
+                p["stockroom_id"] or None) is None:
+        raise ToolError(
+            f"Item {item_id} is no longer scored in batch {p['batch_id']}, so "
+            f"pending change {pending_id} cannot be confirmed as it stands. "
+            f"The batch may have been re-scored since it was staged.")
+
     action.update({"batch_id": p["batch_id"],
                    "stockroom_id": p["stockroom_id"],
                    "proposed_max": p["proposed_max"],
@@ -780,6 +814,134 @@ def stage_review_action(ctx: ToolContext, kind: str, item_id: str,
     return {"staged_action": action, "executed": False,
             "note": "nothing has been recorded; the engineer must press "
                     "confirm, and an override still needs senior approval"}
+
+
+# Chat may write `item` and `category` rules. `default` is absent on purpose:
+# it sizes every dormant row that no other rule matches -- the whole tail -- and
+# that is a console decision, not a sentence.
+CHAT_DORMANT_SCOPES = ("item", "category")
+
+
+def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
+                         match_key: str = "", fixed_qty: int | None = None,
+                         replace: bool = False) -> dict:
+    """Record a dormant stocking rule the engineer stated. Never activate it.
+
+    Same shape as propose_change: the agent writes a row the system does not act
+    on, and a human turns it into something real. `load_rules()` reads
+    `WHERE confirmed=1`, so a row written here sizes nothing, and confirming it
+    needs approval rights AND a different person.
+
+    The `replace` gate is the part that is not obvious. The underlying upsert
+    resets `confirmed=0` on conflict -- deliberate for a console edit, which
+    should be re-approved. From chat it would mean a restated sentence silently
+    un-confirms a LIVE rule and changes what the next engine run sizes, with
+    nobody approving it. So a confirmed rule is refused unless the engineer
+    says otherwise.
+    """
+    from .. import dormant_rules
+    from ..audit import audit
+    from ..part_category import categories as category_names
+    from ..part_category import load_rules as load_category_rules
+
+    _require_review_role(ctx, "Proposing a dormant rule")
+
+    if scope not in CHAT_DORMANT_SCOPES:
+        if scope == "default":
+            raise ToolError(
+                "A rule with no item or category applies to every dormant row "
+                "no other rule matches -- the whole tail. That one is set in "
+                "Config > Dormant Rules, not here.")
+        raise ToolError(f"scope must be one of {list(CHAT_DORMANT_SCOPES)}.")
+    if policy not in dormant_rules.POLICIES:
+        raise ToolError(f"policy must be one of {list(dormant_rules.POLICIES)}.")
+    match_key = str(match_key or "").strip()
+    if not match_key:
+        raise ToolError(f"scope '{scope}' needs a match_key: the item id, or "
+                        f"the part category the rule covers.")
+
+    # A fixed_qty rule sets Min/ROP/Max on every matching dormant row
+    # (dormant_rules.apply returns (q, q, q)), so the number is a stock level
+    # and the same rule applies as in propose_change: it must be the engineer's
+    # own, not the model's.
+    if policy == "fixed_qty":
+        if fixed_qty is None:
+            raise ToolError("policy 'fixed_qty' needs fixed_qty -- the quantity "
+                            "the engineer wants these parts to keep.")
+        if str(fixed_qty) not in set(INT_RE.findall(ctx.question)):
+            raise ToolError(
+                f"Refusing to record fixed_qty={fixed_qty}: that number does "
+                f"not appear in the engineer's message. Ask them to state the "
+                f"quantity explicitly. (The assistant does not calculate stock "
+                f"levels.)")
+        if not 0 <= int(fixed_qty) <= 10_000:
+            raise ToolError("fixed_qty must be between 0 and 10000.")
+    elif fixed_qty is not None:
+        raise ToolError(f"policy '{policy}' takes no quantity. Use 'fixed_qty' "
+                        f"if the engineer named a number.")
+
+    note_suffix = ""
+    if scope == "category":
+        rules, _broken = load_category_rules(ctx.conn)
+        known = category_names(rules)
+        if match_key not in known:
+            raise ToolError(
+                f"'{match_key}' is not a part category. The categories in use "
+                f"are: {', '.join(known) if known else '(none configured)'}. "
+                f"Ask the engineer which one they mean.")
+    else:
+        # A typo'd part number would otherwise become a permanent rule that
+        # matches nothing and looks deliberate.
+        if ctx.batch_id is None:
+            note_suffix = (" The item could not be checked against a scored "
+                           "batch, because none is loaded.")
+        elif _resolve(ctx, ctx.batch_id, match_key, None) is None:
+            raise ToolError(
+                f"Item {match_key} is not in scored batch {ctx.batch_id}, so "
+                f"the id cannot be checked. Confirm the part number.")
+
+    existing = ctx.conn.execute(
+        "SELECT rule_id, confirmed, policy, fixed_qty FROM dormant_rule_config "
+        "WHERE scope=? AND match_key=?", (scope, match_key)).fetchone()
+    if existing is not None and existing["confirmed"] and not replace:
+        current = str(existing["policy"])
+        if existing["fixed_qty"] is not None:
+            current += f" of {existing['fixed_qty']}"
+        raise ToolError(
+            f"A CONFIRMED rule already covers {scope} '{match_key}' "
+            f"({current}). Re-proposing it would un-confirm it and change what "
+            f"the next engine run sizes. Tell the engineer what is there and "
+            f"ask whether to replace it; only then call this again with "
+            f"replace=true.")
+
+    ctx.conn.execute(
+        "INSERT INTO dormant_rule_config (scope, match_key, policy, "
+        "fixed_qty, set_by, confirmed, updated_at) "
+        "VALUES (?,?,?,?,?,0,datetime('now')) "
+        "ON CONFLICT(scope, match_key) DO UPDATE SET "
+        "policy=excluded.policy, fixed_qty=excluded.fixed_qty, "
+        "set_by=excluded.set_by, "
+        "confirmed=0, confirmed_by=NULL, updated_at=datetime('now')",
+        (scope, match_key, policy, fixed_qty, ctx.actor.get("user")))
+    audit(ctx.conn, ctx.actor, "POST", "/chat", "dormant_rule",
+          f"{scope}:{match_key}",
+          {"scope": scope, "match_key": match_key, "policy": policy,
+           "fixed_qty": fixed_qty,
+           "replaced_confirmed": bool(replace and existing)})
+
+    row = ctx.conn.execute(
+        "SELECT rule_id FROM dormant_rule_config WHERE scope=? AND match_key=?",
+        (scope, match_key)).fetchone()
+    rule_id = row["rule_id"] if row else None
+    ctx.sources.append({"type": "dormant_rule", "rule_id": rule_id,
+                        "scope": scope, "match_key": match_key,
+                        "confirmed": False})
+    return {"rule_id": rule_id, "scope": scope, "match_key": match_key,
+            "policy": policy, "fixed_qty": fixed_qty, "confirmed": False,
+            "note": "proposed only; it sizes nothing until a different person "
+                    "with approval rights confirms it, and it takes effect on "
+                    "the next engine run -- a batch already scored keeps the "
+                    "numbers its reviewer saw." + note_suffix}
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1160,30 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
             "stockroom_id": _STOCK},
          "required": ["kind", "item_id"]}), stage_review_action),
 
+    "propose_dormant_rule": (ToolSpec(
+        "propose_dormant_rule",
+        "Record a proposed DORMANT STOCKING RULE: how much stock parts with no "
+        "consumption keep. Scope 'item' for one part, 'category' for a part "
+        "category. Policy 'hold_current' keeps today's level, 'fixed_qty' a "
+        "stated quantity, 'zero' the engine's own answer. Use for 'keep all "
+        "filter parts at 2', 'hold the current level for 100005'. This does "
+        "NOT activate the rule -- a second person confirms it. NOT for "
+        "changing one item's Max/ROP/Min on a scored batch, which is "
+        "propose_change.",
+        {"type": "object", "properties": {
+            "scope": {"type": "string", "enum": list(CHAT_DORMANT_SCOPES)},
+            "match_key": {"type": "string",
+                          "description": "Item id, or part category name"},
+            "policy": {"type": "string",
+                       "enum": ["hold_current", "fixed_qty", "zero"]},
+            "fixed_qty": {"type": "integer",
+                          "description": "Required for fixed_qty; must be a "
+                                         "number the engineer stated"},
+            "replace": {"type": "boolean",
+                        "description": "Only true once the engineer has agreed "
+                                       "to replace a CONFIRMED rule"}},
+         "required": ["scope", "match_key", "policy"]}), propose_dormant_rule),
+
     "propose_change": (ToolSpec(
         "propose_change",
         "Stage a stock-level change the engineer has explicitly stated. Only "
@@ -1015,7 +1201,16 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
          "required": ["item_id"]}), propose_change),
 }
 
-READ_ONLY_TOOLS = frozenset(REGISTRY) - {"propose_change"}
+# Everything that is not a plain read. `propose_*` writes a row a human must
+# then act on; `run_assist` spends money; `stage_review_action` builds a card
+# against the review queue. A read-only role is offered none of them.
+#
+# Derived rather than assumed: this used to be `- {"propose_change"}`, which
+# quietly classified every later write tool as read-only.
+WRITE_TOOLS = frozenset({"propose_change", "propose_dormant_rule",
+                         "run_assist", "stage_review_action"})
+
+READ_ONLY_TOOLS = frozenset(REGISTRY) - WRITE_TOOLS
 
 
 # Which tools each graph branch offers. Subsetting is the point of the graph:
@@ -1036,7 +1231,8 @@ INTENT_TOOLS: dict[str, frozenset[str]] = {
         "get_similar_parts", "get_similarity_outliers", "get_dormant_coverage",
         "explain_rules"}),
     "propose": frozenset({
-        "propose_change", "get_current_values", "get_recommendation"}),
+        "propose_change", "propose_dormant_rule", "get_current_values",
+        "get_recommendation", "get_dormant_coverage"}),
     "action": frozenset({"stage_review_action", "get_current_values"}),
     "unknown": frozenset(),
 }
@@ -1054,7 +1250,7 @@ def specs(allow_writes: bool,
           names: Collection[str] | None = None) -> list[ToolSpec]:
     allowed = set(names) if names is not None else None
     return [spec for name, (spec, _) in REGISTRY.items()
-            if (allow_writes or name != "propose_change")
+            if (allow_writes or name not in WRITE_TOOLS)
             and (allowed is None or name in allowed)]
 
 

@@ -204,3 +204,256 @@ def test_coverage_reports_both_match_rate_and_stock_value(client, synth_csv):
                          "proposed_book_usd", "delta_usd"}
     assert body["matched"] == 0, "no confirmed rule yet"
     assert body["delta_usd"] == 0.0
+
+
+# --- the chat path ---------------------------------------------------------
+#
+# Same table, same confirm gate, reached from /chat instead of the console form.
+# The properties below are the ones the console does not need and the chat tool
+# does: a sentence must not un-confirm a live rule, and a model must not author
+# a quantity.
+
+import json  # noqa: E402  -- kept beside the tests that use it
+
+from conftest import upload  # noqa: E402
+
+
+def scored_batch(client, csv_bytes):
+    batch_id = upload(client, csv_bytes).json()["batch_id"]
+    client.post(f"/run-recommendation?batch_id={batch_id}", headers=ENG)
+    return batch_id
+
+
+def dispatch(conn, batch_id, question, args, role="engineer", user="alice"):
+    """Call propose_dormant_rule the way the loop does, so a ToolError comes
+    back as the {"error": ...} the model would actually read."""
+    from app.agent import tools as T
+
+    ctx = T.ToolContext(conn=conn, actor={"user": user, "role": role},
+                        batch_id=batch_id, question=question)
+    return json.loads(T.dispatch(ctx, "propose_dormant_rule", args))
+
+
+def rule_row(conn, scope="category", key="filter"):
+    r = conn.execute("SELECT * FROM dormant_rule_config WHERE scope=? AND "
+                     "match_key=?", (scope, key)).fetchone()
+    return dict(r) if r is not None else None
+
+
+def test_chat_proposal_is_unconfirmed_and_sizes_nothing(client, synth_csv):
+    """The safety property, asserted the way test_load_rules_reads_confirmed_only
+    asserts it: the row exists, and the engine cannot see it."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    r = client.post("/chat", json={"question": "keep all filter parts at 2",
+                                   "batch_id": batch_id}, headers=ENG)
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "propose"
+
+    conn = get_conn()
+    try:
+        row = rule_row(conn)
+        assert row is not None, "the chat turn recorded nothing"
+        assert row["confirmed"] == 0
+        assert row["policy"] == "fixed_qty" and row["fixed_qty"] == 2
+        assert row["set_by"] == "alice"
+        assert DR.load_rules(conn) == [], "an unconfirmed rule reached the engine"
+    finally:
+        conn.close()
+
+
+def test_chat_cannot_replace_a_confirmed_rule(client, synth_csv):
+    """The one that matters. The upsert resets confirmed=0 on conflict, so a
+    restated sentence would silently un-confirm a LIVE rule and change what the
+    next engine run sizes -- with nobody approving it."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    rule_id = client.post("/config/dormant-rules", json=BODY,
+                          headers=ENG).json()["rule_id"]
+    assert client.post(f"/config/dormant-rules/{rule_id}/confirm",
+                       headers=SENIOR).status_code == 200
+
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all filter parts at 3",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "fixed_qty", "fixed_qty": 3})
+        assert "CONFIRMED" in out["error"]
+        row = rule_row(conn)
+        assert row["confirmed"] == 1, "a refused call still un-confirmed the rule"
+        assert row["fixed_qty"] == 2, "a refused call still changed the quantity"
+        assert len(DR.load_rules(conn)) == 1
+    finally:
+        conn.close()
+
+
+def test_chat_replaces_a_confirmed_rule_only_when_told(client, synth_csv):
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    rule_id = client.post("/config/dormant-rules", json=BODY,
+                          headers=ENG).json()["rule_id"]
+    client.post(f"/config/dormant-rules/{rule_id}/confirm", headers=SENIOR)
+
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all filter parts at 3",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "fixed_qty", "fixed_qty": 3,
+                        "replace": True})
+        assert out.get("error") is None, out
+        conn.commit()
+        row = rule_row(conn)
+        assert row["confirmed"] == 0 and row["fixed_qty"] == 3
+        assert DR.load_rules(conn) == [], "the replacement went live unapproved"
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_a_quantity_the_engineer_did_not_state(client, synth_csv):
+    """A fixed_qty rule sets Min/ROP/Max on every matching row. That is a stock
+    level, and the model does not author those."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep the filter parts a bit higher",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "fixed_qty", "fixed_qty": 3})
+        assert "does not appear in the engineer's message" in out["error"]
+        assert rule_row(conn) is None
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_a_default_scope_rule(client, synth_csv):
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all dormant parts at 5",
+                       {"scope": "default", "match_key": "",
+                        "policy": "fixed_qty", "fixed_qty": 5})
+        assert "whole tail" in out["error"]
+        assert rule_row(conn, "default", "") is None
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_an_unknown_category(client, synth_csv):
+    """An unvalidated key writes a rule that matches nothing and looks live."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all widget parts at 2",
+                       {"scope": "category", "match_key": "widgets",
+                        "policy": "fixed_qty", "fixed_qty": 2})
+        assert "not a part category" in out["error"]
+        assert "filter" in out["error"], "the refusal must list the real ones"
+        assert rule_row(conn, "category", "widgets") is None
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_an_item_not_in_the_batch(client, synth_csv):
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "hold the current level for 999999",
+                       {"scope": "item", "match_key": "999999",
+                        "policy": "hold_current"})
+        assert "999999" in out["error"]
+        assert rule_row(conn, "item", "999999") is None
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_fixed_qty_without_a_quantity(client, synth_csv):
+    """Mirrors test_fixed_qty_without_a_quantity_is_rejected_at_the_api, at the
+    tool boundary instead of the API one."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all filter parts at a fixed qty",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "fixed_qty"})
+        assert "needs fixed_qty" in out["error"]
+        assert rule_row(conn) is None
+    finally:
+        conn.close()
+
+
+def test_chat_refuses_a_quantity_on_a_policy_that_takes_none(client, synth_csv):
+    """Dropping it silently would record something the engineer did not ask for."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id,
+                       "hold the current level for filter parts, 4",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "hold_current", "fixed_qty": 4})
+        assert "takes no quantity" in out["error"]
+        assert rule_row(conn) is None
+    finally:
+        conn.close()
+
+
+def test_viewer_cannot_propose_a_dormant_rule(client, synth_csv):
+    """Two gates: the propose branch is a WRITE_INTENT the classifier downgrades
+    for a read-only role, and the tool refuses one directly."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+
+    r = client.post("/chat", json={"question": "keep all filter parts at 2",
+                                   "batch_id": batch_id}, headers=VIEWER)
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "lookup", "a viewer reached the propose branch"
+
+    conn = get_conn()
+    try:
+        out = dispatch(conn, batch_id, "keep all filter parts at 2",
+                       {"scope": "category", "match_key": "filter",
+                        "policy": "fixed_qty", "fixed_qty": 2},
+                       role="viewer", user="eve")
+        assert "review role" in out["error"]
+        assert rule_row(conn) is None
+    finally:
+        conn.close()
+
+
+def test_a_proposed_rule_does_not_rescore_a_batch(client, synth_csv):
+    """Rules bite at the next /run-recommendation. A batch already on screen
+    keeps the numbers its reviewer saw."""
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    columns = ("SELECT item_id, new_max, new_rop, new_min FROM "
+               "recommendation_result WHERE batch_id=? ORDER BY item_id")
+    conn = get_conn()
+    try:
+        before = [dict(r) for r in conn.execute(columns, (batch_id,))]
+    finally:
+        conn.close()
+
+    client.post("/chat", json={"question": "keep all filter parts at 2",
+                               "batch_id": batch_id}, headers=ENG)
+
+    conn = get_conn()
+    try:
+        after = [dict(r) for r in conn.execute(columns, (batch_id,))]
+    finally:
+        conn.close()
+    assert before == after

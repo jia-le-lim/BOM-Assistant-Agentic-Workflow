@@ -144,7 +144,7 @@ export default function ItemPage({ params }: {
     (template) => template.justification === justification);
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="page-wide flex flex-col gap-5">
       <div className="page-head">
         <button onClick={() => router.back()} className="text-xs" style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
           ← Back to items
@@ -565,7 +565,7 @@ export default function ItemPage({ params }: {
  */
 function ItemSkeleton() {
   return (
-    <div className="flex flex-col gap-5" role="status" aria-busy="true">
+    <div className="page-wide flex flex-col gap-5" role="status" aria-busy="true">
       <span className="sr-only">Loading item…</span>
       <div className="skeleton-stack">
         <Skeleton w="220px" h="1.35rem" />

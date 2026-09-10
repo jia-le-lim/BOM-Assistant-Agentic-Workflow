@@ -375,14 +375,25 @@ def test_get_similar_parts_withholds_stockroom(client, synth_csv):
     try:
         item = conn.execute("SELECT item_id FROM similarity_result "
                             "WHERE batch_id=? LIMIT 1", (second,)).fetchone()
-        ctx = T.ToolContext(conn=conn, actor={"user": "alice"},
+        ctx = T.ToolContext(conn=conn,
+                            actor={"user": "alice", "role": "engineer"},
                             batch_id=second, question="similar parts")
         out = json.loads(T.dispatch(ctx, "get_similar_parts",
                                     {"item_id": item["item_id"]}))
+        # Peer rows name other engineers' decisions and justifications, so the
+        # tool carries the same REVIEW_ROLES gate as GET /similarity/{b}/{item}.
+        # The advisory branch is not a WRITE_INTENT, so the router never
+        # downgrades a read-only role out of it -- this is the only gate.
+        viewer = T.ToolContext(conn=conn,
+                               actor={"user": "eve", "role": "viewer"},
+                               batch_id=second, question="similar parts")
+        refused = json.loads(T.dispatch(viewer, "get_similar_parts",
+                                        {"item_id": item["item_id"]}))
     finally:
         conn.close()
     assert "neighbour_stockroom_id" not in json.dumps(out)
     assert out.get("caveat")
+    assert "review role" in refused["error"]
 
 
 def test_search_similar_reviews_finds_a_comment(client, synth_csv):

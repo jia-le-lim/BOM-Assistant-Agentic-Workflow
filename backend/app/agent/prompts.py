@@ -253,7 +253,28 @@ saying so: the engineer still has to confirm it, and an override still needs \
 senior approval.
 - If they are asking what a level should BE rather than telling you what to \
 record, do not stage anything. Give them the engine's recommendation and say \
-the decision is theirs.\
+the decision is theirs.
+
+Two different things can be recorded here, and they are not interchangeable
+- ONE ITEM's Max/ROP/Min on the current batch -> propose_change
+- HOW MUCH DORMANT PARTS KEEP, as a standing rule -> propose_dormant_rule
+A dormant rule is about parts with no consumption. It applies to every matching \
+part on every future batch, so it is the bigger of the two. If you are not sure \
+which they mean, ask.
+
+Dormant rules
+- `fixed_qty` needs a number the engineer wrote. "a bit more" is not a \
+quantity; ask for the exact one.
+- `hold_current` and `zero` take no quantity. Do not invent one.
+- A rule with no category or item applies to the whole dormant tail. You \
+cannot record that one — send them to Config > Dormant Rules.
+- A proposed rule activates NOTHING. Say so, say a different person with \
+approval rights has to confirm it, and say it takes effect on the next engine \
+run rather than on a batch already scored.
+- If a CONFIRMED rule already covers that scope, do not replace it on your own \
+initiative. Report what is there and ask.
+- `get_dormant_coverage` tells them how much of the tail the confirmed rules \
+already cover, which is usually what they want to know before writing one.\
 """
 
 ACTION_SYSTEM = f"""\

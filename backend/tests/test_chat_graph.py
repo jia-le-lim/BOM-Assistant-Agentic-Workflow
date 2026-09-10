@@ -187,18 +187,35 @@ def test_run_assist_is_gated_on_first_ask(client, synth_csv, db_file):
         "the engineer was not told how many rows they are approving"
 
 
+def make_live(conn, batch_id) -> int:
+    """Give the batch rows the assist chain will actually work on.
+
+    The suite pins BOM_ENGINE=rules (conftest), and that engine leaves `route`
+    empty, so `live_rows()` is 0 for the synthetic fixture and every assist
+    assertion below would hold vacuously -- `rows_assisted == 0 == expected`
+    proves nothing. Marking rows active is the smallest way to make the chain
+    real without switching the whole file to the statistical engine.
+    """
+    conn.execute("UPDATE recommendation_result SET route='active' "
+                 "WHERE batch_id=?", (batch_id,))
+    conn.commit()
+    from app.assist.chain import live_rows
+    return len(live_rows(conn, batch_id))
+
+
 def test_run_assist_runs_only_when_confirmed(client, synth_csv, db_file):
     from app.agent import tools as T
-    from app.assist.chain import live_rows
     from app.db import get_conn
 
     batch_id = scored_batch(client, synth_csv)
     conn = get_conn()
     try:
+        expected = make_live(conn, batch_id)
+        assert expected > 0, "the fixture must have live rows to assist"
+
         ctx = T.ToolContext(conn=conn,
                             actor={"user": "alice", "role": "engineer"},
                             batch_id=batch_id, question="run assist")
-        expected = len(live_rows(conn, batch_id))
         gated = json.loads(T.dispatch(ctx, "run_assist", {"batch_id": batch_id}))
         assert gated["gated"] is True
         assert gated["live_rows"] == expected
@@ -206,6 +223,7 @@ def test_run_assist_runs_only_when_confirmed(client, synth_csv, db_file):
         # control replaces the whole answer with "I don't know", the engineer
         # never sees the row count, and the confirm path is unreachable.
         assert ctx.sources and ctx.sources[-1]["type"] == "assist_gate"
+        assert rows(db_file, "SELECT COUNT(*) FROM assist_result")[0][0] == 0
 
         done = json.loads(T.dispatch(ctx, "run_assist",
                                      {"batch_id": batch_id, "confirm": True}))
@@ -323,6 +341,48 @@ def test_cancel_stages_a_discard_not_a_confirm(client, synth_csv):
               "batch_id": batch_id}, headers=ENG)
     assert r.status_code == 200, r.text
     assert r.json()["staged_action"]["kind"] == "discard_pending"
+
+
+def test_a_stock_level_request_is_not_a_dormant_rule(client, synth_csv, db_file):
+    """"stock" is in KEEP_RE, so the dormant-rule branch used to claim any
+    sentence containing it. "set the stock max for 100005 at 5" asks to stage a
+    pending change on the scored batch; answering it with a standing rule would
+    size that part on every future engine run instead."""
+    batch_id = scored_batch(client, synth_csv)
+
+    r = client.post("/chat",
+                    json={"question": "set the stock max for 100005 at 5",
+                          "batch_id": batch_id}, headers=ENG)
+    assert r.status_code == 200, r.text
+    assert "propose_dormant_rule" not in tools_used(db_file)
+    assert rows(db_file, "SELECT COUNT(*) FROM dormant_rule_config "
+                         "WHERE scope='item'")[0][0] == 0
+
+
+def test_assist_rows_survive_a_failure_later_in_the_turn(client, synth_csv,
+                                                         db_file):
+    """run_assist has already spent a model call per row by the time it returns.
+    A provider that dies on the summarising pass must not take those rows with
+    it -- chat_stream rolls the transaction back."""
+    from app.agent import tools as T
+    from app.db import get_conn
+
+    batch_id = scored_batch(client, synth_csv)
+    conn = get_conn()
+    try:
+        expected = make_live(conn, batch_id)
+        assert expected > 0, "the fixture must have live rows to assist"
+        ctx = T.ToolContext(conn=conn,
+                            actor={"user": "alice", "role": "engineer"},
+                            batch_id=batch_id, question="run assist")
+        T.dispatch(ctx, "run_assist", {"batch_id": batch_id, "confirm": True})
+        # No commit here on purpose: the tool must have committed itself.
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert rows(db_file, "SELECT COUNT(*) FROM assist_result")[0][0] == expected, \
+        "a rollback after run_assist threw away rows that were paid for"
 
 
 def test_advisory_reads_match_their_endpoint_role_gate(client, synth_csv):

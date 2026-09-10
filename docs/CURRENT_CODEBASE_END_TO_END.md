@@ -1095,7 +1095,7 @@ store. An unrecognised classification falls back to `lookup` rather than to
 
 Each branch calls the same `run_agent` loop with its own system prompt and its
 own tool subset (`INTENT_TOOLS` in `app/agent/tools.py`). Subsetting is the
-reason the router is a graph: the registry is 21 tools, and offering all of
+reason the router is a graph: the registry is 22 tools, and offering all of
 them on every model call is more than the routing layer can discriminate. A
 branch also cannot call what it cannot see — the `lookup` branch has no path to
 `propose_change`.
@@ -1113,6 +1113,24 @@ Two tools are gated rather than free:
 - `stage_review_action` builds an action card and executes nothing. Confirming
   it is a human click that calls `POST /review/{item}/confirm-pending` under the
   engineer's own role, so the agent still has no path to `review_history`.
+
+The `propose` branch writes two different kinds of proposal, and both are inert
+until a human acts:
+
+- `propose_change` stages one item's Max/ROP/Min in `pending_change`.
+- `propose_dormant_rule` records a dormant stocking rule in
+  `dormant_rule_config` with `confirmed=0`. `dormant_rules.load_rules()` reads
+  `WHERE confirmed=1`, so the engine does not see it, and confirming it needs
+  approval rights and a different person — the same gate the console form uses.
+  Chat may write `item` and `category` scope only: a `default` rule sizes every
+  dormant row nothing else matches, which stays a console decision. It also
+  refuses to re-propose a rule that is already **confirmed**, because the
+  underlying upsert resets `confirmed=0` on conflict — without that refusal a
+  restated sentence would un-confirm a live rule and change what the next engine
+  run sizes. `replace=true` is the explicit opt-in.
+  A `fixed_qty` sets Min/ROP/Max on every matching row, so it is a stock level
+  and carries the same verbatim-number rule as `propose_change`: the quantity
+  must appear in the engineer's own message.
 
 ### 20.3 Tool loop
 
@@ -1135,10 +1153,14 @@ The read tools are:
 10. `explain_rules`
 11. `recall_context`
 
-There is exactly one agent write tool: `propose_change`.
+The agent's write tools are listed in `tools.WRITE_TOOLS`: `propose_change`,
+`propose_dormant_rule`, `run_assist` and `stage_review_action`. None of them
+decides anything — each writes a row or a card that a human then acts on.
 
 Viewer/auditor and other non-review roles are not merely instructed not to
-write; `propose_change` is removed from the tool list sent to the provider.
+write; `specs(allow_writes=False)` removes every tool in `WRITE_TOOLS` from the
+list sent to the provider, and the router downgrades a read-only role out of the
+`propose` and `action` branches before that list is even built.
 
 Tool results append explicit source objects to the turn. If no source was
 retrieved, or no usable answer was produced, the loop emits the canonical “I

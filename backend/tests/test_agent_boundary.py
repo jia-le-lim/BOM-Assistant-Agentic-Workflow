@@ -290,11 +290,22 @@ def test_viewer_is_not_offered_the_write_tool(client, synth_csv, db_file):
 
 
 def test_tool_specs_exclude_writes_when_disallowed():
+    """Every non-read tool is withheld from a read-only role, not just the first
+    one that existed.
+
+    This used to assert the withheld set was exactly {"propose_change"}, which
+    was true when that was the only writer and quietly wrong afterwards --
+    `specs()` filtered that one name, so `run_assist`, `stage_review_action` and
+    `propose_dormant_rule` each counted as read-only as they were added.
+    Asserting against WRITE_TOOLS keeps this honest as the surface grows.
+    """
     from app.agent import tools as T
     names = {s.name for s in T.specs(allow_writes=False)}
-    assert "propose_change" not in names
     assert "get_recommendation" in names
-    assert {s.name for s in T.specs(allow_writes=True)} - names == {"propose_change"}
+    assert not (names & T.WRITE_TOOLS), "a read-only role was offered a writer"
+    assert {s.name for s in T.specs(allow_writes=True)} - names == T.WRITE_TOOLS
+    # The set itself is real, so a typo in it cannot silently disable the gate.
+    assert T.WRITE_TOOLS <= set(T.REGISTRY)
 
 
 def test_assist_cannot_write_decisions_or_recommendations(

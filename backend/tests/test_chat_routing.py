@@ -43,6 +43,10 @@ CASES = [
     ("which items are outliers",              "get_similarity_outliers"),
     ("dormant rule coverage for this batch",  "get_dormant_coverage"),
     ("confirm pending 1 for item 100005",     "stage_review_action"),
+    # A dormant STOCKING RULE is an instruction; "dormant coverage" above is a
+    # question. Both carry the word, so both are here.
+    ("keep all filter parts at 2",            "propose_dormant_rule"),
+    ("hold the current level for dormant item 100005", "propose_dormant_rule"),
 ]
 
 

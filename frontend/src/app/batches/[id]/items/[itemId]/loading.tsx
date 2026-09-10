@@ -9,7 +9,7 @@ import { CardSkeleton, Skeleton } from "@/components/ui";
  */
 export default function Loading() {
   return (
-    <div className="flex flex-col gap-5" role="status" aria-busy="true">
+    <div className="page-wide flex flex-col gap-5" role="status" aria-busy="true">
       <span className="sr-only">Loading item…</span>
 
       <div className="skeleton-stack">

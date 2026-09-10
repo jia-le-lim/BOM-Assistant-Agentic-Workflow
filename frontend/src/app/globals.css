@@ -110,6 +110,34 @@ body {
 }
 .btn-primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--seq); }
 
+/* A queue number you can type over. The closed form (.cell-edit, a dashed
+   hint under plain text) and the open form (.cell-num, a real input) are the
+   same box: swapping them must not shift the row under the cursor, or the
+   click that dismissed the box lands on whatever slid into its place. */
+.cell-edit, .cell-num {
+  display: inline-block;
+  width: 5rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.875rem;
+  text-align: right;
+  border: 1px solid transparent;
+  border-radius: 7px;
+}
+.cell-edit {
+  border-bottom-color: var(--border);
+  border-bottom-style: dashed;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  cursor: text;
+}
+.cell-edit:hover { background: var(--hover); }
+.cell-num {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
 .field {
   border: 1px solid var(--border);
   border-radius: 7px;

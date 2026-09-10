@@ -67,6 +67,34 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   // and refetch the whole batch for every character.
   const [qDraft, setQDraft] = useState(filters.q);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Numbers typed over the engine's proposal, keyed by row. Only rows someone
+  // actually retyped land here, so an untouched row still submits as a plain
+  // accept and the queue keeps showing the engine's figure everywhere else.
+  const [edits, setEdits] = useState<Record<string, { max: string; rop: string }>>({});
+  // The one cell currently open for typing, as "<row key>:max" | "<row key>:rop".
+  // Only one box is ever open: clicking another number closes this one, and
+  // leaving the box (blur, Enter, Escape) puts the number back to plain text.
+  const [editing, setEditing] = useState<string | null>(null);
+
+  /** Record a typed-over Max or ROP, seeding the pair from the engine values.
+   *  Typing also unticks the row: bulk accept records the engine's numbers, so
+   *  a ticked-and-edited row would quietly submit the figure just replaced. */
+  function setEdit(r: Recommendation, field: "max" | "rop", v: string) {
+    const k = keyOf(r);
+    setEdits((prev) => {
+      const base = prev[k] ?? { max: String(r.new_max), rop: String(r.new_rop) };
+      return { ...prev, [k]: { ...base, [field]: v } };
+    });
+    setSelected((prev) => {
+      if (!prev.has(k)) return prev;
+      const next = new Set(prev); next.delete(k); return next;
+    });
+  }
+
+  /** Escape drops a typed number back to what the engine proposed. */
+  function resetEdit(r: Recommendation, field: "max" | "rop") {
+    setEdit(r, field, String(field === "max" ? r.new_max : r.new_rop));
+  }
 
   const offset = Number(filters.offset) || 0;
   const query = useMemo(() => new URLSearchParams(
@@ -105,6 +133,10 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     setRefreshing(true);
     try {
       setPage(await call<RecommendationPage>(`recommendations?${params}`));
+      // A new page of rows is a new set of proposals; half-typed numbers from
+      // the rows that just left the screen must not follow them.
+      setEdits({});
+      setEditing(null);
       setErr(null);
     } catch (e) { setErr((e as Error).message); setPage(null); }
     finally { setRefreshing(false); }
@@ -232,15 +264,29 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   }
 
   async function quickReview(r: Recommendation, decision: "accept" | "reject") {
-    setBusyAction(`${decision}:${keyOf(r)}`); setErr(null); setNote(null);
+    const k = keyOf(r);
+    const ed = edits[k];
+    // Accepting a row whose numbers were typed over is an override: the
+    // engineer's figures go in as final and the API sends the row for senior
+    // approval. Min is not a column here, so the engine's Min rides along --
+    // clamped under the new ROP, because the API rejects anything but
+    // Max >= ROP >= Min and a Min left above it would bounce the submit.
+    const override = decision === "accept" && ed !== undefined
+      && (ed.max !== String(r.new_max) || ed.rop !== String(r.new_rop));
+    const body = override
+      ? { decision: "override", justification: "queue override",
+          final_max: Number(ed.max), final_rop: Number(ed.rop),
+          final_min: Math.min(r.new_min, Number(ed.rop)) }
+      : { decision, justification: "quick review" };
+    setBusyAction(`${decision}:${k}`); setErr(null); setNote(null);
     try {
       const res = await call<{ status: string; requires_senior_approval: boolean }>(
         `review/${r.item_id}?batch_id=${batchId}&stockroom_id=${encodeURIComponent(r.stockroom_id)}`,
         { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ decision, justification: "quick review" }) },
+          body: JSON.stringify(body) },
       );
       setNote(res.requires_senior_approval
-        ? `${r.item_id} recorded — awaiting senior approval.`
+        ? `${r.item_id} recorded${override ? " as an override" : ""} — awaiting senior approval.`
         : `${r.item_id} ${decision}ed.`);
       await refresh();
     } catch (e) { setErr((e as Error).message); }
@@ -396,7 +442,9 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
 
           <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
             Sorted by exposure, highest first. Tick rows to accept or reject in bulk, or use
-            the ✓ / ✕ on a row. Click a row to open the item — overrides live there.
+            the ✓ / ✕ on a row. Not happy with a proposed Max or ROP? Type your own over it —
+            that row&apos;s ✓ then records an override and goes for senior approval. Click a row
+            to open the item for the full form, with Min and a justification.
           </p>
 
           {selected.size > 0 && (
@@ -434,7 +482,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           ) : (
             <div className={refreshing ? "is-refreshing" : undefined}>
               <div className="scroll-x">
-                <table className="w-full text-sm min-w-[1180px]">
+                <table className="w-full text-sm min-w-[1280px]">
                   <thead>
                     <tr>
                       <th className="w-8">
@@ -458,12 +506,25 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                       const pending = r.status === "pending_review";
                       const a = verdicts.get(k);
                       const href = `/batches/${batchId}/items/${r.item_id}`;
+                      const ed = edits[k];
+                      const eMax = ed?.max ?? String(r.new_max);
+                      const eRop = ed?.rop ?? String(r.new_rop);
+                      const edited = eMax !== String(r.new_max) || eRop !== String(r.new_rop);
+                      // A pair the API would reject never leaves the browser --
+                      // a 422 behind a one-glyph button is not a readable error.
+                      const badEdit = edited && !(eMax !== "" && eRop !== ""
+                        && Number.isInteger(Number(eMax)) && Number.isInteger(Number(eRop))
+                        && Number(eMax) >= Number(eRop) && Number(eRop) >= 0);
                       return (
                         <tr key={k} className="row-link" onClick={() => router.push(href)}>
                           <td onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" checked={selected.has(k)}
-                                   disabled={!pending}
+                                   disabled={!pending || edited}
                                    onChange={() => toggle(k)}
+                                   title={edited
+                                     ? "Bulk accept records the engine's numbers — use the "
+                                       + "✓ on this row to record yours."
+                                     : undefined}
                                    aria-label={`Select ${r.item_id}`} />
                           </td>
                           <td>
@@ -496,19 +557,45 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                               </span>
                             )}
                           </td>
-                          <td className="text-right">
-                            <Swing now={r.current_max} next={r.new_max} bench={r.bench_max} />
+                          <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                            <Swing now={r.current_max} next={r.new_max} bench={r.bench_max}
+                                   edit={pending && canReview
+                                     ? { value: eMax, bad: badEdit,
+                                         label: `New Max for ${r.item_id}`,
+                                         open: editing === `${k}:max`,
+                                         onOpen: () => setEditing(`${k}:max`),
+                                         onClose: (cancel) => {
+                                           if (cancel) resetEdit(r, "max");
+                                           setEditing(null);
+                                         },
+                                         onChange: (v) => setEdit(r, "max", v) }
+                                     : undefined} />
                           </td>
-                          <td className="text-right">
-                            <Swing now={r.current_rop} next={r.new_rop} bench={r.bench_rop} />
+                          <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                            <Swing now={r.current_rop} next={r.new_rop} bench={r.bench_rop}
+                                   edit={pending && canReview
+                                     ? { value: eRop, bad: badEdit,
+                                         label: `New ROP for ${r.item_id}`,
+                                         open: editing === `${k}:rop`,
+                                         onOpen: () => setEditing(`${k}:rop`),
+                                         onClose: (cancel) => {
+                                           if (cancel) resetEdit(r, "rop");
+                                           setEditing(null);
+                                         },
+                                         onChange: (v) => setEdit(r, "rop", v) }
+                                     : undefined} />
                           </td>
                           <td className="max-w-[240px]"><ReasonCodes codes={r.reason_code} /></td>
                           <td onClick={(e) => e.stopPropagation()}>
                             {pending && canReview && (
                               <div className="flex gap-1.5 justify-end">
                                 <IconAction glyph="✓" colour="var(--good)"
-                                            label={`Accept ${r.item_id}`}
-                                            busy={busyAction === `accept:${k}`} disabled={busy}
+                                            label={badEdit
+                                              ? `Max must be at least ROP for ${r.item_id}`
+                                              : edited ? `Override ${r.item_id} with your numbers`
+                                              : `Accept ${r.item_id}`}
+                                            busy={busyAction === `accept:${k}`}
+                                            disabled={busy || badEdit}
                                             onClick={() => quickReview(r, "accept")} />
                                 <IconAction glyph="✕" colour="var(--critical)"
                                             label={`Reject ${r.item_id}`}
@@ -590,18 +677,47 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
 
 /** Current Wings setting -> what the engine proposes. The engineer's own
  *  number for this cycle rides in the tooltip: it is what `agreement` was
- *  graded against, and it is absent on a first cycle. */
-function Swing({ now, next, bench }: {
+ *  graded against, and it is absent on a first cycle.
+ *
+ *  With `edit` the proposed number is clickable: it reads as plain text until
+ *  someone clicks it, and only then becomes a box. Typing records nothing --
+ *  the row's ✓ is still the only thing that writes, and it writes an override
+ *  once the number differs from the engine's. */
+function Swing({ now, next, bench, edit }: {
   now?: number | null; next: number; bench?: number | null;
+  edit?: {
+    value: string; bad: boolean; label: string; open: boolean;
+    onOpen: () => void; onClose: (cancel: boolean) => void; onChange: (v: string) => void;
+  };
 }) {
   const title = bench == null ? undefined
     : `Engineer proposed ${bench.toLocaleString()} this upload`;
+  const changed = edit !== undefined && edit.value !== String(next);
+  const colour = edit?.bad ? "var(--critical)" : changed ? "var(--warning)" : undefined;
   return (
     <span className="tnum whitespace-nowrap" title={title}>
       <span style={{ color: "var(--text-muted)" }}>
         {now == null ? "—" : now.toLocaleString()} →{" "}
       </span>
-      {next.toLocaleString()}
+      {!edit ? next.toLocaleString()
+        : edit.open ? (
+          // Enter and Escape both leave; only Escape puts the engine's number
+          // back. autoFocus is the point of the click that opened this.
+          <input className="cell-num tnum" type="number" min={0}
+                 autoFocus value={edit.value} aria-label={edit.label}
+                 onChange={(e) => edit.onChange(e.target.value)}
+                 onBlur={() => edit.onClose(false)}
+                 onKeyDown={(e) => {
+                   if (e.key === "Enter") edit.onClose(false);
+                   if (e.key === "Escape") edit.onClose(true);
+                 }}
+                 style={{ borderColor: colour }} />
+        ) : (
+          <button type="button" className="cell-edit tnum" onClick={edit.onOpen}
+                  aria-label={`${edit.label} — click to edit`} style={{ color: colour }}>
+            {edit.value === "" ? "—" : Number(edit.value).toLocaleString()}
+          </button>
+        )}
       {bench != null && bench !== next && <span style={{ color: "var(--warning)" }}> *</span>}
     </span>
   );

@@ -70,6 +70,26 @@ OUTLIER_RE = re.compile(r"\b(?:outlier|outliers|unusual)\b", re.IGNORECASE)
 VERDICT_NAME_RE = re.compile(
     r"\b(flag_for_review|bulk_accept_candidate|needs_context)\b", re.IGNORECASE)
 
+# Dormant STOCKING RULES, which are a propose question, not the advisory
+# coverage read DORMANT_RE above serves. KEEP_RE is what separates the two:
+# "how much do the dormant rules cover" asks, "keep dormant parts at 2" tells.
+DORMANT_RULE_RE = re.compile(
+    r"\b(?:dormant|no consumption|not moving|non[- ]moving)\b", re.IGNORECASE)
+KEEP_RE = re.compile(r"\b(?:keep|hold|stock|maintain)\b", re.IGNORECASE)
+CATEGORY_AT_RE = re.compile(
+    r"\ball\s+(?:the\s+)?([a-z][a-z0-9_-]{2,30})\s+(?:parts?|items?)\b",
+    re.IGNORECASE)
+HOLD_CURRENT_RE = re.compile(
+    r"\b(?:hold|keep)\b[^.]{0,30}\b(?:current|where it is|as is|today)\b",
+    re.IGNORECASE)
+ZERO_POLICY_RE = re.compile(r"\b(?:zero|nothing|no stock|don'?t stock)\b",
+                            re.IGNORECASE)
+# "keep them AT 2" is how a rule quantity is actually said, and QTY_RE has no
+# `at` form -- it wants "max N", "to N" or "by N". Kept separate rather than
+# widened there, because QTY_RE is what propose_change routes on and every
+# staging case in test_chat_routing is tuned against its current shape.
+RULE_QTY_RE = re.compile(r"\b(?:at|of)\s+(\d+)\b", re.IGNORECASE)
+
 # Every tool `_route` below can emit. `_classify` uses it to tell a question it
 # can actually answer from one it cannot -- the branch names come from the
 # graph, but which questions are routable is this stub's own knowledge.
@@ -139,6 +159,13 @@ class EchoProvider:
 
         if REVIEW_ACTION_RE.search(q):
             return "action"
+        # Ahead of ADVISORY_RE, which also owns the word "dormant": a coverage
+        # QUESTION belongs to advisory, an INSTRUCTION to propose, and KEEP_RE
+        # is the difference. Ahead of the item+WRITE_RE propose branch too --
+        # "keep all filter parts at 2" names a category, not an item id.
+        if ((DORMANT_RULE_RE.search(q) or CATEGORY_AT_RE.search(q))
+                and KEEP_RE.search(q)):
+            return "propose"
         # Before assist/advisory: "set the max on 100005 to 3" carries no branch
         # keyword. No quantity is required here on purpose -- "bump 100005 a
         # bit" is a propose question the engineer has asked badly, and the
@@ -212,6 +239,41 @@ class EchoProvider:
                 if not verdict and "flag" in ql:
                     args = {"verdict": "flag_for_review"}
                 return ToolCall("c1", "list_assist_queue", args)
+
+        # Ahead of get_dormant_coverage, which fires on the bare word "dormant".
+        # A rule is only emitted when the policy is unambiguous: a scope with no
+        # readable policy falls through to the coverage read rather than
+        # guessing at a quantity.
+        #
+        # The dormant signal is REQUIRED, not just KEEP_RE. KEEP_RE matches
+        # "stock", so on its own "set the stock max for 100005 at 5" -- an
+        # ordinary propose_change on the scored batch -- came out as a standing
+        # rule that would size that part on every future run. This mirrors what
+        # `_classify` already requires one level up.
+        if ("propose_dormant_rule" in available and KEEP_RE.search(q)
+                and (DORMANT_RULE_RE.search(q) or CATEGORY_AT_RE.search(q))):
+            cat = CATEGORY_AT_RE.search(q)
+            rule_args: dict = {}
+            if item:
+                rule_args = {"scope": "item", "match_key": item.group(1)}
+            elif cat:
+                rule_args = {"scope": "category",
+                             "match_key": cat.group(1).lower()}
+            if rule_args:
+                qty = RULE_QTY_RE.search(q) or QTY_RE.search(q)
+                if HOLD_CURRENT_RE.search(q):
+                    rule_args["policy"] = "hold_current"
+                elif ZERO_POLICY_RE.search(q):
+                    rule_args["policy"] = "zero"
+                elif qty:
+                    value = int(next(g for g in qty.groups() if g))
+                    # Same guard as propose_change: QTY_RE's "max <digits>"
+                    # alternative can span words and capture the item id itself.
+                    if not item or str(value) != item.group(1):
+                        rule_args["policy"] = "fixed_qty"
+                        rule_args["fixed_qty"] = value
+                if "policy" in rule_args:
+                    return ToolCall("c1", "propose_dormant_rule", rule_args)
 
         if "get_dormant_coverage" in available and DORMANT_RE.search(q):
             return ToolCall("c1", "get_dormant_coverage", {})
@@ -421,6 +483,14 @@ class EchoProvider:
             return (f"Peer outliers in batch {data.get('batch_id')}: "
                     + "; ".join(lines)
                     + " Advisory evidence; no level follows from it.")
+
+        if tool == "propose_dormant_rule":
+            qty = data.get("fixed_qty")
+            return (f"Recorded a proposed dormant rule for {data.get('scope')} "
+                    f"'{data.get('match_key')}': {data.get('policy')}"
+                    f"{'' if qty is None else f' of {qty}'}. It is not active — "
+                    f"someone with approval rights must confirm it, and it "
+                    f"applies from the next engine run.")
 
         if tool == "get_dormant_coverage":
             return (f"Dormant coverage for batch {data.get('batch_id')}: "
