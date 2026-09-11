@@ -1,0 +1,26 @@
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    route {
+        basic_auth {
+__PILOT_USERS__
+        }
+        @crossOrigin expression `{http.request.header.Origin} != "" && {http.request.header.Origin} != "https://" + {http.request.hostport} && {http.request.header.Origin} != "http://" + {http.request.hostport}`
+        respond @crossOrigin "Cross-origin requests are not allowed" 403
+        header {
+            X-Robots-Tag "noindex, nofollow, noarchive"
+            Cache-Control "no-store"
+            Referrer-Policy "no-referrer"
+            X-Frame-Options "DENY"
+        }
+        reverse_proxy frontend:3010 {
+            header_up -Authorization
+            header_up X-User {http.auth.user.id}
+            header_up X-Pilot-User {http.auth.user.id}
+            flush_interval -1
+        }
+    }
+}

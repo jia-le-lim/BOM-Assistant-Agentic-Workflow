@@ -1,0 +1,5 @@
+runtime/
+backups/
+exports/
+*.local.env
+__pycache__/

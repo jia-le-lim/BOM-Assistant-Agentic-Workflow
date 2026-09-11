@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * Identity stub mirroring the backend's X-User / X-Role headers.
+ * Pilot gateway identity plus the existing role selector.
  *
- * This exists so the RBAC and two-person approval rules are *visible* -- switch
- * role and watch actions enable/disable. It is NOT security: the backend trusts
- * these headers today. Real deployment replaces both ends with Entra ID.
+ * The gateway supplies the authenticated username and overwrites X-User before
+ * requests reach the backend. Roles remain selectable for pilot testing.
+ * Direct localhost development retains demo identities; production SSO is separate.
  */
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
@@ -20,15 +20,17 @@ export const ROLES: { role: Role; user: string; blurb: string }[] = [
   { role: "viewer", user: "eve", blurb: "Read-only" },
 ];
 
-interface Session { user: string; role: Role; setIdentity: (u: string, r: Role) => void }
+interface Session { user: string; role: Role; authenticated: boolean; setIdentity: (u: string, r: Role) => void }
 
-const Ctx = createContext<Session>({ user: "alice", role: "engineer", setIdentity: () => {} });
+const Ctx = createContext<Session>({ user: "alice", role: "engineer", authenticated: false, setIdentity: () => {} });
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState("alice");
   const [role, setRole] = useState<Role>("engineer");
+  const [pilotUser, setPilotUser] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     const frame = window.requestAnimationFrame(() => {
       const s = localStorage.getItem("bom-session");
       if (s) {
@@ -37,16 +39,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           if (p.user && p.role) { setUser(p.user); setRole(p.role); }
         } catch { /* ignore malformed */ }
       }
+      void fetch("/api/pilot-session", { cache: "no-store", signal: controller.signal })
+        .then((response) => response.ok ? response.json() : null)
+        .then((session) => {
+          if (!controller.signal.aborted && typeof session?.user === "string" && session.user) {
+            setPilotUser(session.user);
+            setUser(session.user);
+          }
+        }).catch(() => { /* Local development can use the demo identities. */ });
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => { window.cancelAnimationFrame(frame); controller.abort(); };
   }, []);
 
   const setIdentity = useCallback((u: string, r: Role) => {
-    setUser(u); setRole(r);
-    localStorage.setItem("bom-session", JSON.stringify({ user: u, role: r }));
-  }, []);
+    const identity = pilotUser ?? u;
+    setUser(identity); setRole(r);
+    localStorage.setItem("bom-session", JSON.stringify({ user: identity, role: r }));
+  }, [pilotUser]);
 
-  return <Ctx.Provider value={{ user, role, setIdentity }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, role, authenticated: pilotUser !== null, setIdentity }}>{children}</Ctx.Provider>;
 }
 
 export const useSession = () => useContext(Ctx);

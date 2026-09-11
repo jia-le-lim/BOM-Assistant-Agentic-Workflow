@@ -1,0 +1,12 @@
+**
+!backend/
+!backend/Dockerfile
+!backend/requirements.txt
+!backend/app/
+!backend/app/**
+!analysis/
+!analysis/engine/
+!analysis/engine/**
+**/__pycache__
+**/*.pyc
+**/.env*

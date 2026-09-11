@@ -1,0 +1,49 @@
+# Optional, temporary public pilot. Managed separately from the application.
+services:
+  pilot-gateway:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    # The official binary carries this file capability and needs it in the bounding set.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    tmpfs:
+      - /config:uid=10001,gid=10001
+      - /data:uid=10001,gid=10001
+    ports:
+      - "127.0.0.1:13010:8080"
+    networks: [app]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+  tunnel:
+    image: bom-assistant/cloudflared-proxy:2026.9.0
+    build:
+      context: ./tunnel-source
+      dockerfile: Dockerfile.tunnel
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /runtime:uid=10001,gid=10001,mode=0700,size=1m
+      - /tmp:uid=10001,gid=10001,mode=0700,size=1m
+    stop_grace_period: 20s
+    env_file:
+      - path: ./proxy.env
+        format: raw
+    depends_on: [pilot-gateway]
+    networks: [app]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+networks:
+  app:
+    external: true
+    name: bom-supabase_default

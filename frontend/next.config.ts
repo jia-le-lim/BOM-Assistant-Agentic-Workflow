@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Next.js 16 blocks cross-origin access to dev resources (/_next/*) by
   // default. Without this, opening the app on 127.0.0.1 while the dev server's
   // origin is localhost silently blocks the client bundle -- pages render their

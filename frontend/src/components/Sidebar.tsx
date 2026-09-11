@@ -50,7 +50,7 @@ function Icon({ name }: { name: IconName }) {
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const path = usePathname();
   const router = useRouter();
-  const { user, role, setIdentity } = useSession();
+  const { user, role, authenticated, setIdentity } = useSession();
   const { call } = useApi();
   const [filter, setFilter] = useState("");
   const [history, setHistory] = useState<{
@@ -174,14 +174,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                       setIdentity(ROLES.find((x) => x.role === r)!.user, r);
                     }}>
               {ROLES.map((r) => (
-                <option key={r.role} value={r.role}>{r.user} — {r.role}</option>
+                <option key={r.role} value={r.role}>{authenticated ? user : r.user} — {r.role}</option>
               ))}
             </select>
           </label>
           <span aria-hidden style={{ color: "var(--text-muted)" }}><Icon name="signout" /></span>
         </div>
         <p className="side-note">
-          Identity is a header stub for demonstrating RBAC, not authentication.
+          {authenticated ? `Signed in as ${user}. Roles are selectable for pilot testing.`
+            : "Identity is a header stub for demonstrating RBAC, not authentication."}
         </p>
       </div>
     </div>

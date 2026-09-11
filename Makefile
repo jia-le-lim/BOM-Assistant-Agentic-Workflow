@@ -11,16 +11,20 @@
 BACKEND_PORT := 8011
 FRONTEND_PORT := 3010
 
+# Prefer the working local-model environment when present. Other checkouts
+# keep using .venv; either choice can be overridden with VENV_DIR=... .
+VENV_DIR ?= $(if $(wildcard .venv-ollama/pyvenv.cfg),.venv-ollama,.venv)
+
 ifeq ($(OS),Windows_NT)
     # ezwinports make runs recipes through cmd.exe; force it so set/&& work
     # even when a stray sh.exe is on PATH.
     SHELL := cmd.exe
     .SHELLFLAGS := /c
-    VENV_PY := .venv\Scripts\python.exe
+    VENV_PY ?= $(VENV_DIR)\Scripts\python.exe
     BACKEND_ENV := set "PYTHONIOENCODING=utf-8" &&
     TEST_ENV := set "BOM_ALLOW_SQLITE=1" && set "BOM_DB_PATH=backend/data/bom_review.db" && set "PYTHONIOENCODING=utf-8" &&
 else
-    VENV_PY := .venv/bin/python
+    VENV_PY ?= $(VENV_DIR)/bin/python
     BACKEND_ENV := PYTHONIOENCODING=utf-8
     TEST_ENV := BOM_ALLOW_SQLITE=1 BOM_DB_PATH=backend/data/bom_review.db PYTHONIOENCODING=utf-8
 endif
@@ -40,14 +44,14 @@ dev:
 	@$(MAKE) -j2 backend frontend
 
 backend:
-	$(BACKEND_ENV) $(VENV_PY) -m uvicorn app.main:app --app-dir backend --port $(BACKEND_PORT)
+	$(BACKEND_ENV) "$(VENV_PY)" -m uvicorn app.main:app --app-dir backend --port $(BACKEND_PORT)
 
 frontend:
 	cd frontend && npm run dev -- --webpack --port $(FRONTEND_PORT)
 
 install:
-	$(VENV_PY) -m pip install -r backend/requirements.txt
+	"$(VENV_PY)" -m pip install -r backend/requirements.txt
 	cd frontend && npm install
 
 test:
-	$(TEST_ENV) $(VENV_PY) -m pytest backend/tests -q
+	$(TEST_ENV) "$(VENV_PY)" -m pytest backend/tests -q
