@@ -17,10 +17,13 @@ is ever read back as fact -- `recall_context` labels every hit
 
 Off by default because:
   * with one month of history there is almost nothing worth recalling;
-  * mem0's pgvector backend opens a direct psycopg connection, which only works
+  * mem0's optional pgvector backend opens a direct psycopg connection, which only works
     where direct Postgres egress exists (Backend_Scaffold_Notes F1/F3 -- on a
     dev machine that means the proxy tunnel must be running);
   * the suite must pass with mem0ai uninstalled.
+
+MEM0_VECTOR_STORE=supabase_rest uses the existing server-only HTTPS connection
+for explicit preference storage and cosine recall, with local embeddings.
 """
 
 from __future__ import annotations
@@ -39,6 +42,14 @@ _last_error: str | None = None
 
 def enabled() -> bool:
     return os.environ.get("MEM0_ENABLED", "0") == "1"
+
+
+def _vector_store() -> str:
+    return os.environ.get("MEM0_VECTOR_STORE", "pgvector").strip()
+
+
+def _collection_name() -> str:
+    return os.environ.get("MEM0_COLLECTION_NAME", "bom_engineer_memory").strip()
 
 
 def _clean_conn_string(raw: str | None) -> str:
@@ -86,6 +97,11 @@ def status() -> dict:
     installed = installed or ("mem0" in sys.modules)
 
     dsn, dsn_source = _effective_database_url()
+    rest_configured = False
+    if _vector_store() == "supabase_rest":
+        from .rest_conn import configured
+        rest_configured = configured()
+        installed = importlib.util.find_spec("httpx") is not None
     return {
         "enabled": enabled(),
         "installed": installed,
@@ -93,6 +109,9 @@ def status() -> dict:
         "unavailable": _unavailable,
         "database_url_set": bool(dsn),
         "database_url_source": dsn_source,
+        "vector_store": _vector_store(),
+        "collection_name": _collection_name(),
+        "storage_configured": rest_configured if _vector_store() == "supabase_rest" else bool(dsn),
         "api_key_set": bool(_mem0_openai_api_key()),
         "base_url_set": bool(_mem0_openai_base_url()),
         "embedding_model": _mem0_embedding_model(),
@@ -146,13 +165,24 @@ def _mem0_embedding_dims() -> int:
 
 
 def _get_client():
-    """Lazy: mem0ai is never imported unless explicitly switched on."""
+    """Lazy: mem0ai is only needed for the direct pgvector path."""
     global _client, _runtime_dir, _unavailable, _last_error
     if _client is not None or _unavailable:
         return _client
     if not enabled():
         return None
     try:
+        if _vector_store() == "supabase_rest":
+            from .memory_rest import SupabaseRestMemory
+            _client = SupabaseRestMemory(
+                base_url=_mem0_openai_base_url(), api_key=_mem0_openai_api_key(),
+                model=_mem0_embedding_model(), dimensions=_mem0_embedding_dims(),
+                collection=_collection_name(),
+                timeout_s=float(os.environ.get("LLM_TIMEOUT_S", "180")),
+            )
+            return _client
+        if _vector_store() != "pgvector":
+            raise ValueError("Unsupported memory vector store")
         # mem0 OSS always creates a small filesystem config directory when it
         # is imported. Keep that package-internal metadata ephemeral; actual
         # searchable memories live in Supabase through the pgvector store.
@@ -180,7 +210,7 @@ def _get_client():
             "vector_store": {
                 "provider": "pgvector",
                 "config": {"connection_string": dsn,
-                           "collection_name": "bom_engineer_memory",
+                           "collection_name": _collection_name(),
                            "embedding_model_dims": embed_dims},
             },
             # Even with infer=False on writes, mem0 still needs an embedder for
@@ -188,14 +218,15 @@ def _get_client():
             # OPENAI_* env vars (this app uses LLM_*).
             "embedder": {
                 "provider": "openai",
-                "config": {"model": embed_model, "api_key": api_key},
+                "config": {"model": embed_model, "api_key": api_key,
+                           "embedding_dims": embed_dims},
             },
             # mem0's default add() path uses an LLM for extraction/inference.
             # Keeping this configured makes the setup predictable even if a
             # caller switches infer=True later.
             "llm": {
                 "provider": "openai",
-                "config": {"model": os.environ.get("MEM0_LLM_MODEL", "").strip()
+                "config": {"model": _clean_conn_string(os.environ.get("MEM0_LLM_MODEL"))
                                      or os.environ.get("LLM_MODEL", "").strip(),
                            "api_key": api_key},
             },
@@ -219,7 +250,12 @@ def remember(text: str, user_id: str) -> bool:
     if client is None or not user_id:
         return False
     try:
-        client.add(redact_for_memory(text), user_id=user_id, infer=False)
+        kwargs = {"user_id": user_id, "infer": False}
+        if _vector_store() == "pgvector":
+            # The HTTPS adapter records this itself; tag mem0 OSS writes too
+            # so the Qwen collection's model constraint holds on either path.
+            kwargs["metadata"] = {"embedding_model": _mem0_embedding_model()}
+        client.add(redact_for_memory(text), **kwargs)
         return True
     except Exception:  # noqa: BLE001
         return False

@@ -47,7 +47,7 @@ def add_memory(body: MemoryAddRequest, actor: dict = Depends(any_role())):
     if not ok:
         raise HTTPException(
             status_code=503,
-            detail="mem0 is unavailable (check mem0ai install, DATABASE_URL, and pgvector)",
+            detail="Preference recall is unavailable (check /memory/status and the configured embedding model and storage)",
         )
 
     conn = get_conn()
