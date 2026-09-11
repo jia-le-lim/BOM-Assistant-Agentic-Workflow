@@ -13,7 +13,7 @@
 
 ## 1. One-paragraph summary
 
-PRD v2 routed every active part to **SBA** (Syntetos–Boylan Approximation, bias-corrected Croston), with **TSB** for decaying parts, then NegBin lead-time demand → Min/ROP/Max. S11 built that segmentation on the real multi-month panel and showed the estimator had almost nothing to estimate on: the panel is 8 irregular snapshots, ~3 points per item, and 0.05 non-zero demand events per item on average. SBA/TSB only update on a demand occurrence, so for ~96% of TCB items the "forecast" would have been its own initial value. The engine therefore moved to **cumulative-window rate estimation** (PRD v3.2): read the demand rate straight out of the trailing-consumption windows each snapshot already ships (`last_5/30/90/180/365/547_day`), and keep the rest of the pipeline — dispersion, NegBin LTD, service level, insurance policy — unchanged. **The pivot replaced the rate estimator, not the paradigm.**
+PRD v2 routed every active part to **SBA** (Syntetos–Boylan Approximation, bias-corrected Croston), with **TSB** for decaying parts, then NegBin lead-time demand → Min/ROP/Max. S11 built that segmentation on the real multi-month panel and showed the estimator had almost nothing to estimate on: the panel is 8 irregular snapshots, ~3 points per item, and 0.05 non-zero demand events per item on average. Both methods update demand size only on positive demand; TSB additionally updates occurrence probability on every observed period, including zeros. With so few observed positive events, the demand-size estimates were poorly supported. The engine therefore moved to **cumulative-window rate estimation** (PRD v3.2): read the demand rate straight out of the trailing-consumption windows each snapshot already ships (`last_5/30/90/180/365/547_day`), and keep the rest of the pipeline — dispersion, NegBin LTD, service level, insurance policy — unchanged. **The pivot replaced the rate estimator, not the paradigm.**
 
 ## 2. What SBA/TSB was supposed to do
 
@@ -42,7 +42,7 @@ Measured on `s11_segmentation.csv` (3,060 TCB items):
 
 ### 3.2 The estimator would never have fired
 
-SBA/TSB update demand size and interval **only on a non-zero period**. At 0.05 non-zero periods per item, the overwhelming majority of items carry the initialisation value forever. That is not a forecast; it is a constant dressed as one.
+SBA updates demand size and inter-demand interval only on a positive period. TSB updates size on positive periods but **updates occurrence probability every observed period, including zeros**, allowing its forecast to decay. At 0.05 observed non-zero periods per item in the original panel, neither method had enough positive observations to establish a reliable smoothed demand-size estimate.
 
 ### 3.3 Coverage did not justify the machinery
 
@@ -121,3 +121,15 @@ The pivot is an estimator swap, so the return path is narrow and cheap (PRD v3 �
 3. Demand is read per period from observed issues, not from a trailing window straddling gaps.
 
 Then replace `_estimate_mu` with the SBA/TSB rate and leave the dispersion, distribution, policy, and scoring layers exactly as they are. Continuous time-series ML stays reserved for the **aggregated site level**, never per intermittent part.
+
+## 7. Retest after the additional archive (11 September 2026)
+
+The expanded panel contains 26,302 eligible reviews across 14 observed cycles,
+with a median nine snapshots per item-stockroom but at most three consecutive
+review months. An offline test of 27 observed-snapshot SBA/TSB variants found no
+pooled matching improvement: 54.42% current versus 47.95% SBA, 51.11% TSB and
+50.44% SBA-active/TSB-declining on 1,808 active/declining reviews. The best blend
+reached 53.60% and increased large undersizing. These are snapshot approximations,
+not validation on continuous monthly issues. Production was unchanged.
+
+See the [full retest and methodological limits](log/2026-09-11_SBA_TSB_Backtest.md).
