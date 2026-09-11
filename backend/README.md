@@ -30,6 +30,104 @@ copy backend\.env.example backend\.env   # then paste the DB password in
 A deployed backend with normal egress skips step 2 and points `DATABASE_URL`
 straight at the pooler. Details in Backend_Scaffold_Notes.md §F6.
 
+## Local Ollama chat
+
+The chat router, agent tool loop, suggestions, and assist explanations all use
+`app/llm/nyra.py`. Its OpenAI-compatible client can call Ollama without adding
+another SDK. The `nyra` provider name identifies this adapter; `/health` also
+reports the configured model.
+
+Install and start Ollama, then download the model once:
+
+```powershell
+ollama pull qwen3.8:latest
+ollama pull qwen3-embedding:0.6b
+ollama list
+```
+
+Update these entries in your existing `backend/.env`:
+
+```dotenv
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen3.8:latest
+LLM_API_KEY=ollama
+LLM_TIMEOUT_S=180
+NO_PROXY=localhost,127.0.0.1,::1
+MEM0_ENABLED=1
+MEM0_VECTOR_STORE=supabase_rest
+MEM0_COLLECTION_NAME=bom_engineer_memory_qwen3_1024
+MEM0_EMBEDDING_MODEL=qwen3-embedding:0.6b
+MEM0_EMBEDDING_DIMS=1024
+MEM0_LLM_MODEL=qwen3.8:latest
+MEM0_TELEMETRY=false
+```
+
+Keep `/v1` in the URL. `ollama` is a placeholder key for the client. Append the
+loopback hosts to any existing `NO_PROXY` exclusions so local requests bypass
+the corporate HTTP proxy. Existing shell variables override `.env`; update
+them too if they still select DeepSeek or omit the loopback exclusions.
+
+Restart the backend after editing `.env`, then check:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/tags
+Invoke-RestMethod http://127.0.0.1:8011/health
+```
+
+The health response should show `llm_model: qwen3.8:latest`. It reports
+configuration only; use a chat question to check inference. Ollama must run on
+the same machine as the backend for this localhost URL to work. Initial model
+loading can take longer than later requests; adjust `LLM_TIMEOUT_S` if needed.
+
+Preference recall uses Qwen3 embeddings through the same local endpoint.
+`supabase_rest` stores explicit, redacted preferences and searches them by
+cosine similarity through the application's existing Supabase HTTPS connection.
+Set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or the legacy service-role key).
+This path needs no database password, tunnel, or mem0 OSS package. It preserves
+the existing `infer=False` behavior: preferences are saved explicitly, without
+an LLM extraction step. The direct `pgvector` path remains available for mem0
+OSS deployments.
+
+Apply the `ollama_preference_memory` migration in `supabase/migrations` before
+enabling recall on another Supabase project. It creates a server-only table for
+1024-dimensional Qwen vectors, with RLS enabled. Queries filter by engineer and
+embedding model before ranking. The original 1536-dimensional memory table is
+preserved. If it contains preferences, re-embed their text into the new table
+before switching; never copy the old vectors. The current project's original
+table was empty when this migration was performed.
+
+Check storage and local embeddings together with:
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8011/memory/status?probe=true' -Headers @{'X-User'='alice'; 'X-Role'='engineer'}
+```
+
+Expect `enabled: true`, `vector_store: supabase_rest`, and `ready: true`.
+Chat and embedding inference run locally; preference text, vectors, and review
+history remain in Supabase.
+
+This workspace has a separate Python 3.13 environment because the older `.venv`
+references a missing Python 3.12 installation. Start with:
+
+```powershell
+.venv-ollama\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --port 8011
+```
+
+To recreate that environment elsewhere, run `py -3.13 -m venv .venv-ollama`, then
+`.venv-ollama\Scripts\python.exe -m pip install -r backend/requirements.txt`.
+
+References: [Ollama API compatibility](https://docs.ollama.com/api/openai-compatibility)
+and [Qwen3.8 model](https://ollama.com/library/qwen3.8),
+[Qwen3 embedding model](https://ollama.com/library/qwen3-embedding:0.6b).
+
+Validation on 2026-09-10: the chat, assist, agent-boundary, and memory suites
+passed (107 tests). Live checks verified a Qwen tool-call round trip, local
+1024-dimensional embeddings, persisted preference recall, and engineer
+isolation; synthetic preferences were removed after verification. Supabase
+confirmed RLS and no browser-role access on the new table. Its advisor reports
+the expected no-policy notice for server-only tables and an existing
+[`exec_sql` search-path warning](https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable).
+
 ## Test
 
 ```powershell
@@ -55,11 +153,13 @@ work around a config error.
 |---|---|---|
 | `DATABASE_URL` | **server refuses to start** | Supabase Postgres |
 | `LLM_BASE_URL` | `EchoProvider` — deterministic, no network | any OpenAI-compatible endpoint |
-| `MEM0_ENABLED` | off; `mem0ai` never imported | pgvector recall layer |
+| `MEM0_ENABLED` | off | preference recall using the selected storage transport |
+| `MEM0_VECTOR_STORE` | `pgvector` (mem0 OSS) | `supabase_rest` for HTTPS preference recall |
+| `MEM0_COLLECTION_NAME` | `bom_engineer_memory` | collection matching the embedding model |
 | `LLM_REDACT_PROMPTS` | off (endpoint is internal) | mask PRD §5.1 sensitive fields |
 | `BOM_ALLOW_SQLITE` | — | test-only escape hatch, set by conftest |
 
-To turn the optional mem0 recall layer on, install `backend/requirements-mem0.txt`,
+For the direct Postgres mem0 OSS path, install `backend/requirements-mem0.txt`,
 set `MEM0_ENABLED=1`, and provide a **direct Postgres** URL via `MEM0_DATABASE_URL`
 (or `DATABASE_URL`). Supabase REST keys (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`)
 are not enough for mem0. Ensure pgvector is enabled on the target database
