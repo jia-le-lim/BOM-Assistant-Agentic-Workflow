@@ -52,7 +52,7 @@ def test_constant_consumer_is_sized_and_monotonic():
     assert mx >= rp >= mn >= 0
     assert "CONSTANT_CONSUMER" in r["reason_code"]
     assert 0 < r["confidence_score"] <= 1
-    assert r["model_version"] == "stat-v1"
+    assert r["model_version"] == "stat-v2"
     assert isinstance(r["explanation"], str) and r["explanation"]
 
 
@@ -353,8 +353,157 @@ def test_excess_netting_reduces_max():
     assert "EXCESS_NETTED" in netted["reason_code"]
 
 
-def test_levers_default_off_match_baseline():
-    """Every new lever defaults to the current sizing (no silent regression)."""
+# The population the anchoring levers exist for: one issue a year, nothing in the
+# last quarter. mu_LT lands near 0.3, so the quantile returns Max=1 -- which is the
+# level already in force, i.e. inside the snap band. _CONST is deliberately NOT
+# reused here: at 12/year it sizes to Max 3 against a current of 1 and never enters
+# the band, which is the whole point of the lever (analysis/s26_small_delta_tuning).
+_LOW = dict(frequencymonthswithusage=1, max_qty=1, rop_qty=0, min_qty=0,
+            last_180_day_cnsmptn_qty=1, last_365_day_cnsmptn_qty=1,
+            last_547_day_cnsmptn_qty=1)
+_OTD = dict(replenishment_policy="Order To Demand",
+            prior_final_max=2, prior_final_rop=1, prior_final_min=0)
+# Anchoring is ON by default, so "no anchoring" has to be asked for explicitly --
+# _run() is no longer the unanchored baseline these tests contrast against.
+_OFF = {"continuity_snap": 0, "prior_anchor_policy": ""}
+
+
+def test_continuity_snap_holds_the_current_level():
+    base = _row(**_LOW)
+    default = _run_cfg([base], _OFF).iloc[0]
+    assert abs(default["factory_recommended_new_max"] - 1) <= 1, "fixture must sit in the band"
+    snapped = _run_cfg([base], {"continuity_snap": 1}).iloc[0]
+    assert snapped["factory_recommended_new_max"] == 1
+    assert snapped["factory_recommended_new_rop"] == 0
+    assert snapped["factory_recommended_new_min"] == 0
+    assert "CONTINUITY_SNAP" in snapped["reason_code"]
+    assert snapped["factory_recommendation_action"] == "Maintain"
+
+
+def test_continuity_snap_leaves_a_far_engine_number_alone():
+    base = _row(max_qty=99, rop_qty=50, min_qty=10, **_HI)
+    default = _run_cfg([base], _OFF).iloc[0]
+    snapped = _run_cfg([base], {"continuity_snap": 1}).iloc[0]
+    assert snapped["factory_recommended_new_max"] == default["factory_recommended_new_max"]
+    assert "CONTINUITY_SNAP" not in snapped["reason_code"]
+
+
+def test_snap_carries_min_so_the_monotonic_clamp_cannot_undo_it():
+    """Regression: snapping Max+ROP but not Min lets new_rop = max(new_rop, new_min)
+    re-raise ROP, and new_max = max(new_max, new_rop) then drag Max back up."""
+    r = _run_cfg([_row(**_LOW)], {"continuity_snap": 1}).iloc[0]
+    assert (r["factory_recommended_new_max"], r["factory_recommended_new_rop"],
+            r["factory_recommended_new_min"]) == (1, 0, 0)
+
+
+def test_snap_does_not_touch_dormant_rows():
+    dormant = _row(item_id="D", max_qty=4, rop_qty=2, min_qty=1)
+    default = _run_cfg([dormant], _OFF).iloc[0]
+    snapped = _run_cfg([dormant], {"continuity_snap": 1}).iloc[0]
+    assert default["route"] == "dormant"
+    assert snapped["factory_recommended_new_max"] == default["factory_recommended_new_max"]
+    assert "CONTINUITY_SNAP" not in snapped["reason_code"]
+
+
+def test_prior_anchor_beats_the_current_level_for_order_to_demand():
+    r = _run_cfg([_row(**_LOW, **_OTD)],
+                 {"continuity_snap": 1, "prior_anchor_policy": "demand"}).iloc[0]
+    assert r["factory_recommended_new_max"] == 2
+    assert r["factory_recommended_new_rop"] == 1
+    assert r["factory_recommended_new_min"] == 0
+    assert "PRIOR_ANCHOR" in r["reason_code"]
+    assert "CONTINUITY_SNAP" not in r["reason_code"]
+
+
+def test_prior_anchor_ignores_order_to_max_parts():
+    base = _row(**_LOW, **_OTD)
+    base["replenishment_policy"] = "Order To Max"
+    r = _run_cfg([base], {"continuity_snap": 1, "prior_anchor_policy": "demand"}).iloc[0]
+    assert r["factory_recommended_new_max"] == 1
+    assert "CONTINUITY_SNAP" in r["reason_code"]
+    assert "PRIOR_ANCHOR" not in r["reason_code"]
+
+
+def test_prior_anchor_falls_back_to_current_without_a_prior():
+    base = _row(**_LOW, replenishment_policy="Order To Demand")
+    r = _run_cfg([base], {"continuity_snap": 1, "prior_anchor_policy": "demand"}).iloc[0]
+    assert r["factory_recommended_new_max"] == 1
+    assert "CONTINUITY_SNAP" in r["reason_code"]
+
+
+def test_prior_anchor_needs_the_snap_band_to_be_open():
+    """A prior decision far from both the engine and the level in force is an old
+    number, not evidence -- the anchor may only fire inside the band.
+
+    Anchoring stays ON here: the band is closed by DISTANCE, not by config, or
+    the test would only be re-proving that switching the feature off works.
+    """
+    base = _row(max_qty=99, rop_qty=50, min_qty=10, **_HI, **_OTD)
+    r = _run([base]).iloc[0]
+    assert abs(r["factory_recommended_new_max"] - 99) > 1, "band must be closed"
+    assert r["factory_recommended_new_max"] != 2          # not the prior decision
+    assert "PRIOR_ANCHOR" not in r["reason_code"]
+    assert "CONTINUITY_SNAP" not in r["reason_code"]
+
+
+def test_anchor_refuses_a_non_monotonic_level_set():
+    """rop_qty > max_qty is reachable in the extract. Snapping to it would be
+    undone by the Max >= ROP >= Min clamp, shipping CONTINUITY_SNAP on a row the
+    engine actually moved."""
+    base = _row(**{**_LOW, "max_qty": 0, "rop_qty": 2, "min_qty": 0})
+    r = _run([base]).iloc[0]
+    assert "CONTINUITY_SNAP" not in r["reason_code"]
+    assert r["factory_recommended_new_max"] >= r["factory_recommended_new_rop"]
+
+
+def test_anchor_refuses_an_incomplete_level_set():
+    """A blank rop_qty must not be read as ROP 0 -- that proposes never
+    reordering an active part."""
+    base = _row(**_LOW)
+    base["rop_qty"] = ""
+    r = _run([base]).iloc[0]
+    assert "CONTINUITY_SNAP" not in r["reason_code"]
+
+
+def test_critical_part_is_never_anchored_below_the_quantile():
+    base = _row(**{**_LOW, "sfm_criticality": "H", "max_qty": 1,
+                   "rop_qty": 0, "min_qty": 0})
+    off = _run_cfg([base], _OFF).iloc[0]
+    on = _run([base]).iloc[0]
+    assert on["factory_recommended_new_max"] >= off["factory_recommended_new_max"]
+    if off["factory_recommended_new_max"] > 1:
+        assert "CRITICAL_NO_ANCHOR" in on["reason_code"]
+        assert "CONTINUITY_SNAP" not in on["reason_code"]
+
+
+def test_anchored_row_flags_an_unplaceable_moq():
+    """Max >= ROP + MOQ is a quantile guarantee; the level in force carries no
+    such promise, so say so instead of silently rounding the anchor away."""
+    # The quantile floors Max at ROP + MOQ, so a big MOQ only stays inside the
+    # band when the level in force is already MOQ-sized. Here it is (25), but its
+    # ROP of 5 leaves only 20 of headroom for a 25-unit order.
+    base = _row(**{**_LOW, "max_qty": 25, "rop_qty": 5, "min_qty": 0,
+                   "order_qty_multiple": 25})
+    r = _run([base]).iloc[0]
+    assert "CONTINUITY_SNAP" in r["reason_code"]
+    assert "MOQ_UNREACHABLE" in r["reason_code"]
+    assert (r["factory_recommended_new_max"], r["factory_recommended_new_rop"]) == (25, 5)
+
+
+def test_explanation_does_not_credit_the_quantile_for_an_anchored_number():
+    snapped = _run([_row(**_LOW)]).iloc[0]
+    assert "kept it unchanged" in snapped["explanation"]
+    anchored = _run([_row(**_LOW, **_OTD)]).iloc[0]
+    assert "last engineer decision" in anchored["explanation"]
+
+
+def test_demand_model_levers_default_off_match_baseline():
+    """The demand-model levers default to the current sizing (no silent regression).
+
+    The two anchoring levers are deliberately NOT in this list: they are ON by
+    default since 2026-09-10, and their own default is pinned by
+    test_anchoring_levers_are_on_by_default below.
+    """
     rows = [_row(**_CONST)]
     base = _run(rows).iloc[0]
     same = _run_cfg(rows, {"demand_estimator": "single", "trend_adjust": False,
@@ -363,6 +512,26 @@ def test_levers_default_off_match_baseline():
     for c in ("factory_recommended_new_max", "factory_recommended_new_rop",
               "factory_recommended_new_min"):
         assert base[c] == same[c]
+
+
+def test_anchoring_levers_are_on_by_default():
+    """Pinned on the population they target, so a silent default flip fails here."""
+    base = _run([_row(**_LOW, **_OTD)]).iloc[0]
+    assert base["factory_recommended_new_max"] == 2      # the prior decision
+    assert base["factory_recommended_new_rop"] == 1
+    assert "PRIOR_ANCHOR" in base["reason_code"]
+    plain = _run([_row(**_LOW)]).iloc[0]
+    assert plain["factory_recommended_new_max"] == 1     # the level in force
+    assert "CONTINUITY_SNAP" in plain["reason_code"]
+
+
+def test_anchoring_can_be_switched_back_off():
+    """The escape hatch is the rollback path for a stocking decision -- keep it real."""
+    rows = [_row(**_LOW, **_OTD)]
+    off = _run_cfg(rows, {"continuity_snap": 0, "prior_anchor_policy": ""}).iloc[0]
+    assert "CONTINUITY_SNAP" not in off["reason_code"]
+    assert "PRIOR_ANCHOR" not in off["reason_code"]
+    assert off["factory_recommended_new_max"] == 1       # the raw quantile answer
 
 
 def test_end_to_end_statistical_engine(client, monkeypatch):

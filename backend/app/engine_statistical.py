@@ -25,7 +25,14 @@ from scipy.stats import nbinom, poisson
 
 from . import dormant_rules as DR
 
-MODEL_VERSION = "stat-v1"
+# Bump this whenever a DEFAULT changes the proposed Min/ROP/Max. It is stamped
+# onto every scored row (engine_adapter.score_batch) and is the only way to tell,
+# months later, which engine produced a number -- the config hash cannot help,
+# because module constants never enter cfg.
+#   stat-v1  original: criticality service level 0.99/0.95/0.90, pure quantile.
+#   stat-v2  2026-09-10: SL_BY_CRIT recalibrated to 0.90/0.85/0.80, and live-route
+#            anchoring (CONTINUITY_SNAP / PRIOR_ANCHOR_POLICY) on by default.
+MODEL_VERSION = "stat-v2"
 
 WINDOWS = [5, 30, 90, 180, 365, 547]
 CONS = {w: f"last_{w}_day_cnsmptn_qty" for w in WINDOWS}
@@ -53,14 +60,19 @@ SL_BY_CRIT = {"h": 0.90, "m": 0.85, "l": 0.80, "d": 0.80}
 SL_DEFAULT = 0.85
 
 # Agreement tolerance -- see close_enough(). Relative only, no absolute floor,
-# graded on Max and ROP. Every harness imports these rather than restating them
-# (analysis/common.py, s19, s20), so the scorecard cannot drift from the engine.
+# graded on Max and ROP. s19, s20 and analysis/scorecard.py import AGREE_TOL
+# rather than restating it, so the review scorecard cannot drift from the engine.
+# analysis/common.agree() deliberately does NOT: it keeps the old max(1, 10%) on
+# all three levels because it answers a different question (would a human review
+# have added nothing?) -- see the coupling note at analysis/common.py:109.
 AGREE_TOL = 0.10
 AGREE_FIELDS = ("max", "rop")
 
-# --- Demand-model + policy levers (PRD v3.2 A/B improvements). Every default
-# reproduces the current stat-v1 sizing, so a bare run() is unchanged; each is
-# opt-in via cfg and calibrated through analysis/s13 + s6_backtest. ---
+# --- Demand-model + policy levers (PRD v3.2 A/B improvements). Each is opt-in
+# via cfg and calibrated through analysis/s13 + s6_backtest; every default in
+# THIS block is off, so none of them alone changes a bare run(). (The live-route
+# anchoring levers below are the exception -- they ship on, which is why
+# MODEL_VERSION moved to stat-v2.) ---
 DEMAND_ESTIMATOR = "single"         # "single" (first populated window) | "blended"
 TREND_ADJUST = False                # lift mu toward the recent rate on a ramp
 TREND_BAND = (0.8, 1.2)             # 90d/365d momentum inside this band = stable
@@ -71,6 +83,28 @@ STOCKOUT_COST_BY_CRIT = {"h": 100000.0, "m": 5000.0, "l": 500.0, "d": 250.0}
 SL_FLOOR, SL_CEIL = 0.50, 0.999     # clamp on the cost-aware service level
 POLICY_MAX_DOI_DAYS = 0.0           # cap Max at this many days of demand (0 = off)
 POLICY_EXCESS_NETTING = False       # net shareable excess off the proposed Max
+
+# --- Live-route anchoring (analysis/s26_small_delta_tuning.py). At TCB demand
+# rates the lead-time quantile has no resolution left: median c365 is 1 unit/year,
+# so mu_LT lands near 0.3 and the quantile rounds to 0 or 1. The engine returned
+# Max=1 on 499 of 711 live rows and the engineers wrote 0, 1, 2, 3 and 4 inside
+# that one answer -- it was emitting the `rop + moq` floor, not sizing.
+#
+# ON by default since 2026-09-10 (owner decision). Over eight TCB cycles this
+# takes live-row agreement 30.9% -> 44.4%, and 40.1% -> 57.4% on the rows where
+# the old engine already landed within one unit of the engineer; proposals fall
+# 481 -> 201 while the hit rate on them rises 18.3% -> 19.4%, and proposed stock
+# falls $2.53M -> $2.36M. It wins five cycles of eight and loses 2024-10, where
+# the engineers held nearly every level and inertia alone was already 85.7%.
+# (An unguarded first cut scored 45.0 / 58.1; the refusals below -- incomplete or
+# non-monotonic level sets, and critical parts -- cost 0.6-0.7 pp of that.)
+#
+# Like SL_BY_CRIT this is a stocking decision, not only a fit: holding a level
+# the quantile wanted to raise is a real service risk, and no fill-rate backtest
+# exists yet to bound it (ML plan Phase 4). Set 0 / "" to restore the old sizing.
+CONTINUITY_SNAP = 1          # hold the current level when |Max - max_qty| <= this (0 = off)
+PRIOR_ANCHOR_POLICY = "demand"   # replenishment_policy substring whose parts anchor on
+                                 # the engineer's own last decision instead ("" = off)
 
 # Auto-clear policy (PRD v3 Phase 5), overridable via cfg. Auto-clear only
 # decides whether a HUMAN sees a row -- it never changes Min/ROP/Max, so the
@@ -275,9 +309,14 @@ def _benchmark(bench, prior, c365_now, c365_then):
 
     Returns (bench_vals, source) with source 'factory' | 'prior_review' | ''.
     """
-    if any(pd.notna(b) for b in bench):
+    # Presence is tested on the GRADED fields only. Testing all three let a row
+    # carrying just factory_recommended_new_min select source "factory", after
+    # which _agreement saw two NaN benchmarks and returned "none" -- discarding a
+    # usable prior-review benchmark the ladder would otherwise have reached.
+    n = len(AGREE_FIELDS)
+    if any(pd.notna(b) for b in bench[:n]):
         return bench, "factory"
-    if any(pd.notna(p) for p in prior) and _drift_ok(c365_now, c365_then):
+    if any(pd.notna(p) for p in prior[:n]) and _drift_ok(c365_now, c365_then):
         return prior, "prior_review"
     # ponytail: 365d volume only; add a per-window drift check if seasonality bites.
     return (float("nan"),) * 3, ""
@@ -293,7 +332,7 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     high_value_usd = float(cfg.get("autoclear_high_value_usd", AUTOCLEAR_HIGH_VALUE_USD))
     reliable_on = bool(cfg.get("autoclear_reliable", AUTOCLEAR_RELIABLE))
 
-    # Demand-model + policy levers (default = current stat-v1 behaviour).
+    # Demand-model + policy levers (each default off; see MODEL_VERSION).
     estimator = str(cfg.get("demand_estimator", DEMAND_ESTIMATOR))
     trend_on = bool(cfg.get("trend_adjust", TREND_ADJUST))
     lt_sigma_on = bool(cfg.get("lead_time_sigma", LEAD_TIME_SIGMA))
@@ -303,6 +342,8 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     max_doi_days = float(cfg.get("policy_max_doi_days", POLICY_MAX_DOI_DAYS))
     excess_netting_on = bool(cfg.get("policy_excess_netting", POLICY_EXCESS_NETTING))
     dormant_rules = cfg.get("dormant_rules", DORMANT_RULES)
+    snap_band = float(cfg.get("continuity_snap", CONTINUITY_SNAP))
+    anchor_policy = str(cfg.get("prior_anchor_policy", PRIOR_ANCHOR_POLICY)).strip().lower()
 
     win = {w: _num(df, CONS[w]) for w in WINDOWS}
     lt = _num(df, "contractual_lead_time")
@@ -331,6 +372,11 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     # same way prior_final_* is attached. Resolved there rather than here
     # because categorising needs the rule table, and the engine has no conn.
     category = df.get("part_category", pd.Series("", index=df.index)).astype(str)
+    # Order-To-Demand parts are not held to a Max in SAP, so max_qty is a stale
+    # field for them and the engineer's own last decision is the better anchor
+    # (212 of 508 live rows with a prior carry current < prior). Read the same
+    # way as the other text columns: a bare run() has no such column.
+    repl = df.get("replenishment_policy", pd.Series("", index=df.index)).astype(str)
 
     out = []
     for i in range(len(df)):
@@ -414,6 +460,56 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
             new_max = max(new_max, new_rop + moq)
             new_max = int(math.ceil(new_max / moq) * moq)
 
+            # --- live-route anchoring (ON by default, see MODEL_VERSION) ------
+            # The quantile above is worth trusting only where it clears the level
+            # already in force by more than its own resolution. Inside the band,
+            # propose what is in force -- or, for a part SAP does not manage to a
+            # Max, what this engineer last decided (analysis/s26_small_delta_tuning).
+            # Runs before the route reason codes so BIG_CHANGE cannot fire on a
+            # row this has just decided not to change. The DOI cap and excess
+            # netting below still apply: they are budget instruments, deliberately
+            # allowed to override an anchor, and both default off.
+            if snap_band > 0 and pd.notna(cur) and abs(new_max - cur) <= snap_band:
+                if (anchor_policy and anchor_policy in repl.iloc[i].strip().lower()
+                        and pd.notna(prior_max.iloc[i]) and pd.notna(prior_rop.iloc[i])):
+                    anchored, code = ((prior_min.iloc[i], prior_rop.iloc[i],
+                                       prior_max.iloc[i]), "PRIOR_ANCHOR")
+                else:
+                    anchored, code = ((cur_min.iloc[i], cur_rop.iloc[i], cur),
+                                      "CONTINUITY_SNAP")
+                # Anchor only on a level set that is COMPLETE and INTERNALLY
+                # CONSISTENT. All three move together, because the
+                # Max >= ROP >= Min clamp below would otherwise re-raise ROP to a
+                # quantile Min and drag Max with it. That carry only holds if the
+                # anchor is itself monotonic: a row carrying rop_qty > max_qty
+                # (max_qty is blank or zero on much of the extract) would be
+                # "snapped" and then clamped straight back up, shipping
+                # CONTINUITY_SNAP on a row the engine did in fact move. A missing
+                # level is refused for the same reason -- defaulting it to 0 would
+                # propose never reordering an active part.
+                a_min, a_rop, a_max = (float(v) if pd.notna(v) else float("nan")
+                                       for v in anchored)
+                usable = (all(pd.notna(v) for v in anchored)
+                          and 0 <= a_min <= a_rop <= a_max)
+                # A critical part never trades statistical protection for
+                # agreement. Every other risk-bearing policy in this module carves
+                # them out (auto-clear guards on _is_critical, dormant has
+                # DORMANT_CRITICAL_KEEPALIVE), and the anchor is the one lever
+                # that can LOWER a level -- on an "h" part that means reordering
+                # later than the demand distribution says to.
+                if usable and _is_critical(criticality) and a_max < new_max:
+                    usable = False
+                    reasons.append("CRITICAL_NO_ANCHOR")
+                if usable:
+                    new_min, new_rop, new_max = int(a_min), int(a_rop), int(a_max)
+                    reasons.append(code)
+                    if moq > 1 and new_max < new_rop + moq:
+                        # The quantile guarantees Max >= ROP + MOQ so one order is
+                        # placeable without overshooting Max. The level in force
+                        # carries no such guarantee. Surface that rather than
+                        # rounding the anchor away from the thing it anchors on.
+                        reasons.append("MOQ_UNREACHABLE")
+
             if route == "dying":
                 reasons.append("DYING_DEMAND")
                 review, conf, risk = "Y", 0.5, "Medium"
@@ -494,7 +590,8 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
                     if pd.notna(momentum) and 0.8 <= momentum <= 1.2:
                         review = "N"; reasons.append("RELIABLE_STABLE")
 
-        explanation = _explain(route, consumable, mu, L, sl, dist, new_min, new_rop, new_max)
+        explanation = _explain(route, consumable, mu, L, sl, dist,
+                               new_min, new_rop, new_max, reasons)
         out.append({
             "item_id": item.iloc[i],
             "factory_recommended_new_max": new_max,
@@ -520,13 +617,28 @@ def run(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def _explain(route, consumable, mu, L, sl, dist, mn, rp, mx) -> str:
+def _explain(route, consumable, mu, L, sl, dist, mn, rp, mx, codes=()) -> str:
+    """The sentence the reviewer reads. It has to describe what actually produced
+    these numbers, so `codes` is the row's reason list: a rule-set or anchored
+    quantity is never credited to the demand model."""
     if route == "no-data":
         return "No consumption data in any window -> kept current levels, flagged for review."
     if route == "dormant":
+        if dist == "rule":
+            return ("No consumption in any window -> levels set by the engineer-owned "
+                    f"dormant rule for this part: Min {mn} / ROP {rp} / Max {mx}.")
         return ("Critical part with no consumption -> keep-alive insurance stock."
                 if mx > 0 else
                 "No consumption in any window -> proposed zero, flagged for review.")
+    if "PRIOR_ANCHOR" in codes:
+        return (f"Order-to-demand part, so the stocked Max is not managed in the source "
+                f"system: kept this part's last engineer decision, Min {mn} / ROP {rp} / "
+                f"Max {mx}. The {dist} model at {int(sl * 100)}% service landed inside the "
+                f"continuity band of the current Max.")
+    if "CONTINUITY_SNAP" in codes:
+        return (f"The {dist} model at {int(sl * 100)}% service landed inside the continuity "
+                f"band of the level in force -> kept it unchanged at Min {mn} / ROP {rp} / "
+                f"Max {mx}.")
     rate = f"{mu:.3f}/day" if pd.notna(mu) else "n/a"
     tag = {"dying": "demand has ceased (older than a quarter)",
            "sporadic": "recent-only demand",

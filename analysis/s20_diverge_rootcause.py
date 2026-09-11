@@ -39,6 +39,12 @@ from scorecard import matched as _matched, num as _n, pair as _pair  # noqa: E40
 PKL = ROOT / "analysis" / "output" / "s20_payloads.pkl"
 OUT = ROOT / "analysis" / "output" / "s20_ablation.csv"
 
+# The two live-route anchoring levers are ON in the engine since 2026-09-10.
+# This harness measures the quantile engine they sit on top of, so it pins them
+# OFF -- otherwise "baseline" silently becomes the anchored engine and every
+# comparison in here changes meaning without a line of this file changing.
+ANCHOR_OFF = {"continuity_snap": 0, "prior_anchor_policy": ""}
+
 SL_LEGACY = {"h": 0.99, "m": 0.95, "l": 0.90, "d": 0.90}
 SL_LEGACY_DEFAULT = 0.95
 
@@ -48,7 +54,7 @@ def _sl_run(df: pd.DataFrame, table: dict, default: float, cfg: dict | None = No
     old_t, old_d = dict(E.SL_BY_CRIT), E.SL_DEFAULT
     E.SL_BY_CRIT, E.SL_DEFAULT = table, default
     try:
-        return E.run(df, cfg or {})
+        return E.run(df, {**ANCHOR_OFF, **(cfg or {})})
     finally:
         E.SL_BY_CRIT, E.SL_DEFAULT = old_t, old_d
 
@@ -73,7 +79,7 @@ def main() -> int:
     df = pd.read_pickle(PKL).reset_index(drop=True)
     bench = np.c_[_n(df, "_final_max"), _n(df, "_final_rop")]
     price = _n(df, "unitprice").fillna(0).values
-    base = E.run(df)
+    base = E.run(df, ANCHOR_OFF)
     route = base.route.values
     e0 = _pair(base)
     ok0 = _matched(e0, bench)
@@ -156,7 +162,7 @@ def main() -> int:
         ("P1 Max DOI cap 180d", {"policy_max_doi_days": 180}),
         ("P2 excess netting", {"policy_excess_netting": True}),
     ]:
-        rows[name] = score(_pair(E.run(df, cfg)))
+        rows[name] = score(_pair(E.run(df, {**ANCHOR_OFF, **cfg})))
     rows["SL legacy (.99/.95/.90)"] = score(_pair(_sl_run(df, SL_LEGACY, SL_LEGACY_DEFAULT)))
     t = pd.DataFrame(rows).T
     t["d live"] = (t["live%"] - t.loc["baseline (shipped)", "live%"]).round(1)

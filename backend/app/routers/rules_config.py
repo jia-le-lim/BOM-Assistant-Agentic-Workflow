@@ -49,6 +49,14 @@ SIMILARITY_DEFAULTS = {
     "similarity_divergence_frac": similarity.DIVERGENCE_FRAC,
 }
 
+# Live-route anchoring (engine stat-v2). Unlike every other sizing constant
+# these two SHIP ON and change proposed stock levels, so they have to be
+# reversible without a code deploy: 0 / "" restores the pre-stat-v2 sizing.
+SIZING_DEFAULTS = {
+    "continuity_snap": engine_statistical.CONTINUITY_SNAP,
+    "prior_anchor_policy": engine_statistical.PRIOR_ANCHOR_POLICY,
+}
+
 # Keys that may be updated via the API, with their expected types.
 EDITABLE = {
     "low_cost_threshold": (int, float),
@@ -73,6 +81,8 @@ EDITABLE = {
     "similarity_min_neighbours": (int, float),
     "similarity_k": (int, float),
     "similarity_divergence_frac": (int, float),
+    "continuity_snap": (int, float),
+    "prior_anchor_policy": (str,),
 }
 
 
@@ -82,7 +92,7 @@ def get_rules(actor: dict = Depends(any_role())):
     try:
         cfg = active_config(conn)
         merged = {**AUTOCLEAR_DEFAULTS, **TRIAGE_DEFAULTS,
-                  **SIMILARITY_DEFAULTS, **cfg}
+                  **SIMILARITY_DEFAULTS, **SIZING_DEFAULTS, **cfg}
         return {"rule_version": cfg["rule_version"],
                 "config": {k: v for k, v in merged.items() if not k.startswith("_")}}
     finally:

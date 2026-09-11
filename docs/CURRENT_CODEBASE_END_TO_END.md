@@ -459,7 +459,7 @@ The selected engine receives the source DataFrame and merged config.
 ## 13. Phase 9A: production-default statistical engine
 
 `backend/app/engine_statistical.py` is the default engine and emits
-`model_version=stat-v1`.
+`model_version=stat-v2`.
 
 It treats the cumulative consumption windows as several estimates of a daily
 demand rate. It does not reconstruct a transaction-level time series.
@@ -605,6 +605,55 @@ retain current ROP and current Min.
 
 After route sizing, any High-criticality part is set to High risk.
 
+### 13.7a Live-route anchoring
+
+Two engine-code levers, **on by default since 2026-09-10 (owner decision)**, that
+change the number on `active` and `dying` rows only. They exist because the
+lead-time quantile has no resolution left at TCB demand rates: median
+`last_365_day_cnsmptn_qty` is 1 unit, `mu_LT` lands near 0.3, and the quantile
+returned Max=1 on 499 of 711 live rows — inside which the engineers wrote 0, 1,
+2, 3 and 4. On those rows the engine was emitting the `rop + moq` floor rather
+than sizing.
+
+- `continuity_snap` (units, 0 = off): when the sized Max is within this many
+  units of `max_qty`, the engine proposes the level already in force — Max, ROP
+  **and** Min together — and adds `CONTINUITY_SNAP`. Running before the route
+  reason codes means `BIG_CHANGE` cannot fire on a row it has just decided not
+  to change, and carrying Min matters because the `Max >= ROP >= Min` clamp
+  below would otherwise re-raise ROP to a quantile Min and undo the snap.
+- `prior_anchor_policy` (substring, "" = off): inside that same band, a part
+  whose `replenishment_policy` contains the substring anchors on
+  `prior_final_max/rop/min` — this engineer's own last decision — instead of the
+  current level, and adds `PRIOR_ANCHOR`. Order-To-Demand parts are not held to
+  a Max in SAP, so `max_qty` is a stale field for them: 212 of 508 live rows
+  with a prior decision carry `current < prior`. Falls back to `CONTINUITY_SNAP`
+  when the policy does not match or no prior decision exists.
+
+Measured over eight TCB cycles (`analysis/s26_small_delta_tuning.py`, which
+asserts the shipped defaults reproduce its rule row-for-row): live-row agreement
+30.9% -> 44.4%, and 40.1% -> 57.4% on the rows where the pre-anchor engine
+already landed within one unit of the engineer. Proposals fall 481 -> 201 while
+the hit rate on them rises 18.3% -> 19.4%, and proposed stock falls $2.53M ->
+$2.36M. It wins five cycles of eight; it loses 2024-10, where the engineers held
+nearly every level and inertia alone already scored 85.7%.
+
+The anchor refuses three cases: a level set that is incomplete or not monotonic
+(`rop_qty > max_qty` is reachable) is never anchored on, because the
+`Max >= ROP >= Min` clamp would undo it; a critical part is never anchored
+*below* its quantile (`CRITICAL_NO_ANCHOR`); and an anchored row whose Max cannot
+absorb one `order_qty_multiple` is flagged `MOQ_UNREACHABLE` rather than silently
+rounded off its anchor.
+
+Both keys are in `rules_config.EDITABLE` and surfaced by `GET /config/rules`, so
+setting `continuity_snap: 0` and `prior_anchor_policy: ""` restores the
+pre-2026-09-10 sizing without a deploy. The analysis harnesses that measure the
+quantile engine underneath (s20, s23, s25, s26) pin those two keys off in their
+own baselines for exactly that reason.
+
+Like the service-level table this is a stocking decision, not only a fit:
+holding a level the quantile wanted to raise is a real service risk, and no
+fill-rate backtest exists yet to bound it (ML plan Phase 4).
+
 ### 13.8 Optional policy clamps
 
 Two additional engine-code levers are off by default and not exposed by the
@@ -666,7 +715,7 @@ Each result includes:
 - confidence;
 - plain-English explanation;
 - exposure `unitprice * new_max`, or zero when price is missing;
-- `model_version=stat-v1`;
+- `model_version=stat-v2`;
 - the active config's `rule_version`;
 - route, consumable class, agreement;
 - a debug-only `mu_day`, which the adapter does not persist.
