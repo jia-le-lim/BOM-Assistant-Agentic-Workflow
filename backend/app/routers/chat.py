@@ -50,8 +50,15 @@ def _latest_scored_batch(conn) -> int | None:
     return r["batch_id"] if r else None
 
 
-def _resolve_batch(conn, requested: int | None) -> int | None:
-    batch_id = requested or _latest_scored_batch(conn)
+def _resolve_batch(conn, requested: int | None, page_context=None) -> int | None:
+    if page_context is not None:
+        if requested is not None and requested != page_context.batch_id:
+            raise HTTPException(422, "batch_id does not match the current page")
+        batch_id = page_context.batch_id
+        if batch_id is None and page_context.path == "/chat":
+            batch_id = _latest_scored_batch(conn)
+    else:
+        batch_id = requested or _latest_scored_batch(conn)
     if batch_id is not None and conn.execute(
             "SELECT batch_id FROM batches WHERE batch_id=?",
             (batch_id,)).fetchone() is None:
@@ -100,7 +107,7 @@ def _predict_next_steps(question: str, answer: str) -> dict:
 def chat(body: ChatRequest, actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
-        batch_id = _resolve_batch(conn, body.batch_id)
+        batch_id = _resolve_batch(conn, body.batch_id, body.page_context)
         first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
         # Staging a proposal is a review action. Viewers and auditors get the
         # read-only tool surface, so the write tool is not even offered to the
@@ -110,7 +117,8 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
         result = run_chat(conn, question=body.question.strip(),
                           batch_id=batch_id, actor=actor,
                           session_id=body.session_id,
-                          allow_writes=allow_writes)
+                          allow_writes=allow_writes,
+                          page_context=body.page_context.model_dump() if body.page_context else None)
 
         turn_id = _record_turn(conn, result, actor, body.question.strip(), batch_id)
 
@@ -128,6 +136,7 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
                 "turn_id": turn_id,
                 "intent": result["intent"],
                 "staged_action": result.get("staged_action"),
+                "page_actions": result.get("page_actions", []),
                 "next_steps": next_steps}
     finally:
         conn.close()
@@ -186,13 +195,14 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
         conn = None
         try:
             conn = get_conn()
-            batch_id = _resolve_batch(conn, body.batch_id)
+            batch_id = _resolve_batch(conn, body.batch_id, body.page_context)
             first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
             allow_writes = actor.get("role") in REVIEW_ROLES
             result = run_chat(
                 conn, question=question, batch_id=batch_id, actor=actor,
                 session_id=body.session_id, allow_writes=allow_writes,
                 on_event=emit,
+                page_context=body.page_context.model_dump() if body.page_context else None,
             )
             turn_id = _record_turn(
                 conn, result, actor, question, batch_id, "/chat/stream")
@@ -229,6 +239,7 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
                 "tool_calls": result["tool_calls"],
                 "intent": result["intent"],
                 "staged_action": result.get("staged_action"),
+                "page_actions": result.get("page_actions", []),
                 "next_steps": next_steps,
             })
         except Exception as exc:

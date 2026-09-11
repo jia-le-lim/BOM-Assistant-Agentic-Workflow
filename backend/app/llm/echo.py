@@ -18,6 +18,7 @@ import json
 import re
 
 from .provider import Message, Response, ToolCall, ToolSpec
+from .echo_workspace import browser_context, workspace_calls
 
 ITEM_RE = re.compile(r"\b(\d{6,})\b")
 QTY_RE = re.compile(
@@ -112,13 +113,25 @@ class EchoProvider:
         last_user = next((m.content for m in reversed(messages)
                           if m.role == "user"), "")
         tool_results = [m for m in messages if m.role == "tool"]
+        page = browser_context(messages)
 
         # Ahead of the tool_results short-circuit on purpose: the classify node
         # runs on every turn, including the second turn of a conversation whose
         # first turn left tool messages in the history.
         if messages and messages[0].content.startswith(
                 "Classify the engineer's"):
-            return Response(content=self._classify(last_user),
+            intent = self._classify(last_user)
+            if page:
+                if page.get("path") in {"/config", "/config/dormant"}:
+                    intent = "configure"
+                elif ("this page" in last_user.lower() or "where am i" in last_user.lower()
+                      or "looking at" in last_user.lower()
+                      or re.search(r"\b(?:open|go to|take me to|navigate to)\b", last_user, re.I)):
+                    intent = "lookup"
+                elif page.get("item_id"):
+                    intent = self._classify(last_user + " item " + page["item_id"])
+                    if "why" in last_user.lower() and "assist" not in last_user.lower(): intent = "lookup"
+            return Response(content=intent,
                             model=self.model, provider=self.name)
 
         if messages and "triage synthesis specialist" in messages[0].content:
@@ -128,6 +141,13 @@ class EchoProvider:
         if tool_results:
             return Response(content=self._summarise(tool_results),
                             model=self.model, provider=self.name)
+
+        if page:
+            calls = workspace_calls(last_user, page, available)
+            if calls:
+                return Response(tool_calls=calls, model=self.model, provider=self.name)
+            if page.get("item_id") and not ITEM_RE.search(last_user):
+                last_user += " item " + page["item_id"]
 
         item = ITEM_RE.search(last_user)
         if (item and "history" in last_user.lower() and "note" in last_user.lower()
@@ -387,6 +407,21 @@ class EchoProvider:
         # engineer needs to be told why.
         if isinstance(data, dict) and data.get("error"):
             return str(data["error"])
+
+        if tool == "get_page_context":
+            page = data["page"]
+            detail = page.get("selected_text") or page.get("visible_text", "")[:700]
+            focused = page.get("focused_field")
+            if focused: detail = f"Focused field: {focused['label']}; draft value: {focused['value']}. " + detail
+            return f"You are on {page['title']} ({page['path']}), viewing {page.get('active_section') or page['title']}. {detail}"
+        if tool == "get_settings":
+            return "Saved settings retrieved. To fill a draft offline, paste a table with item_id, policy, quantity; machine_type, criticality; or use setting_name=value. State the policy and every fixed quantity explicitly."
+        if tool == "fill_settings_form":
+            draft = data["draft"]
+            count = len(draft["rows"]) or len(draft["updates"])
+            return f"Prepared {count} entries for {draft['section']}. Review the editable draft on the page, then use Propose or Save. Nothing has been saved yet."
+        if tool == "navigate_to_page":
+            return f"Requested opening {data['path']}."
 
         if tool == "get_recommendation":
             return (f"Item {data['item_id']}: {data['explanation']} "

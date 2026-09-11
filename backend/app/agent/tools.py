@@ -42,6 +42,8 @@ class ToolContext:
     batch_id: int | None
     question: str
     sources: list[dict] = field(default_factory=list)
+    page_context: dict | None = None
+    page_actions: list[dict] = field(default_factory=list)
 
 
 class ToolError(Exception):
@@ -1207,8 +1209,12 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
 #
 # Derived rather than assumed: this used to be `- {"propose_change"}`, which
 # quietly classified every later write tool as read-only.
+from .workspace import REGISTRY as WORKSPACE_TOOLS
+
+REGISTRY.update(WORKSPACE_TOOLS)
+
 WRITE_TOOLS = frozenset({"propose_change", "propose_dormant_rule",
-                         "run_assist", "stage_review_action"})
+                         "run_assist", "stage_review_action", "fill_settings_form"})
 
 READ_ONLY_TOOLS = frozenset(REGISTRY) - WRITE_TOOLS
 
@@ -1234,8 +1240,13 @@ INTENT_TOOLS: dict[str, frozenset[str]] = {
         "propose_change", "propose_dormant_rule", "get_current_values",
         "get_recommendation", "get_dormant_coverage"}),
     "action": frozenset({"stage_review_action", "get_current_values"}),
+    "configure": frozenset({"get_page_context", "get_settings", "fill_settings_form",
+                             "navigate_to_page", "get_dormant_coverage"}),
     "unknown": frozenset(),
 }
+
+for _intent in ("lookup", "assist", "advisory", "propose", "action"):
+    INTENT_TOOLS[_intent] |= {"get_page_context", "navigate_to_page"}
 
 # Branches a read-only role may never be routed into. graph.classify downgrades
 # to `lookup` rather than refusing, so a viewer still gets an answer -- they

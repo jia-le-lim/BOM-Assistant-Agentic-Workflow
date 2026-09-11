@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from .page_context import PageContext
+
 
 class ReviewRequest(BaseModel):
     decision: Literal["accept", "override", "reject"]
@@ -31,9 +33,16 @@ class ConfigUpdateRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2000)
+    question: str = Field(min_length=1, max_length=20000)
     batch_id: int | None = None
     session_id: str | None = None
+    page_context: PageContext | None = None
+
+    @model_validator(mode="after")
+    def nonblank_question(self):
+        if not self.question.strip():
+            raise ValueError("question must not be blank")
+        return self
 
 
 class StagedAction(BaseModel):
