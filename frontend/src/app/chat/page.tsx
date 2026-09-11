@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ApiError, useApi } from "@/lib/api";
+import { useAssistantContext } from "@/lib/assistant-context";
 import { can } from "@/lib/session";
 import { notifyChatHistoryChanged } from "@/lib/history";
 import type {
@@ -310,6 +311,7 @@ export default function ChatPage() {
 
 function Chat() {
   const { call, stream, role, user } = useApi();
+  const { capture, applyActions } = useAssistantContext();
   const params = useSearchParams();
   const [q, setQ] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -470,10 +472,12 @@ function Chat() {
       }
     };
 
+    const page = capture();
     const request = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: cleanQuestion, session_id: session.current }),
+      body: JSON.stringify({ question: cleanQuestion, session_id: session.current,
+                             batch_id: page.batch_id, page_context: page }),
     };
 
     try {
@@ -501,6 +505,8 @@ function Chat() {
       if (!completed) throw new Error("The agent stream ended before returning a result.");
 
       const result = completed as ChatStreamComplete;
+      const actionNotice = applyActions(result.page_actions ?? [], page);
+      if (actionNotice) setNote(actionNotice);
       session.current = result.session_id;
       const staged = result.sources.some((source) => source.type === "pending_change");
       const finalTrace = activeTraceRef.current ?? initialTrace;

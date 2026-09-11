@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { SessionProvider } from "@/lib/session";
 import { AppShell } from "@/components/AppShell";
+import { AssistantContextProvider } from "@/lib/assistant-context";
 
 export const metadata: Metadata = {
   title: "BOM Review Assistant",
@@ -16,7 +17,8 @@ export default function RootLayout({
   return (
     // Geist fonts removed: next/font/google fetches at build time and this
     // network blocks it. The palette specifies system-ui anyway.
-    <html lang="en" className="h-full antialiased">
+    // The sidebar script intentionally sets data-rail before hydration.
+    <html lang="en" className="h-full antialiased" suppressHydrationWarning>
       <body className="min-h-full flex flex-col">
         {/* Runs before the rail is parsed, so it paints at its remembered
             width. In an effect this lands after hydration and a collapsed rail
@@ -26,7 +28,7 @@ export default function RootLayout({
           + 'localStorage.getItem("bom.rail")==="collapsed"?"collapsed":"expanded"}'
           + 'catch(e){}' }} />
         <SessionProvider>
-          <AppShell>{children}</AppShell>
+          <AssistantContextProvider><AppShell>{children}</AppShell></AssistantContextProvider>
         </SessionProvider>
       </body>
     </html>

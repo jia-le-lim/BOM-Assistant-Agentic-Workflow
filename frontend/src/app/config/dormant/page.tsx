@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
-import type { DormantRule, DormantRuleCoverage, DormantRulePage } from "@/lib/types";
+import type { DormantRule, DormantRuleCoverage, DormantRulePage, DormantRuleDraft } from "@/lib/types";
+import { useAssistantForm } from "@/lib/assistant-context";
+import { AssistantDraftTable } from "@/components/AssistantDraftTable";
 import { Banner, Spinner } from "@/components/ui";
 
 /* Dormant stocking rules. The engine sizes a part with no consumption in any
@@ -32,6 +34,26 @@ export default function DormantRulesPage() {
   const [policy, setPolicy] = useState<DormantRule["policy"]>("hold_current");
   const [qty, setQty] = useState("");
   const [batchId, setBatchId] = useState("");
+  const [drafts, setDrafts] = useState<DormantRuleDraft[]>([]);
+
+  useAssistantForm({ scope, match_key: matchKey, policy, fixed_qty: qty, batch_id: batchId, drafts,
+    dirty: !!(matchKey || qty || drafts.length), busy, ready: !!page }, (actions) => {
+    if (!can.review(role) || busy) return;
+    for (const action of actions) if (action.section === "dormant_rules") {
+      if (action.rows.length === 1 && !drafts.length && !matchKey && !qty) {
+        const row = action.rows[0];
+        setScope(row.scope); setMatchKey(row.match_key); setPolicy(row.policy);
+        setQty(row.fixed_qty === null ? "" : String(row.fixed_qty));
+      } else {
+        setDrafts((current) => {
+          const updated = new Map(current.map((row) => [`${row.scope}:${row.match_key}`, row]));
+          for (const row of action.rows) updated.set(`${row.scope}:${row.match_key}`, row);
+          return [...updated.values()];
+        });
+      }
+      setNote("NYRA filled a draft. Review the fields and use Propose to submit it.");
+    }
+  });
 
   const load = useCallback(async () => {
     try { setPage(await call<DormantRulePage>("config/dormant-rules")); setErr(null); }
@@ -117,7 +139,7 @@ export default function DormantRulesPage() {
         already on screen keeps the numbers its reviewer saw.
       </Banner>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Coverage & stock impact">
         <h2 className="text-sm font-semibold mb-1">Coverage &amp; stock impact</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
           These rules move inventory. Match rate alone is not the decision — the book
@@ -146,7 +168,7 @@ export default function DormantRulesPage() {
         )}
       </div>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Dormant rules" data-assistant-target="dormant_rules">
         <h2 className="text-sm font-semibold mb-1">Rules</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
           An item rule beats a category rule beats the default, and each part
@@ -199,6 +221,24 @@ export default function DormantRulesPage() {
             </table>
           </div>
         )}
+
+        <AssistantDraftTable rows={drafts} onChange={(rows) => setDrafts(rows.map((row) => ({ ...row,
+          match_key: row.scope === "default" ? "" : row.match_key,
+          fixed_qty: row.policy === "fixed_qty" ? row.fixed_qty : null,
+        })))} section="dormant_rules"
+          endpoint="config/dormant-rules" canPropose={can.review(role) && !busy} onSaved={load}
+          onBusyChange={setBusy}
+          valid={(row) => (row.scope === "default" ? !row.match_key : !!row.match_key.trim())
+            && drafts.filter((other) => other.scope === row.scope && other.match_key === row.match_key).length === 1
+            && (row.policy !== "fixed_qty" || (row.fixed_qty !== null && Number.isInteger(row.fixed_qty)
+              && row.fixed_qty >= 0 && row.fixed_qty <= 10000))}
+          replacesActive={(row) => !!page?.rules.some((rule) => rule.confirmed && rule.scope === row.scope && rule.match_key === row.match_key)}
+          columns={[
+            { key: "scope", label: "Scope", options: ["item", "category", "default"] },
+            { key: "match_key", label: "Item / category", disabled: (row) => row.scope === "default" },
+            { key: "policy", label: "Policy", options: POLICIES.map(([value]) => value) },
+            { key: "fixed_qty", label: "Quantity", type: "number", disabled: (row) => row.policy !== "fixed_qty" },
+          ]} />
 
         <div className="flex flex-wrap gap-3 items-end">
           <label className="flex flex-col gap-1 text-xs">

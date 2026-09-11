@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
-import type { PartCategoryPage, RuleConfig } from "@/lib/types";
+import type { PartCategoryPage, RuleConfig, CriticalityDraft, CategoryDraft } from "@/lib/types";
+import { useAssistantForm } from "@/lib/assistant-context";
+import { AssistantDraftTable } from "@/components/AssistantDraftTable";
 import { Banner, Spinner } from "@/components/ui";
 
 const EDITABLE = [
@@ -45,6 +47,47 @@ export default function ConfigPage() {
   const [catPriority, setCatPriority] = useState("500");
   const [reliableEdit, setReliableEdit] = useState("");
   const [triageEnabledEdit, setTriageEnabledEdit] = useState("");
+  const [criticalityDrafts, setCriticalityDrafts] = useState<CriticalityDraft[]>([]);
+  const [categoryDrafts, setCategoryDrafts] = useState<CategoryDraft[]>([]);
+
+  useAssistantForm({ edits, rule_version: version, pattern, criticality: crit,
+    catPattern, catName, catPriority, reliableEdit, triageEnabledEdit,
+    criticalityDrafts, categoryDrafts, busy, ready: !!cfg,
+    dirty: !!(Object.keys(edits).length || version || pattern || catPattern || catName
+      || reliableEdit || triageEnabledEdit || criticalityDrafts.length || categoryDrafts.length),
+  }, (actions) => {
+    if (busy || !can.review(role)) return;
+    for (const action of actions) {
+      if (action.section === "thresholds" && can.configWrite(role)) {
+        const numeric: Record<string, string> = {};
+        for (const [key, value] of Object.entries(action.updates)) {
+          if (key === "autoclear_reliable") setReliableEdit(String(value));
+          else if (key === "triage_guarded_assist_enabled") setTriageEnabledEdit(String(value));
+          else if ([...EDITABLE, ...AUTOCLEAR].some(([name]) => name === key)) numeric[key] = String(value);
+        }
+        setEdits((current) => ({ ...current, ...numeric }));
+        if (action.rule_version) setVersion(action.rule_version);
+      } else if (action.section === "criticality") {
+        if (action.rows.length === 1 && !pattern && !criticalityDrafts.length) {
+          setPattern(action.rows[0].pattern); setCrit(action.rows[0].criticality);
+        } else setCriticalityDrafts((current) => {
+          const updated = new Map(current.map((row) => [row.pattern, row]));
+          for (const row of action.rows) updated.set(row.pattern, row);
+          return [...updated.values()];
+        });
+      } else if (action.section === "part_categories") {
+        if (action.rows.length === 1 && !catPattern && !categoryDrafts.length) {
+          setCatPattern(action.rows[0].pattern); setCatName(action.rows[0].category);
+          setCatPriority(String(action.rows[0].priority));
+        } else setCategoryDrafts((current) => {
+          const updated = new Map(current.map((row) => [row.pattern, row]));
+          for (const row of action.rows) updated.set(row.pattern, row);
+          return [...updated.values()];
+        });
+      }
+    }
+    setNote("NYRA filled an editable draft. Review the fields, then use Save or Propose.");
+  });
 
   const load = useCallback(async () => {
     try { setCfg(await call<RuleConfig>("config/rules")); setErr(null); }
@@ -157,7 +200,7 @@ export default function ConfigPage() {
       {err && <Banner kind="error">{err}</Banner>}
       {note && <Banner kind="success">{note}</Banner>}
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Thresholds" data-assistant-target="thresholds">
         <h2 className="text-sm font-semibold mb-3">Thresholds</h2>
         <div className="scroll-x">
           <table className="w-full text-sm min-w-[640px]">
@@ -172,6 +215,7 @@ export default function ConfigPage() {
                   <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
                   <td className="text-right">
                     <input className="field w-28 tnum text-right" type="number"
+                           aria-label={label}
                            disabled={!can.configWrite(role)}
                            value={edits[key] ?? ""}
                            placeholder={String(cfg.config[key] ?? "")}
@@ -202,7 +246,7 @@ export default function ConfigPage() {
         </p>
       </div>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Auto-clear policy">
         <h2 className="text-sm font-semibold mb-1">Auto-clear policy (statistical engine)</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
           Auto-clear decides whether a row skips human review — it never changes Min/ROP/Max.
@@ -223,6 +267,7 @@ export default function ConfigPage() {
                   <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
                   <td className="text-right">
                     <input className="field w-28 tnum text-right" type="number" step="any"
+                           aria-label={label}
                            disabled={!can.configWrite(role)}
                            value={edits[key] ?? ""}
                            placeholder={String(cfg.config[key] ?? "")}
@@ -236,6 +281,7 @@ export default function ConfigPage() {
                 <td className="text-right tnum">{cfg.config.autoclear_reliable ? "on" : "off"}</td>
                 <td className="text-right">
                   <select className="field w-28" disabled={!can.configWrite(role)}
+                          aria-label="Reliable-stable lever"
                           value={reliableEdit}
                           onChange={(e) => setReliableEdit(e.target.value)}>
                     <option value="">—</option>
@@ -252,7 +298,7 @@ export default function ConfigPage() {
         </div>
       </div>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Guarded bulk acceptance">
         <h2 className="text-sm font-semibold mb-1">Guarded bulk acceptance</h2>
         <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
           Review assist ranks review work but never changes Min/ROP/Max. Guarded assistance
@@ -272,6 +318,7 @@ export default function ConfigPage() {
                 </td>
                 <td className="text-right">
                   <select className="field w-28" disabled={!can.configWrite(role)}
+                          aria-label="Guarded bulk acceptance"
                           value={triageEnabledEdit}
                           onChange={(e) => setTriageEnabledEdit(e.target.value)}>
                     <option value="">—</option>
@@ -293,7 +340,7 @@ export default function ConfigPage() {
         </p>
       </div>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Machine criticality" data-assistant-target="criticality">
         <h2 className="text-sm font-semibold mb-1">Machine criticality</h2>
         <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
           Not derivable from the data — engineers own it. Anyone with review rights may
@@ -319,6 +366,14 @@ export default function ConfigPage() {
           </div>
         )}
 
+        <AssistantDraftTable rows={criticalityDrafts} onChange={setCriticalityDrafts} section="criticality"
+          endpoint="config/criticality" canPropose={can.review(role) && !busy} onSaved={load}
+          onBusyChange={setBusy}
+          valid={(row) => row.pattern.trim().length >= 2}
+          replacesActive={(row) => Object.hasOwn(criticality, row.pattern)}
+          columns={[{ key: "pattern", label: "Machine type contains" },
+            { key: "criticality", label: "Criticality", options: ["High", "Medium", "Low"] }]} />
+
         <div className="flex flex-wrap gap-3 items-end">
           <label className="flex flex-col gap-1 text-xs">
             <span style={{ color: "var(--text-secondary)" }}>machine_type contains</span>
@@ -329,6 +384,7 @@ export default function ConfigPage() {
           <label className="flex flex-col gap-1 text-xs">
             <span style={{ color: "var(--text-secondary)" }}>Criticality</span>
             <select className="field" value={crit} onChange={(e) => setCrit(e.target.value)}
+                    aria-label="Criticality"
                     disabled={!can.review(role)}>
               <option>High</option><option>Medium</option><option>Low</option>
             </select>
@@ -343,7 +399,7 @@ export default function ConfigPage() {
         </div>
       </div>
 
-      <div className="card p-5">
+      <div className="card p-5" data-assistant-section="Part categories" data-assistant-target="part_categories">
         <h2 className="text-sm font-semibold mb-1">Part categories</h2>
         <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
           What KIND of part each row is, matched against its description. This is a
@@ -399,6 +455,15 @@ export default function ConfigPage() {
             </table>
           </div>
         )}
+
+        <AssistantDraftTable rows={categoryDrafts} onChange={setCategoryDrafts} section="part_categories"
+          endpoint="config/part-categories" canPropose={can.review(role) && !busy} onSaved={loadCategories}
+          onBusyChange={setBusy}
+          valid={(row) => row.pattern.length >= 2 && row.category.length >= 2
+            && Number.isInteger(row.priority) && row.priority >= 1 && row.priority <= 9999}
+          replacesActive={(row) => !!cats?.rules.some((rule) => rule.confirmed && rule.pattern === row.pattern)}
+          columns={[{ key: "pattern", label: "Pattern" }, { key: "category", label: "Category" },
+            { key: "priority", label: "Priority", type: "number" }]} />
 
         <div className="flex gap-3 flex-wrap items-end">
           <label className="flex flex-col gap-1 text-xs">

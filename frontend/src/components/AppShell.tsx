@@ -55,7 +55,7 @@ function Burger() {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
-  const { call } = useApi();
+  const { call, user, role } = useApi();
   const [open, setOpen] = useState(false);
   // The rail's width is owned by data-rail on <html>, set by the inline script
   // in layout.tsx before first paint. React subscribes to that attribute rather
@@ -63,7 +63,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // first render after hydration without a cascading setState.
   const railOpen = useSyncExternalStore(subscribeRail, railIsOpen, () => true);
   const [health, setHealth] = useState<Health | null>(null);
-  const reviewContext = path.match(/^\/batches\/(\d+)(?:\/items\/([^/]+))?/);
 
   const title = TITLES.find(([p]) => path.startsWith(p))?.[1] ?? "Batches";
 
@@ -137,13 +136,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
         </header>
 
-        <main className="shell-content">{children}</main>
-        {reviewContext && (
-          <FloatingAssistant
-            batchId={Number(reviewContext[1])}
-            itemId={reviewContext[2] ? decodeURIComponent(reviewContext[2]) : undefined}
-          />
-        )}
+        <main className="shell-content" data-assistant-path={path}>{children}</main>
+        <FloatingAssistant key={`${user}:${role}`} />
       </div>
     </div>
   );

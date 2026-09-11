@@ -16,6 +16,10 @@ import {
 } from "@/components/ui";
 import { WorkflowPipeline } from "@/components/WorkflowPipeline";
 import { PriorityCallout, TriageLanes } from "@/components/TriageLanes";
+import { ReviewSplitView } from "@/components/ReviewSplitView";
+import type { ReviewDraft } from "@/components/ItemReview";
+import { useReviewView } from "@/lib/review-view";
+import { transitionReview } from "@/lib/review-motion";
 
 const PAGE = 25;
 
@@ -27,7 +31,13 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const { id } = use(params);
   const batchId = Number(id);
   const { call, raw } = useApi();
-  const { role } = useSession();
+  const { role, user } = useSession();
+  const [view, setView] = useReviewView();
+  const [activeItem, setActiveItem] = useState<string | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+  const [detailRevision, setDetailRevision] = useState(0);
+  const [drafts] = useState(() => new Map<string, ReviewDraft>());
+  const [overriding, setOverriding] = useState<Set<string>>(new Set());
   const canReview = can.review(role);
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -42,7 +52,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   // every button on this page read "Working…" at once, so a similarity run and
   // an engine re-run were indistinguishable while you waited for one of them.
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const busy = busyAction !== null;
+  const busy = busyAction !== null || detailBusy;
   // A filter change refetches the queue. The old rows stay on screen, dimmed,
   // rather than being replaced by a hole -- what you were reading stays the
   // answer until a better one arrives.
@@ -75,6 +85,28 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   // Only one box is ever open: clicking another number closes this one, and
   // leaving the box (blur, Enter, Escape) puts the number back to plain text.
   const [editing, setEditing] = useState<string | null>(null);
+
+  const onDraftChange = useCallback((key: string, override: boolean) => {
+    setOverriding((prev) => {
+      if (prev.has(key) === override) return prev;
+      const next = new Set(prev);
+      if (override) next.add(key); else next.delete(key);
+      return next;
+    });
+    if (override) setSelected((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev); next.delete(key); return next;
+    });
+  }, []);
+
+  const blockedKeys = useMemo(() => {
+    const keys = new Set(overriding);
+    for (const row of page?.items ?? []) {
+      const key = keyOf(row), edit = edits[key];
+      if (edit && (edit.max !== String(row.new_max) || edit.rop !== String(row.new_rop))) keys.add(key);
+    }
+    return keys;
+  }, [overriding, page, edits]);
 
   /** Record a typed-over Max or ROP, seeding the pair from the engine values.
    *  Typing also unticks the row: bulk accept records the engine's numbers, so
@@ -133,6 +165,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     setRefreshing(true);
     try {
       setPage(await call<RecommendationPage>(`recommendations?${params}`));
+      setDetailRevision((value) => value + 1);
       // A new page of rows is a new set of proposals; half-typed numbers from
       // the rows that just left the screen must not follow them.
       setEdits({});
@@ -183,6 +216,12 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const refresh = useCallback(async () => {
     await Promise.all([loadSummary(), loadPage(), loadAssist()]);
   }, [loadSummary, loadPage, loadAssist]);
+
+  const refreshAfterDetail = useCallback(async () => {
+    setNote("Item decision saved. The queue has been updated.");
+    setSelected(new Set());
+    await refresh();
+  }, [refresh]);
 
   const verdicts = useMemo(() => {
     const out = new Map<string, AssistPage["items"][number]>();
@@ -329,7 +368,9 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
     setSelected((prev) => new Set([...prev, ...preselectKeys]));
   }, [preselectOn, canReview, preselectKeys]);
 
-  const pageKeys = useMemo(() => (page?.items ?? []).map(keyOf), [page]);
+  const pageKeys = useMemo(() => (page?.items ?? [])
+    .filter((row) => row.status === "pending_review" && !blockedKeys.has(keyOf(row)))
+    .map(keyOf), [page, blockedKeys]);
   const allSelected = pageKeys.length > 0 && pageKeys.every((k) => selected.has(k));
 
   function toggle(k: string) {
@@ -408,12 +449,24 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
         </>
       )}
 
-      <div className="work-split">
+      <div className={`work-split review-layout-region${view === "split" ? " review-work-split" : ""}`}>
         <div className="flex flex-col gap-6">
         <div className="card p-5">
-          <div className="queue-toolbar flex flex-wrap items-end gap-3 mb-4">
-            <h2 className="text-sm font-semibold mr-auto">Review queue</h2>
-            <label className="flex flex-col gap-1 text-xs">
+          <fieldset disabled={busy} className="queue-toolbar flex flex-wrap items-end gap-3 mb-4">
+            <h2 className="text-sm font-semibold mr-auto" data-review-morph="control:heading">Review queue</h2>
+            <div className="review-view-toggle" data-review-morph="control:layout" role="group" aria-label="Review layout">
+              <button type="button" aria-pressed={view === "rows"} disabled={busy}
+                onClick={() => transitionReview("layout", () => setView("rows"), view !== "rows")}>
+                <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden><rect x="2" y="3" width="16" height="14" rx="2" /><path d="M2 8h16M2 12h16M7 3v14" /></svg>
+                Rows
+              </button>
+              <button type="button" aria-pressed={view === "split"} disabled={busy}
+                onClick={() => transitionReview("layout", () => setView("split"), view !== "split")}>
+                <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden><rect x="2" y="3" width="16" height="14" rx="2" /><path d="M8 3v14M4 7h2M4 10h2M4 13h2" /></svg>
+                Split view
+              </button>
+            </div>
+            <label className="flex flex-col gap-1 text-xs" data-review-morph="control:search">
               <span style={{ color: "var(--text-secondary)" }}>Search part</span>
               <input className="field w-44" type="search" value={qDraft}
                      placeholder="Item or stockroom"
@@ -432,20 +485,22 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                     opts={[["", "Any"], ["match", "Matches"], ["diverge", "Diverges"], ["none", "No benchmark"]]} />
             <Filter label="Risk" value={filters.risk_level} set={(v) => setFilter({ risk_level: v })}
                     opts={[["", "Any"], ["High", "High"], ["Medium", "Medium"], ["Low", "Low"]]} />
-            <label className="flex flex-col gap-1 text-xs">
+            <label className="flex flex-col gap-1 text-xs" data-review-morph="control:exposure">
               <span style={{ color: "var(--text-secondary)" }}>Min exposure $</span>
               <input className="field w-28" type="number" value={filters.min_exposure}
                      placeholder="0"
                      onChange={(e) => setFilter({ min_exposure: e.target.value })} />
             </label>
-          </div>
+          </fieldset>
 
-          <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+          {view === "rows" ? <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
             Sorted by exposure, highest first. Tick rows to accept or reject in bulk, or use
             the ✓ / ✕ on a row. Not happy with a proposed Max or ROP? Type your own over it —
             that row&apos;s ✓ then records an override and goes for senior approval. Click a row
             to open the item for the full form, with Min and a justification.
-          </p>
+          </p> : <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+            Sorted by exposure, highest first. Choose an item to review its details here. Your layout preference is saved in this browser.
+          </p>}
 
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-3 p-2 rounded"
@@ -471,7 +526,9 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
 
           {refreshing && page !== null && <Progress />}
 
-          {page === null ? (
+          {page === null && err ? (
+            <button className="btn" onClick={() => void loadPage()}>Retry queue</button>
+          ) : page === null ? (
             <TableSkeleton rows={8} cols={7} label="Loading the review queue" />
           ) : page.items.length === 0 ? (
             <p className="text-sm py-6" style={{ color: "var(--text-muted)" }}>
@@ -481,7 +538,13 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
             </p>
           ) : (
             <div className={refreshing ? "is-refreshing" : undefined}>
-              <div className="scroll-x">
+              {view === "split" ? <ReviewSplitView key={`${batchId}:${user}:${role}`} batchId={batchId}
+                rows={page.items} activeKey={activeItem} onActivate={setActiveItem}
+                verdicts={verdicts} selected={selected} onToggle={toggle}
+                canReview={canReview} disabled={busy || refreshing} drafts={drafts}
+                revision={detailRevision}
+                blockedKeys={blockedKeys} onDraftChange={onDraftChange}
+                onReviewed={refreshAfterDetail} onBusyChange={setDetailBusy} /> : <div className="scroll-x">
                 <table className="w-full text-sm min-w-[1280px]">
                   <thead>
                     <tr>
@@ -505,7 +568,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                       const k = keyOf(r);
                       const pending = r.status === "pending_review";
                       const a = verdicts.get(k);
-                      const href = `/batches/${batchId}/items/${r.item_id}`;
+                      const href = `/batches/${batchId}/items/${encodeURIComponent(r.item_id)}?stockroom_id=${encodeURIComponent(r.stockroom_id)}`;
                       const ed = edits[k];
                       const eMax = ed?.max ?? String(r.new_max);
                       const eRop = ed?.rop ?? String(r.new_rop);
@@ -516,10 +579,10 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                         && Number.isInteger(Number(eMax)) && Number.isInteger(Number(eRop))
                         && Number(eMax) >= Number(eRop) && Number(eRop) >= 0);
                       return (
-                        <tr key={k} className="row-link" onClick={() => router.push(href)}>
+                        <tr key={k} className="row-link" data-review-morph={`row:${k}`} onClick={() => router.push(href)}>
                           <td onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" checked={selected.has(k)}
-                                   disabled={!pending || edited}
+                                   disabled={!pending || edited || blockedKeys.has(k)}
                                    onChange={() => toggle(k)}
                                    title={edited
                                      ? "Bulk accept records the engine's numbers — use the "
@@ -531,12 +594,12 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                             {/* A real link, not just the row handler: row click is
                                 mouse-only, and this row has to be reachable by
                                 keyboard and announced as a destination. */}
-                            <Link href={href} className="font-mono text-xs"
+                            <Link href={href} className="font-mono text-xs review-morph-text" data-review-morph={`title:${k}`}
                                   onClick={(e) => e.stopPropagation()}>{r.item_id}</Link>
                           </td>
                           <td className="max-w-[240px] text-xs truncate"
                               title={r.item_desc || undefined}>
-                            {r.item_desc || "—"}
+                            <span className="review-morph-text" data-review-morph={`description:${k}`}>{r.item_desc || "—"}</span>
                           </td>
                           <td className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
                             {r.part_category || "—"}
@@ -609,15 +672,15 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
                     })}
                   </tbody>
                 </table>
-              </div>
+              </div>}
               <div className="flex items-center justify-between mt-4 text-xs">
                 <span style={{ color: "var(--text-muted)" }}>
                   {offset + 1}–{Math.min(offset + PAGE, page.total)} of {page.total.toLocaleString()}
                 </span>
                 <div className="flex gap-2">
-                  <button className="btn text-xs" disabled={offset === 0}
+                  <button className="btn text-xs" disabled={busy || refreshing || offset === 0}
                           onClick={() => setFilter({ offset: String(Math.max(0, offset - PAGE)) })}>Previous</button>
-                  <button className="btn text-xs" disabled={offset + PAGE >= page.total}
+                  <button className="btn text-xs" disabled={busy || refreshing || offset + PAGE >= page.total}
                           onClick={() => setFilter({ offset: String(offset + PAGE) })}>Next</button>
                 </div>
               </div>
@@ -742,7 +805,7 @@ function Filter({ label, value, set, opts }: {
   label: string; value: string; set: (v: string) => void; opts: [string, string][];
 }) {
   return (
-    <label className="flex flex-col gap-1 text-xs">
+    <label className="flex flex-col gap-1 text-xs" data-review-morph={`control:${label}`}>
       <span style={{ color: "var(--text-secondary)" }}>{label}</span>
       <select className="field" value={value} onChange={(e) => set(e.target.value)}>
         {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}

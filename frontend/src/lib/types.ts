@@ -303,7 +303,44 @@ export interface DormantRuleCoverage {
 /** Which branch of the agent graph answered. Read-only detail for the trace
  *  panel — the backend enforces what each branch may reach. */
 export type ChatIntent =
-  "lookup" | "assist" | "advisory" | "propose" | "action" | "unknown";
+  "lookup" | "assist" | "advisory" | "propose" | "action" | "configure" | "unknown";
+
+export interface PageField {
+  label: string;
+  value: string;
+  section: string;
+  disabled: boolean;
+}
+
+export interface AssistantPageContext {
+  path: string;
+  title: string;
+  batch_id: number | null;
+  item_id: string | null;
+  stockroom_id: string | null;
+  active_section: string;
+  visible_sections: string[];
+  visible_text: string;
+  selected_text: string;
+  focused_field: PageField | null;
+  fields: PageField[];
+  form_state: Record<string, unknown>;
+}
+
+export type DormantRuleDraft = Pick<DormantRule, "scope" | "match_key" | "policy" | "fixed_qty">;
+export interface CriticalityDraft { pattern: string; criticality: "High" | "Medium" | "Low" }
+export interface CategoryDraft { pattern: string; category: string; priority: number }
+export type SettingsFill = {
+  kind: "fill_settings";
+  path: string;
+  rule_version?: string | null;
+} & (
+  | { section: "dormant_rules"; rows: DormantRuleDraft[]; updates: Record<string, never> }
+  | { section: "criticality"; rows: CriticalityDraft[]; updates: Record<string, never> }
+  | { section: "part_categories"; rows: CategoryDraft[]; updates: Record<string, never> }
+  | { section: "thresholds"; rows: never[]; updates: Record<string, number | boolean> }
+);
+export type PageAction = SettingsFill | { kind: "navigate"; path: string };
 
 /**
  * A review-queue action the agent staged for a human to press. It is not a
@@ -331,6 +368,7 @@ export interface ChatResponse {
   turn_id: number;
   intent: ChatIntent;
   staged_action: StagedAction | null;
+  page_actions?: PageAction[];
   next_steps?: NextStepPrediction | null;
 }
 
