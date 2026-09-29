@@ -73,6 +73,7 @@ export interface Recommendation {
 }
 
 export interface BatchSummary {
+  read_only?: boolean;
   batch: {
     batch_id: number; label: string; status: string; row_count: number;
     quarantined_count: number; scored_rule_version: string | null;
@@ -129,6 +130,7 @@ export interface Review {
 }
 
 export interface ItemDetail {
+  read_only?: boolean;
   recommendation: Recommendation;
   status: Status;
   latest_review: Review | null;

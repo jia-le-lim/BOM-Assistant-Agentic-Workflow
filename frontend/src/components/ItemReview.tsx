@@ -183,7 +183,8 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
   const benchRaw = d.context.factory_recommended_new_max;
   const benchMax = benchRaw === null || benchRaw === undefined || benchRaw === ""
     ? null : Number(benchRaw);
-  const canApprove = d.status === "awaiting_senior" && can.approve(role)
+  const canReview = can.review(role) && !d.read_only;
+  const canApprove = !d.read_only && d.status === "awaiting_senior" && can.approve(role)
                      && latest?.reviewer !== user;
   const selectedTemplate = justificationTemplates.find(
     (template) => template.justification === justification);
@@ -209,7 +210,6 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
           {String(d.context.item_desc ?? "")}
         </p>
       </div>
-
       {err && <Banner kind="error">{err} <button className="btn text-xs" onClick={() => void load()}>Retry details</button></Banner>}
       {evidenceLoading && <p role="status" className="text-xs" style={{ color: "var(--text-muted)" }}>Loading history and supporting evidence…</p>}
       {note && <Banner kind="success">{note}</Banner>}
@@ -324,7 +324,7 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
                           : "The engine's own sizing for this cycle."}
                       </div>
                     </div>
-                    {can.review(role) && (
+                    {canReview && (
                       <button className="btn btn-primary text-xs" onClick={takeSuggestion}>
                         Use these numbers
                       </button>
@@ -342,10 +342,9 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
 
           <div className="card p-5">
             <h2 className="text-sm font-semibold mb-3">Decision</h2>
-            {!can.review(role) ? (
+            {!canReview ? (
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                Role <code>{role}</code> has read-only access. Switch to engineer, senior
-                or admin to record a decision.
+                {d.read_only ? "You have read-only access to this user's workspace." : "Your account has read-only access and cannot record a decision."}
               </p>
             ) : (
               <div className="flex flex-col gap-3">
@@ -442,7 +441,7 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
                     {latest?.reviewer === user
                       ? `You (${user}) recorded this review — a different person must approve it.`
-                      : `Role ${role} cannot approve. Switch to senior or admin.`}
+                      : "Your account does not have permission to approve."}
                   </p>
                 )}
               </div>

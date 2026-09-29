@@ -17,14 +17,14 @@ interface AssistantContextValue {
 const Context = createContext<AssistantContextValue | null>(null);
 
 export function pageIdentity(path: string) {
-  const match = path.match(/^\/batches\/(\d+)(?:\/items\/([^/]+))?/);
+  const match = path.match(/^\/(?:batches|workspaces)\/(\d+)(?:\/items\/([^/]+))?/);
   const batchId = match ? Number(match[1]) : null;
   let itemId: string | null = match?.[2] ?? null;
   try { if (itemId) itemId = decodeURIComponent(itemId); } catch { /* retain original */ }
   const title = path === "/config/dormant" ? "Dormant stocking rules"
     : path === "/config" ? "Rules & criticality"
     : itemId ? `Batch #${batchId} · Item ${itemId}`
-    : batchId ? `Batch #${batchId}` : path === "/chat" ? "Ask NYRA" : "Batches";
+    : batchId ? `Workspace #${batchId}` : path === "/chat" ? "Ask NYRA" : "Workspaces";
   return { title, batch_id: batchId, item_id: itemId };
 }
 

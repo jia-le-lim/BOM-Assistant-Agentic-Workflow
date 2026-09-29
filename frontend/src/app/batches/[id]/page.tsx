@@ -38,11 +38,11 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
   const [detailRevision, setDetailRevision] = useState(0);
   const [drafts] = useState(() => new Map<string, ReviewDraft>());
   const [overriding, setOverriding] = useState<Set<string>>(new Set());
-  const canReview = can.review(role);
   const router = useRouter();
   const searchParams = useSearchParams();
 
   const [summary, setSummary] = useState<BatchSummary | null>(null);
+  const canReview = can.review(role) && summary?.read_only !== true;
   const [page, setPage] = useState<RecommendationPage | null>(null);
   const [assist, setAssist] = useState<AssistPage | null>(null);
   const [ruleConfig, setRuleConfig] = useState<RuleConfig | null>(null);
@@ -406,7 +406,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           </p>
         </div>
         <div className="flex gap-2">
-          <button className="btn btn-primary" onClick={runEngine} disabled={busy || !can.upload(role)}>
+          <button className="btn btn-primary" onClick={runEngine} disabled={busy || !can.upload(role) || summary?.read_only}>
             <BusyLabel busy={busyAction === "engine"} running="Scoring rows…"
                        idle={isScored ? "Re-run engine" : "Run engine"} />
           </button>
@@ -424,6 +424,7 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
       </div>
 
       {err && <Banner kind="error">{err}</Banner>}
+      {summary?.read_only && <Banner kind="info">Viewing another user&apos;s workspace. You have read-only access.</Banner>}
       {note && <Banner kind="success">{note}</Banner>}
 
       {!isScored && !err && (
