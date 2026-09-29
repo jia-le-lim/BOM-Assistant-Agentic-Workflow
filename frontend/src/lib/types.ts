@@ -305,7 +305,7 @@ export interface DormantRuleCoverage {
 /** Which branch of the agent graph answered. Read-only detail for the trace
  *  panel — the backend enforces what each branch may reach. */
 export type ChatIntent =
-  "lookup" | "assist" | "advisory" | "propose" | "action" | "configure" | "unknown";
+  "lookup" | "assist" | "advisory" | "propose" | "action" | "configure" | "conversation" | "unknown";
 
 export interface PageField {
   label: string;
@@ -362,7 +362,21 @@ export interface StagedAction {
   executed: false;
 }
 
+export interface ChatSkill {
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+  available: boolean;
+  unavailable_reason: string | null;
+}
+
 export interface ChatResponse {
+  fallback?: boolean;
+  response_status?: string;
+  response_reason?: string;
+  skill?: Pick<ChatSkill, "name" | "title"> | null;
+  tool_calls?: ChatHistoryTurn["tool_calls"];
   answer: string;
   sources: Record<string, unknown>[];
   batch_id: number | null;
@@ -392,6 +406,10 @@ export interface ChatSessionSummary {
 }
 
 export interface ChatHistoryTurn {
+  fallback?: boolean;
+  response_status?: string;
+  response_reason?: string;
+  skill?: Pick<ChatSkill, "name" | "title"> | null;
   turn_id: number;
   session_id: string;
   batch_id: number | null;
@@ -401,6 +419,8 @@ export interface ChatHistoryTurn {
     name: string;
     args: Record<string, unknown>;
     ok: boolean;
+    status?: "ok" | "empty" | "error";
+    summary?: string;
   }>;
   provider: string | null;
   model: string | null;
@@ -420,14 +440,11 @@ export interface ChatStreamComplete extends ChatResponse {
   type: "complete";
   provider: string;
   model: string;
-  tool_calls: Array<{
-    name: string;
-    args: Record<string, unknown>;
-    ok: boolean;
-  }>;
+  tool_calls: ChatHistoryTurn["tool_calls"];
 }
 
 export type ChatStreamEvent =
+  | { type: "skill"; name: string; title: string }
   | { type: "request"; query: string; batch_id: number | null;
       provider: string; model: string }
   | { type: "classify"; intent: ChatIntent; provider: string; model: string }
@@ -441,7 +458,7 @@ export type ChatStreamEvent =
       status: "ok" | "empty" | "error"; summary: string }
   | { type: "fallback"; reason: string }
   | { type: "agent_complete"; source_count: number; tool_count: number;
-      fallback: boolean }
+      fallback: boolean; response_status?: string; response_reason?: string }
   | { type: "answer_start" }
   | { type: "answer_delta"; delta: string }
   | { type: "prediction_start"; provider: string; model: string }

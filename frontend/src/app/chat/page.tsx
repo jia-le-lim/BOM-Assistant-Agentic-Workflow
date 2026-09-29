@@ -8,17 +8,19 @@ import { useAssistantContext } from "@/lib/assistant-context";
 import { can } from "@/lib/session";
 import { notifyChatHistoryChanged } from "@/lib/history";
 import type {
-  ChatHistoryTurn, ChatResponse, ChatSession, ChatStreamComplete, ChatStreamEvent,
+  Batch, ChatHistoryTurn, ChatResponse, ChatSession, ChatSkill, ChatStreamComplete, ChatStreamEvent,
   ConfirmPendingResult, NextStepPrediction, PendingChange, PendingChangePage,
   StagedAction, UploadSummary,
 } from "@/lib/types";
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
-import { AgentActivity, AgentToolCalls } from "@/components/AgentActivity";
+import { ChatComposer } from "@/components/ChatComposer";
+import { ActivityIcon, ChatActivityPanel } from "@/components/ChatActivityPanel";
 import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
 import { NextStepSuggestions } from "@/components/NextStepSuggestions";
 import { SuggestionCards } from "@/components/SuggestionCards";
 import { ActionCard } from "@/components/ActionCard";
+import "./chat.css";
 
 interface Turn {
   q: string;
@@ -69,6 +71,12 @@ function upsertTraceStep(trace: AgentTrace, step: AgentTraceStep): AgentTrace {
 }
 
 function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace {
+  if (event.type === "skill") {
+    return upsertTraceStep(trace, {
+      id: "skill", label: `/${event.name}`, detail: event.title,
+      result: "Loaded skill instructions", status: "done",
+    });
+  }
   if (event.type === "request") {
     return upsertTraceStep({
       ...trace,
@@ -78,7 +86,7 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
     }, {
       id: "request",
       label: "Request accepted",
-      detail: event.batch_id ? `Using scored batch ${event.batch_id}` : "No scored batch selected",
+      detail: event.batch_id ? `Using workspace #${event.batch_id}` : "No workspace selected",
       result: `${event.provider} · ${event.model}`,
       status: "done",
     });
@@ -154,12 +162,13 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
     });
   }
   if (event.type === "agent_complete") {
-    return upsertTraceStep({ ...trace, fallback: event.fallback }, {
+    return upsertTraceStep({ ...trace, fallback: event.fallback, responseStatus: event.response_status }, {
       id: "grounding",
       label: "Grounding check",
       result: `${event.source_count} authoritative source${event.source_count === 1 ? "" : "s"} · `
             + `${event.tool_count} tool call${event.tool_count === 1 ? "" : "s"}`,
       status: event.fallback ? "warning" : "done",
+      detail: event.response_reason,
     });
   }
   if (event.type === "answer_start") {
@@ -201,7 +210,10 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
       ...trace,
       provider: event.provider,
       model: event.model,
+      fallback: event.fallback ?? trace.fallback,
+      responseStatus: event.response_status ?? trace.responseStatus,
     };
+    if (event.skill) completedTrace = applyTraceEvent(completedTrace, { type: "skill", ...event.skill });
     event.tool_calls.forEach((tool, index) => {
       const id = `tool-${index + 1}`;
       const current = completedTrace.steps.find((step) => step.id === id);
@@ -209,8 +221,8 @@ function applyTraceEvent(trace: AgentTrace, event: ChatStreamEvent): AgentTrace 
         id,
         label: current?.label ?? `Query ${toolLabel(tool.name)}`,
         detail: current?.detail ?? JSON.stringify(tool.args),
-        result: current?.result ?? (tool.ok ? "Tool call completed." : "Tool call failed."),
-        status: current?.status ?? (tool.ok ? "done" : "error"),
+        result: current?.result ?? tool.summary ?? (tool.ok ? "Tool call completed." : "Tool call failed."),
+        status: current?.status ?? (tool.status === "empty" ? "warning" : tool.ok ? "done" : "error"),
         technical: true,
         kind: "tool",
         toolName: tool.name,
@@ -239,23 +251,31 @@ function restoreTurn(saved: ChatHistoryTurn): Turn {
   const steps: AgentTraceStep[] = [{
     id: "request",
     label: "Saved request",
-    detail: saved.batch_id ? `Used scored batch ${saved.batch_id}` : "No scored batch selected",
+    detail: saved.batch_id ? `Used workspace #${saved.batch_id}` : "No workspace selected",
     result: [saved.provider, saved.model].filter(Boolean).join(" · ") || undefined,
     status: "done",
   }];
+  if (saved.skill) {
+    steps.push({ id: "skill", label: `/${saved.skill.name}`, detail: saved.skill.title,
+      result: "Saved skill run", status: "done" });
+  }
   saved.tool_calls.forEach((tool, index) => {
     steps.push({
       id: `tool-${index + 1}`,
       label: `Query ${toolLabel(tool.name)}`,
       detail: JSON.stringify(tool.args ?? {}),
-      result: tool.ok ? "Recorded tool call completed." : "Recorded tool call failed.",
-      status: tool.ok ? "done" : "error",
+      result: tool.summary ?? (tool.ok ? "Recorded tool call completed." : "Recorded tool call failed."),
+      status: tool.status === "empty" ? "warning" : tool.ok ? "done" : "error",
       technical: true,
       kind: "tool",
       toolName: tool.name,
       toolArgs: tool.args ?? {},
     });
   });
+  if (saved.response_reason || saved.fallback) {
+    steps.push({ id: "outcome", label: "Response outcome", detail: saved.response_reason,
+      status: saved.fallback ? "warning" : "done" });
+  }
   steps.push({ id: "answer", label: "Answer delivered", status: "done" });
   return {
     q: saved.question,
@@ -267,27 +287,11 @@ function restoreTurn(saved: ChatHistoryTurn): Turn {
       provider: saved.provider ?? undefined,
       model: saved.model ?? undefined,
       batchId: saved.batch_id,
+      fallback: saved.fallback,
+      responseStatus: saved.response_status,
       steps,
     },
   };
-}
-
-function SendIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" />
-    </svg>
-  );
-}
-
-function AttachIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         strokeWidth="1.8" strokeLinecap="round" aria-hidden>
-      <path d="m20.5 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.7 9.7a2 2 0 0 1-2.8-2.8l8.9-8.9" />
-    </svg>
-  );
 }
 
 function SourceIcon() {
@@ -324,10 +328,19 @@ function Chat() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [selectedActivity, setSelectedActivity] = useState<number | null>(null);
+  const [workspaceId, setWorkspaceId] = useState<number | null>(null);
+  const [workspaces, setWorkspaces] = useState<Batch[]>([]);
+  const [workspacesLoading, setWorkspacesLoading] = useState(true);
+  const [workspacesError, setWorkspacesError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<ChatSkill[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
   const session = useRef<string | undefined>(undefined);
   const conversationVersion = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const filePicker = useRef<HTMLInputElement>(null);
+  const activityToggle = useRef<HTMLButtonElement>(null);
   const latestTurn = useRef<HTMLElement>(null);
   const messagesEnd = useRef<HTMLDivElement>(null);
   const previousTurnCount = useRef(0);
@@ -337,6 +350,58 @@ function Chat() {
   // Mirrors backend REVIEW_ROLES / UPLOAD_ROLES; the backend enforces regardless.
   const canReview = can.review(role);
   const canUpload = can.upload(role);
+
+  const loadSkills = useCallback(async (signal?: AbortSignal) => {
+    setSkillsLoading(true); setSkillsError(null);
+    try {
+      const result = await call<{ skills: ChatSkill[] }>("chat/skills", { signal });
+      if (!signal?.aborted) setSkills(result.skills);
+    } catch (error) {
+      if (!signal?.aborted) setSkillsError((error as Error).message);
+    } finally {
+      if (!signal?.aborted) setSkillsLoading(false);
+    }
+  }, [call]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const frame = window.requestAnimationFrame(() => void loadSkills(controller.signal));
+    return () => { window.cancelAnimationFrame(frame); controller.abort(); };
+  }, [loadSkills]);
+
+  const loadWorkspaces = useCallback(async (signal?: AbortSignal) => {
+    setWorkspacesLoading(true); setWorkspacesError(null);
+    try {
+      const result = await call<Batch[]>("batches", { signal });
+      if (!signal?.aborted) setWorkspaces(result);
+    } catch (error) {
+      if (!signal?.aborted) setWorkspacesError((error as Error).message);
+    } finally {
+      if (!signal?.aborted) setWorkspacesLoading(false);
+    }
+  }, [call]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const frame = window.requestAnimationFrame(() => void loadWorkspaces(controller.signal));
+    return () => { window.cancelAnimationFrame(frame); controller.abort(); };
+  }, [loadWorkspaces]);
+
+  function workspaceLabel(id: number) {
+    return workspaces.find((workspace) => workspace.batch_id === id)?.label || `Workspace #${id}`;
+  }
+
+  useEffect(() => {
+    if (!activityOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && window.matchMedia("(max-width: 900px)").matches) {
+        setActivityOpen(false);
+        activityToggle.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activityOpen]);
 
   const refreshPending = useCallback(async () => {
     try {
@@ -363,6 +428,8 @@ function Chat() {
     let active = true;
     const frame = window.requestAnimationFrame(() => {
       if (newParam) {
+        setWorkspaceId(null);
+        setSelectedActivity(null);
         conversationVersion.current += 1;
         session.current = undefined;
         setTurns([]); setQ(""); setSending(null); setBusy(false);
@@ -372,6 +439,8 @@ function Chat() {
         activeTraceRef.current = null;
         setErr(null); setNote(null);
       } else if (sessionParam) {
+        setWorkspaceId(null);
+        setSelectedActivity(null);
         const requestVersion = ++conversationVersion.current;
         session.current = undefined;
         previousTurnCount.current = 0;
@@ -386,6 +455,7 @@ function Chat() {
             if (!active || requestVersion !== conversationVersion.current) return;
             session.current = saved.session_id;
             setTurns(saved.turns.map(restoreTurn));
+            setWorkspaceId(saved.turns.at(-1)?.batch_id ?? null);
           })
           .catch((error) => {
             if (!active || requestVersion !== conversationVersion.current) return;
@@ -433,12 +503,14 @@ function Chat() {
     const requestVersion = conversationVersion.current;
     const initialTrace: AgentTrace = {
       query: cleanQuestion,
+      batchId: workspaceId,
       steps: [{
         id: "request",
         label: "Connecting to agent stream",
         status: "running",
       }],
     };
+    setSelectedActivity(null);
     activeTraceRef.current = initialTrace;
     setActiveTrace(initialTrace);
     setStreamedAnswer("");
@@ -472,7 +544,12 @@ function Chat() {
       }
     };
 
-    const page = capture();
+    const snapshot = capture();
+    const page = workspaceId === null ? snapshot : {
+      ...snapshot,
+      batch_id: workspaceId,
+      title: `Ask NYRA · ${workspaceLabel(workspaceId)}`.slice(0, 160),
+    };
     const request = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -495,7 +572,7 @@ function Chat() {
           type: "complete",
           provider: "standard endpoint",
           model: "non-streaming response",
-          tool_calls: [],
+          tool_calls: response.tool_calls ?? [],
         };
         completed = fallbackComplete;
         handleEvent(fallbackComplete);
@@ -508,6 +585,9 @@ function Chat() {
       const actionNotice = applyActions(result.page_actions ?? [], page);
       if (actionNotice) setNote(actionNotice);
       session.current = result.session_id;
+      // Pin the actual workspace returned by the backend for subsequent turns,
+      // including conversations that started with the default latest workspace.
+      setWorkspaceId(result.batch_id ?? workspaceId);
       const staged = result.sources.some((source) => source.type === "pending_change");
       const finalTrace = activeTraceRef.current ?? initialTrace;
       const nextSteps = result.next_steps ?? activePredictionRef.current ?? undefined;
@@ -574,6 +654,7 @@ function Chat() {
       body.append("label", file.name.replace(/\.csv$/i, ""));
       body.append("module_filter", "TCB");
       const r = await call<UploadSummary>("upload-bom-file", { method: "POST", body });
+      void loadWorkspaces();
       setNote(`Loaded ${r.rows_loaded.toLocaleString()} rows as batch ${r.batch_id}`
               + (r.rows_quarantined ? `, ${r.rows_quarantined} quarantined.` : ".")
               + " Score it from Batches to ask about it.");
@@ -604,6 +685,8 @@ function Chat() {
   }
 
   function newChat() {
+    setWorkspaceId(null);
+    setSelectedActivity(null);
     conversationVersion.current += 1;
     session.current = undefined;
     setTurns([]); setQ(""); setSending(null); setBusy(false);
@@ -665,112 +748,100 @@ function Chat() {
   }
 
   const empty = turns.length === 0 && !sending && !loadingHistory;
-  const completedTurns = turns.filter((turn) => !turn.error).length;
-  const failedTurns = turns.length - completedTurns;
-  const runningStep = activeTrace?.steps.findLast((step) => step.status === "running");
+  const focusedPending = workspaceId === null ? pending : pending.filter((change) => change.batch_id === workspaceId);
 
   return (
-    <div className={`chat-page ${empty ? "is-empty" : "has-turns"}`}>
-      {empty ? (
-        <header className="chat-hero">
-          <span className="orb" aria-hidden><span /></span>
-          <p className="chat-eyebrow">Grounded review assistant</p>
-          <h1>
-            <span>Hello, {user}.</span>{" "}
-            What are we reviewing?
-          </h1>
-          <p className="chat-intro">
-            Ask why an item was flagged, trace its review history, or stage a change
-            in your own words. Every answer stays tied to recorded BOM data.
-          </p>
-          <div className="chat-assurance">
-            <span aria-hidden />
-            The engine calculates · you approve · WINGS updates after approval
-          </div>
-        </header>
-      ) : (
+    <div className={`chat-page chat-workspace ${empty ? "is-empty" : "has-turns"}${activityOpen ? " activity-visible" : ""}`}>
+      <div className="chat-main">
         <header className="chat-header">
-          <div>
-            <p className="chat-eyebrow">NYRA assistant</p>
-            <h1>Review conversation</h1>
-            <p>
-              {loadingHistory
-                ? "Loading saved conversation…"
-                : sending
-                ? runningStep?.label ?? "Connecting to the agent…"
-                : `${completedTurns} completed ${completedTurns === 1 ? "turn" : "turns"}`
-                  + (failedTurns ? ` · ${failedTurns} failed` : "")}
-            </p>
+          <div className="chat-header-copy">
+            <h1>{empty ? "Ask NYRA" : "Review conversation"}</h1>
+            <p>BOM review assistant</p>
           </div>
           <div className="chat-header-actions">
             <button type="button" className="btn" onClick={exportChat}
-                    disabled={turns.length === 0}>
+                    disabled={turns.length === 0 || Boolean(sending)} title="Export conversation as Markdown">
               Export
             </button>
             <button type="button" className="btn" onClick={newChat} disabled={busy}>
               New chat
             </button>
+            <button ref={activityToggle} type="button" className="btn chat-activity-toggle" aria-controls="chat-activity"
+                    aria-expanded={activityOpen} onClick={() => setActivityOpen((current) => !current)}>
+              <ActivityIcon /> Activity
+            </button>
           </div>
         </header>
-      )}
 
-      {err && <Banner kind="error">{err}</Banner>}
-      {note && <Banner kind="info">{note}</Banner>}
-
-      {pending.length > 0 && (
-        <details className="card pending-tray" open>
-          <summary>
-            <span className="pending-icon" aria-hidden>!</span>
-            <span className="pending-summary-copy">
-              <strong>Staged changes</strong>
-              <span>Review before anything enters the approval path.</span>
-            </span>
-            <span className="pending-count">{pending.length}</span>
-          </summary>
-          <div className="pending-list">
-            {pending.map((p) => (
-              <article key={p.pending_id} className="pending-item">
-                <div className="pending-item-head">
-                  <strong>{p.item_id}</strong>
-                  <span>Proposal #{p.pending_id}</span>
-                </div>
-                <div className="pending-values tnum">
-                  {p.proposed_max !== null && <span>Max <strong>{p.proposed_max}</strong></span>}
-                  {p.proposed_rop !== null && <span>ROP <strong>{p.proposed_rop}</strong></span>}
-                  {p.proposed_min !== null && <span>Min <strong>{p.proposed_min}</strong></span>}
-                </div>
-                <blockquote>“{p.source_utterance}”</blockquote>
-                <div className="pending-meta">
-                  Staged by {p.created_by || "unknown"} · {formatTimestamp(p.created_at)} ·
-                  parsed by {p.parsed_by || "unknown"}
-                </div>
-                <div className="pending-actions">
-                  <button type="button" className="btn btn-primary" disabled={busy || !canReview}
-                          onClick={() => confirm(p)}>
-                    Confirm change
-                  </button>
-                  <button type="button" className="btn" disabled={busy || !canReview}
-                          onClick={() => discard(p)}>
-                    Discard
-                  </button>
-                  {p.batch_id !== null && (
-                    <Link className="btn" href={`/batches/${p.batch_id}/items/${p.item_id}`}>
-                      Open item
-                    </Link>
-                  )}
-                </div>
-                {!canReview && (
-                  <p className="pending-role-note">Your role cannot confirm changes.</p>
-                )}
-              </article>
-            ))}
-          </div>
-        </details>
-      )}
-
-      {!empty && (
         <section className="chat-transcript" aria-label="Conversation" aria-live="polite"
                  aria-relevant="additions" aria-busy={Boolean(sending || loadingHistory)}>
+
+          {err && <Banner kind="error">{err}</Banner>}
+          {note && <Banner kind="info">{note}</Banner>}
+
+          {focusedPending.length > 0 && (
+            <details className="card pending-tray" open>
+              <summary>
+                <span className="pending-icon" aria-hidden>!</span>
+                <span className="pending-summary-copy">
+                  <strong>Staged changes</strong>
+                  <span>Review before anything enters the approval path.</span>
+                </span>
+                <span className="pending-count">{focusedPending.length}</span>
+              </summary>
+              <div className="pending-list">
+                {focusedPending.map((p) => (
+                  <article key={p.pending_id} className="pending-item">
+                    <div className="pending-item-head">
+                      <strong>{p.item_id}</strong>
+                      <span>Proposal #{p.pending_id}</span>
+                    </div>
+                    <div className="pending-values tnum">
+                      {p.proposed_max !== null && <span>Max <strong>{p.proposed_max}</strong></span>}
+                      {p.proposed_rop !== null && <span>ROP <strong>{p.proposed_rop}</strong></span>}
+                      {p.proposed_min !== null && <span>Min <strong>{p.proposed_min}</strong></span>}
+                    </div>
+                    <blockquote>“{p.source_utterance}”</blockquote>
+                    <div className="pending-meta">
+                      Staged by {p.created_by || "unknown"} · {formatTimestamp(p.created_at)} ·
+                      parsed by {p.parsed_by || "unknown"}
+                    </div>
+                    <div className="pending-actions">
+                      <button type="button" className="btn btn-primary" disabled={busy || !canReview}
+                              onClick={() => confirm(p)}>
+                        Confirm change
+                      </button>
+                      <button type="button" className="btn" disabled={busy || !canReview}
+                              onClick={() => discard(p)}>
+                        Discard
+                      </button>
+                      {p.batch_id !== null && (
+                        <Link className="btn" href={`/batches/${p.batch_id}/items/${p.item_id}`}>
+                          Open item
+                        </Link>
+                      )}
+                    </div>
+                    {!canReview && (
+                      <p className="pending-role-note">Your role cannot confirm changes.</p>
+                    )}
+                  </article>
+                ))}
+              </div>
+            </details>
+          )}
+
+          {empty && (
+            <div className="chat-welcome">
+              <span className="chat-welcome-mark" aria-hidden>N</span>
+              <p className="chat-eyebrow">Your review starts here</p>
+              <h2>What are we reviewing?</h2>
+              <p className="chat-intro">Ask about a part, understand a recommendation, or work through your review queue. Answers are grounded in your BOM data.</p>
+              <section className="chat-suggestions" aria-label="Suggested prompts">
+                <SuggestionCards onSend={(prompt) => void ask(prompt)} onFill={fill}
+                                 canReview={canReview} disabled={busy || loadingHistory} />
+              </section>
+            </div>
+          )}
           {loadingHistory && (
             <div className="chat-history-loading" role="status">
               <span className="typing-dots" aria-hidden><i /><i /><i /></span>
@@ -781,13 +852,12 @@ function Chat() {
             <article key={index} ref={index === turns.length - 1 ? latestTurn : undefined}
                      className="chat-turn turn-in">
               <div className="chat-row chat-row-user">
-                <div className="chat-bubble chat-bubble-user">{turn.q}</div>
-                <span className="chat-avatar chat-avatar-user" aria-hidden>
-                  {user.slice(0, 1).toUpperCase()}
-                </span>
+                <div className="chat-bubble chat-bubble-user">
+                  {turn.trace.batchId != null && <span className="chat-message-workspace">@{workspaceLabel(turn.trace.batchId)}</span>}
+                  {turn.q}
+                </div>
               </div>
               <div className="chat-row chat-row-assistant">
-                <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
                 <div className="chat-response">
                   <div className="chat-speaker">NYRA</div>
                   {turn.a && <ChatAnswer>{turn.a}</ChatAnswer>}
@@ -806,14 +876,12 @@ function Chat() {
                     <NextStepSuggestions prediction={turn.nextSteps} disabled={busy}
                                          onSelect={(prompt) => void ask(prompt)} />
                   )}
-                  <AgentToolCalls trace={turn.trace} />
                   {turn.error && (
                     <div className="chat-run-error" role="alert">
                       <strong>The agent could not complete this request.</strong>
                       <span>{turn.error}</span>
                     </div>
                   )}
-                  <AgentActivity trace={turn.trace} />
                   {turn.staged && (
                     <div className="staged-notice">
                       <span aria-hidden>!</span>
@@ -836,6 +904,15 @@ function Chat() {
                       })}
                     </div>
                   )}
+                  <div className="chat-response-actions">
+                    <button type="button" className="chat-view-activity"
+                            aria-label={`View activity for message ${index + 1}`}
+                            aria-controls="chat-activity"
+                            onClick={() => { setSelectedActivity(index); setActivityOpen(true); }}>
+                      <ActivityIcon /> View activity
+                      <span>Tools: {turn.trace.steps.filter((step) => step.kind === "tool").length}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </article>
@@ -844,103 +921,48 @@ function Chat() {
           {sending && (
             <article className="chat-turn turn-in">
               <div className="chat-row chat-row-user">
-                <div className="chat-bubble chat-bubble-user is-pending">{sending}</div>
-                <span className="chat-avatar chat-avatar-user" aria-hidden>
-                  {user.slice(0, 1).toUpperCase()}
-                </span>
+                <div className="chat-bubble chat-bubble-user is-pending">
+                  {activeTrace?.batchId != null && <span className="chat-message-workspace">@{workspaceLabel(activeTrace.batchId)}</span>}
+                  {sending}
+                </div>
               </div>
               <div className="chat-row chat-row-assistant">
-                <span className="chat-avatar chat-avatar-assistant" aria-hidden>N</span>
                 <div className="chat-response chat-thinking" role="status">
                   <span className="chat-speaker">NYRA</span>
-                  {activeTrace && <AgentToolCalls trace={activeTrace} />}
-                  {activeTrace && <AgentActivity trace={activeTrace} live />}
                   {streamedAnswer ? (
                     <div className="streaming-answer">
                       <ChatAnswer>{streamedAnswer}</ChatAnswer>
                       <span className="stream-caret" aria-hidden />
                     </div>
-                  ) : !activeTrace ? (
-                    <span className="typing-dots" aria-hidden><i /><i /><i /></span>
-                  ) : null}
+                  ) : (
+                    <span className="chat-working"><span className="typing-dots" aria-hidden><i /><i /><i /></span> Working on your request</span>
+                  )}
                   {activePrediction && (
                     <NextStepSuggestions prediction={activePrediction} disabled
                                          onSelect={() => undefined} />
                   )}
-                  <span className="sr-only">NYRA is showing live execution progress.</span>
+                  <span className="sr-only">NYRA is responding. Execution progress is in the Activity panel.</span>
                 </div>
               </div>
             </article>
           )}
           <div ref={messagesEnd} className="messages-end" aria-hidden />
         </section>
-      )}
 
-      <form className={`composer ${empty ? "composer-empty" : "composer-sticky"}`}
-            onSubmit={(event) => { event.preventDefault(); void ask(q); }}>
-        <label htmlFor="ask" className="sr-only">Ask about a recommendation</label>
-        <textarea
-          id="ask"
-          ref={composer}
-          rows={1}
-          className="composer-input"
-          value={q}
-          aria-describedby="composer-help"
-          onChange={(event) => setQ(event.target.value)}
-          placeholder="Ask about an item, or state a change in your own words…"
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              void ask(q);
-            }
-          }}
-        />
-        <div className="composer-footer">
-          <span id="composer-help" className="composer-hint">
-            {loadingHistory
-              ? "Loading saved conversation…"
-              : sending
-              ? runningStep?.label ?? "Connecting to the agent…"
-              : canReview
-                ? "Proposals are staged, never applied · Enter to send"
-                : `Read-only as ${role} · Enter to send`}
-          </span>
-          <div className="composer-actions">
-            {canUpload && (
-              <>
-                <input ref={filePicker} type="file" accept=".csv,text/csv" className="hidden"
-                       onChange={(event) => {
-                         const file = event.target.files?.[0];
-                         event.target.value = "";
-                         if (file) void attach(file);
-                       }} />
-                <button type="button" className="btn composer-attach" disabled={busy}
-                        title="Upload a BOM extract (.csv) as a new batch"
-                        onClick={() => filePicker.current?.click()}>
-                  <AttachIcon />
-                  <span>Attach CSV</span>
-                </button>
-              </>
-            )}
-            <button className="btn btn-primary composer-send"
-                    disabled={busy || loadingHistory || !q.trim()}>
-              <span>{sending ? "Working" : "Send"}</span>
-              <SendIcon />
-            </button>
-          </div>
-        </div>
-      </form>
+        <ChatComposer key={navigationKey} value={q} onChange={setQ} onSend={(question) => void ask(question)}
+                      inputRef={composer} busy={busy} sending={Boolean(sending)} loadingHistory={loadingHistory}
+                      canUpload={canUpload} onUpload={(file) => void attach(file)}
+                      workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId} workspaces={workspaces}
+                      workspacesLoading={workspacesLoading} workspacesError={workspacesError}
+                      onRetryWorkspaces={() => void loadWorkspaces()}
+                      skills={skills} skillsLoading={skillsLoading} skillsError={skillsError}
+                      onRetrySkills={() => void loadSkills()} />
 
-      {empty && (
-        <section className="chat-suggestions" aria-label="Suggested prompts">
-          <div className="suggestions-heading">
-            <span>Start with a workflow</span>
-            <span>Uses the latest scored batch</span>
-          </div>
-          <SuggestionCards onSend={(prompt) => void ask(prompt)} onFill={fill}
-                           canReview={canReview} disabled={busy || loadingHistory} />
-        </section>
-      )}
+        <p className="chat-composer-note">{canReview ? "Changes are staged for your approval." : `Read-only access as ${role}.`}</p>
+      </div>
+      <ChatActivityPanel traces={turns.map((turn) => turn.trace)} activeTrace={activeTrace}
+                         selectedTurn={selectedActivity} onSelectTurn={setSelectedActivity}
+                         open={activityOpen} loading={loadingHistory} />
     </div>
   );
 }
