@@ -67,9 +67,22 @@ class NyraProvider:
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
-                args = {}
+                # Do not silently turn malformed filters into an unfiltered
+                # read (or defaults on a write). dispatch rejects non-objects.
+                args = None
             calls.append(ToolCall(id=tc.id, name=tc.function.name,
                                   arguments=args))
 
         return Response(content=choice.content or "", tool_calls=calls,
                         model=self.model, provider=self.name)
+
+    def read_image(self, data_url: str, prompt: str) -> str:
+        """Read one screenshot without exposing the agent's tools or history."""
+        response = self._client.chat.completions.create(
+            model=self.model, temperature=0, max_tokens=1500,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+        )
+        return response.choices[0].message.content or ""

@@ -128,6 +128,10 @@ def fill_settings_form(ctx, section: str, rows: list | None = None,
 def navigate_to_page(ctx, path: str) -> dict:
     if not re.fullmatch(r"/(?:config(?:/dormant)?|chat|batches/[1-9]\d*(?:/items/[\w.%~-]+)?)?", path):
         _error("Choose an app page: /, /chat, /config, /config/dormant, or a batch/item page.")
+    match = re.match(r"/batches/(\d+)", path)
+    if match:
+        from .tools import _require_workspace
+        _require_workspace(ctx, int(match[1]))
     ctx.page_actions.append({"kind": "navigate", "path": path})
     ctx.sources.append({"type": "navigation", "path": path})
     return {"path": path, "note": "The browser can open this page."}

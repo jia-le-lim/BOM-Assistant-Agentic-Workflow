@@ -19,6 +19,7 @@ import re
 
 from .provider import Message, Response, ToolCall, ToolSpec
 from .echo_workspace import browser_context, workspace_calls
+from .echo_retrieval import retrieval_call
 
 ITEM_RE = re.compile(r"\b(\d{6,})\b")
 QTY_RE = re.compile(
@@ -95,6 +96,7 @@ RULE_QTY_RE = re.compile(r"\b(?:at|of)\s+(\d+)\b", re.IGNORECASE)
 # can actually answer from one it cannot -- the branch names come from the
 # graph, but which questions are routable is this stub's own knowledge.
 ROUTABLE_TOOLS = frozenset({
+    "search_items", "clarify_request",
     "get_procurement_context", "get_similar_parts", "search_similar_reviews",
     "propose_change", "get_recommendation", "get_triage_context",
     "get_item_history", "get_item_notes", "get_current_values", "top_exposure",
@@ -216,6 +218,11 @@ class EchoProvider:
         """
         ql = q.lower()
         item = ITEM_RE.search(q)
+        # Specific item reads and mutations keep their existing precedence.
+        if not item and not KEEP_RE.search(q) and not REVIEW_ACTION_RE.search(q):
+            discovery = retrieval_call(q, available)
+            if discovery is not None:
+                return discovery
 
         if (item and "get_procurement_context" in available
                 and any(w in ql for w in
@@ -469,6 +476,10 @@ class EchoProvider:
             lines = [f"{r['item_id']} (${r['exposure_usd']:,.0f}, "
                      f"{r['risk_level']})" for r in rows]
             return "Top review items by exposure: " + "; ".join(lines)
+
+        if tool in {"search_items", "list_review_queue"} and "total_count" in data:
+            from ..agent.responses import render_items
+            return render_items(data)
 
         if tool == "list_review_queue":
             rows = data.get("items", [])

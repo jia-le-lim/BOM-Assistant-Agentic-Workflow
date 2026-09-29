@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import operator
 import json
+import re
 import uuid
 from typing import Annotated, Any, Callable, TypedDict
 
@@ -40,6 +41,7 @@ from langgraph.graph import END, START, StateGraph
 from ..llm import Message, get_provider
 from ..security import can_read_all_workspaces
 from . import tools as T
+from .conversation import HELP_REPLY, REPLIES, conversation_reply
 from .loop import run_agent
 from .prompts import (ACTION_SYSTEM, ADVISORY_SYSTEM, ASSIST_SYSTEM,
                       CLASSIFY_SYSTEM, DONT_KNOW, LOOKUP_SYSTEM,
@@ -47,7 +49,7 @@ from .prompts import (ACTION_SYSTEM, ADVISORY_SYSTEM, ASSIST_SYSTEM,
 from .prompts import CONFIGURE_SYSTEM, PAGE_CONTEXT_RULES
 from .workspace import prompt_context
 
-INTENTS = ("lookup", "assist", "advisory", "propose", "action", "configure", "unknown")
+INTENTS = ("lookup", "assist", "advisory", "propose", "action", "configure", "conversation", "unknown")
 
 BRANCH_PROMPT = {"lookup": LOOKUP_SYSTEM, "assist": ASSIST_SYSTEM,
                  "advisory": ADVISORY_SYSTEM, "propose": PROPOSE_SYSTEM,
@@ -86,6 +88,9 @@ class ChatState(TypedDict, total=False):
     page_context: dict | None
     page_actions: list[dict]
     history: list[dict]
+    response_status: str
+    response_reason: str
+    fallback: bool
 
 
 def _emit(state: ChatState, event: dict) -> None:
@@ -145,6 +150,11 @@ def _history(conn, session_id: str | None, user: str | None) -> list[dict]:
 def classify(state: ChatState) -> dict:
     """Name the branch. No tools are offered, so this node cannot answer."""
     provider = get_provider()
+    if conversation_reply(state["question"]) is not None:
+        _emit(state, {"type": "classify", "intent": "conversation",
+                      "provider": provider.name, "model": provider.model})
+        return {"intent": "conversation", "provider": provider.name,
+                "model": provider.model, "model_calls": 0}
     messages = [Message(role="system", content=CLASSIFY_SYSTEM)]
     for turn in state.get("history", []):
         messages.append(Message(role="user", content=turn["question"] or ""))
@@ -156,12 +166,19 @@ def classify(state: ChatState) -> dict:
 
     try:
         resp = provider.chat(messages, [])
-        named = (resp.content or "").strip().lower()
+        named = (resp.content or "").strip().lower().strip("`\"' .\n")
     except Exception:
         # A classifier that is down must not take the whole turn with it; the
         # widest branch still answers most questions.
         named = ""
     intent = named if named in INTENTS else FALLBACK_INTENT
+    if intent == "unknown" and re.search(
+            r"\b(item|items|parts?|bom|batch|workspace|stockroom|inventory|"
+            r"dormant|coverage|categor\w*|cables?|tubing|spend\w*|"
+            r"purchas\w*|recommenda\w*|rop)\b", state["question"], re.I):
+        # One incorrect classifier label must not strand an ordinary BOM
+        # request. Lookup has no database writes or analysis-job tools.
+        intent = FALLBACK_INTENT
 
     _emit(state, {"type": "classify", "intent": intent,
                   "provider": provider.name, "model": provider.model})
@@ -203,7 +220,25 @@ def _branch(state: ChatState, intent: str) -> dict:
             "tool_calls": result["tool_calls"],
             "model_calls": result["model_calls"],
             "provider": result["provider"], "model": result["model"],
-            "staged_action": staged, "page_actions": result.get("page_actions", [])}
+            "staged_action": staged, "page_actions": result.get("page_actions", []),
+            "response_status": result["response_status"],
+            "response_reason": result["response_reason"], "fallback": result["fallback"]}
+
+
+def conversation(state: ChatState) -> dict:
+    """Social replies and capability help do not require inventory evidence.
+
+    Use code-owned text even when the model chose this branch. Classification
+    never grants permission to return a source-free assertion about records.
+    """
+    reason = "Conversational reply; no record lookup was needed."
+    _emit(state, {"type": "agent_complete", "source_count": 0, "tool_count": 0,
+                  "fallback": False, "response_status": "answered",
+                  "response_reason": reason})
+    return {"answer": conversation_reply(state["question"]) or HELP_REPLY,
+            "sources": [], "tool_calls": [], "model_calls": 0,
+            "staged_action": None, "response_status": "answered",
+            "fallback": False, "response_reason": reason}
 
 
 def unknown(state: ChatState) -> dict:
@@ -221,7 +256,9 @@ def unknown(state: ChatState) -> dict:
                   "fallback": True})
     return {"answer": DONT_KNOW, "sources": [], "tool_calls": [],
             "model_calls": 0, "provider": provider.name,
-            "model": provider.model, "staged_action": None}
+            "model": provider.model, "staged_action": None,
+            "response_status": "unsupported", "fallback": True,
+            "response_reason": "No authoritative data source matched this query."}
 
 
 def synthesize(state: ChatState) -> dict:
@@ -232,7 +269,12 @@ def synthesize(state: ChatState) -> dict:
     a future branch ever composes more than one run_agent call.
     """
     answer = (state.get("answer") or "").strip()
-    if not state.get("sources") or not answer:
+    operational = state.get("response_status") in {
+        "clarification", "no_results", "unsupported", "permission_denied",
+        "invalid_arguments", "data_error", "model_error", "no_tool_selected"}
+    conversational = (state.get("intent") == "conversation"
+                      and answer in REPLIES.values())
+    if (not state.get("sources") and not operational and not conversational) or not answer:
         return {"answer": DONT_KNOW}
     return {"answer": answer}
 
@@ -246,6 +288,7 @@ def build_graph():
         # than the one the router picked.
         builder.add_node(name, (lambda intent:
                                 lambda state: _branch(state, intent))(name))
+    builder.add_node("conversation", conversation)
     builder.add_node("unknown", unknown)
     builder.add_node("synthesize", synthesize)
 
@@ -300,4 +343,7 @@ def run_chat(conn, question: str, batch_id: int | None, actor: dict,
             "model_calls": final.get("model_calls", 0),
             "intent": final.get("intent", FALLBACK_INTENT),
             "staged_action": final.get("staged_action"),
-            "page_actions": final.get("page_actions", [])}
+            "page_actions": final.get("page_actions", []),
+            "response_status": final.get("response_status", "answered"),
+            "response_reason": final.get("response_reason", ""),
+            "fallback": final.get("fallback", False)}

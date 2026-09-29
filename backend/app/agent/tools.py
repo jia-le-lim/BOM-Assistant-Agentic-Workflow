@@ -34,6 +34,8 @@ from ..redact import prompt_redaction_on, redact_for_prompt
 from ..security import REVIEW_ROLES, can_read_all_workspaces, require_workspace
 from ..services import (AmbiguousItem, current_values, derive_status,
                         latest_reviews, resolve_rec)
+from .retrieval import SEARCH_PROPERTIES, search_items
+from .responses import CLARIFICATIONS, clarify_request, empty_message
 
 INT_RE = re.compile(r"\d+")
 
@@ -47,6 +49,8 @@ class ToolContext:
     sources: list[dict] = field(default_factory=list)
     page_context: dict | None = None
     page_actions: list[dict] = field(default_factory=list)
+    notices: list[dict] = field(default_factory=list)
+    writes_succeeded: bool = False
 
 
 class ToolError(Exception):
@@ -190,16 +194,22 @@ def get_current_values(ctx: ToolContext, item_id: str,
                        stockroom_id: str | None = None) -> dict:
     bid = batch_id or ctx.batch_id
     _require_workspace(ctx, bid)
-    # current_values matches stockroom_id exactly, so the hardcoded "" this used
-    # to pass missed every real row -- the tool always answered "I don't know".
-    # Take the stockroom off the scored row instead.
-    rec = _resolve(ctx, bid, item_id, stockroom_id)
-    if rec is None:
+    # Current levels belong to the upload, and are available before scoring.
+    sql = "SELECT stockroom_id, payload FROM bom_rows WHERE batch_id=? AND item_id=? AND quarantined=0"
+    params = [bid, item_id]
+    if stockroom_id is not None:
+        sql += " AND stockroom_id=?"
+        params.append(stockroom_id)
+    records = ctx.conn.execute(sql + " ORDER BY stockroom_id", params).fetchall()
+    if not records:
         return EMPTY
-    try:
-        mx, rop, mn = current_values(ctx.conn, bid, item_id, rec["stockroom_id"])
-    except KeyError:
-        return EMPTY
+    if len(records) > 1:
+        rooms = "more than one stockroom" if prompt_redaction_on() else "stockrooms " + ", ".join(r["stockroom_id"] for r in records)
+        raise ToolError(f"Item {item_id} is stocked in {rooms}. State which stockroom you mean.")
+    rec = records[0]
+    from .retrieval import _quantity
+    payload = json.loads(rec["payload"])
+    mx, rop, mn = (_quantity(payload.get(key)) for key in ("max_qty", "rop_qty", "min_qty"))
     ctx.sources.append({"type": "bom_rows", "batch_id": bid, "item_id": item_id,
                         "stockroom_id": rec["stockroom_id"]})
     return {"item_id": item_id, "stockroom_id": rec["stockroom_id"],
@@ -389,50 +399,43 @@ def top_exposure(ctx: ToolContext, n: int = 5,
                  batch_id: int | None = None) -> dict:
     bid = batch_id or ctx.batch_id
     _require_workspace(ctx, bid)
-    n = max(1, min(int(n), 25))
-    rows = [dict(r) for r in ctx.conn.execute(
-        "SELECT item_id, exposure_usd, risk_level, reason_code "
-        "FROM recommendation_result WHERE batch_id=? AND review_required='Y' "
-        "ORDER BY exposure_usd DESC LIMIT ?", (bid, n))]
-    if not rows:
+    if bid is None:
         return EMPTY
+    batch = ctx.conn.execute("SELECT status FROM batches WHERE batch_id=?", (bid,)).fetchone()
+    if batch is None:
+        return EMPTY
+    if batch["status"] != "scored":
+        raise ToolError(f"Workspace #{bid} has not been scored. Run recommendations before ranking review exposure.")
+    n = max(1, min(int(n), 25))
+    reviews = latest_reviews(ctx.conn, bid)
+    rows = []
+    for rec in ctx.conn.execute(
+            "SELECT * FROM recommendation_result WHERE batch_id=? "
+            "ORDER BY exposure_usd DESC, item_id, stockroom_id", (bid,)):
+        status = derive_status(rec, reviews.get((rec["item_id"], rec["stockroom_id"])))
+        if status != "pending_review":
+            continue
+        rows.append({key: rec[key] for key in (
+            "item_id", "stockroom_id", "exposure_usd", "risk_level", "reason_code")}
+            | {"status": status})
+        if len(rows) >= n:
+            break
     ctx.sources.append({"type": "recommendation_result", "batch_id": bid})
-    return {"batch_id": bid, "items": rows}
+    return {"batch_id": bid, "items": rows, "limit": n}
 
 
 def list_review_queue(ctx: ToolContext, batch_id: int | None = None,
                       risk_level: str | None = None,
                       action: str | None = None,
                       reason_code: str | None = None,
-                      limit: int = 20) -> dict:
-    bid = batch_id or ctx.batch_id
-    _require_workspace(ctx, bid)
-    limit = max(1, min(int(limit), 100))
-    where, params = ["batch_id=?"], [bid]
-    if risk_level in ("Low", "Medium", "High"):
-        where.append("risk_level=?"); params.append(risk_level)
-    if action in ("Increase", "Maintain", "Decrease"):
-        where.append("action=?"); params.append(action)
-    if reason_code:
-        where.append("reason_code LIKE ?"); params.append(f"%{reason_code}%")
-
-    reviews = latest_reviews(ctx.conn, bid)
-    rows = []
-    for r in ctx.conn.execute(
-            "SELECT * FROM recommendation_result WHERE " + " AND ".join(where)
-            + " ORDER BY exposure_usd DESC, item_id", params):
-        st = derive_status(r, reviews.get((r["item_id"], r["stockroom_id"])))
-        rows.append({"item_id": r["item_id"], "status": st,
-                     "action": r["action"], "risk_level": r["risk_level"],
-                     "reason_code": r["reason_code"],
-                     "exposure_usd": r["exposure_usd"]})
-        if len(rows) >= limit:
-            break
-    if not rows:
-        return EMPTY
-    ctx.sources.append({"type": "recommendation_result", "batch_id": bid,
-                        "count": len(rows)})
-    return {"batch_id": bid, "items": rows}
+                      limit: int = 20, query: str | None = None,
+                      category: str | None = None, stockroom_id: str | None = None,
+                      route: str | None = None, status: str | None = None,
+                      uncovered_dormant: bool = False, offset: int = 0) -> dict:
+    from .retrieval import search_items
+    return search_items(ctx, batch_id, query, category, stockroom_id, risk_level,
+                        action, reason_code, route, status, uncovered_dormant,
+                        limit, offset, scored_only=True)
 
 
 def batch_summary(ctx: ToolContext, batch_id: int | None = None) -> dict:
@@ -1003,6 +1006,22 @@ _STOCK = {"type": "string",
                          "in more than one stockroom"}
 
 REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
+    "search_items": (ToolSpec(
+        "search_items",
+        "Find uploaded items by DESCRIPTION or ID substring, or part CATEGORY (e.g. cable). "
+        "Works before scoring. Returns current quantities, scored values when available, "
+        "exact total_count and a bounded page. Use to resolve an item description before "
+        "get_recommendation; never guess an item ID. For category membership use category, "
+        "for literal words use query. Can list uncovered_dormant rows after scoring.",
+        {"type": "object", "properties": SEARCH_PROPERTIES}), search_items),
+    "clarify_request": (ToolSpec(
+        "clarify_request",
+        "Ask for missing input or explain an unsupported capability. Use when a tool needs "
+        "an unspecified item, workspace, stockroom or exact proposed quantity; spending "
+        "means actual purchase expenditure. This tool returns an approved reply and never "
+        "claims a database fact. Search a supplied description before asking for an item ID.",
+        {"type": "object", "properties": {"kind": {"type": "string", "enum": list(CLARIFICATIONS)}},
+         "required": ["kind"]}), clarify_request),
     "get_recommendation": (ToolSpec(
         "get_recommendation",
         "What the engine recommends CHANGING an item to, with reason code, "
@@ -1103,17 +1122,11 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
 
     "list_review_queue": (ToolSpec(
         "list_review_queue",
-        "LIST or COUNT scored items, optionally filtered by risk_level, action "
-        "or reason_code, with workflow status. Use for 'show the queue', "
-        "'which items are High risk', 'how many Decrease items'. NOT for "
-        "whole-batch totals -- that is batch_summary.",
-        {"type": "object", "properties": {
-            "batch_id": _BATCH,
-            "risk_level": {"type": "string", "enum": ["Low", "Medium", "High"]},
-            "action": {"type": "string",
-                       "enum": ["Increase", "Maintain", "Decrease"]},
-            "reason_code": {"type": "string"},
-            "limit": {"type": "integer"}}}), list_review_queue),
+        "LIST or COUNT scored items by category, description query, risk_level, action, "
+        "reason_code, route or workflow status. uncovered_dormant=true lists individual "
+        "dormant rows without an applicable confirmed stocking rule, with current Max/ROP/Min. "
+        "Use total_count for counts, not returned_count or page length. Paginate with offset.",
+        {"type": "object", "properties": SEARCH_PROPERTIES}), list_review_queue),
 
     "batch_summary": (ToolSpec(
         "batch_summary",
@@ -1293,6 +1306,10 @@ INTENT_TOOLS: dict[str, frozenset[str]] = {
 for _intent in ("lookup", "assist", "advisory", "propose", "action"):
     INTENT_TOOLS[_intent] |= {"get_page_context", "navigate_to_page"}
 
+for _intent in ("lookup", "assist", "advisory", "propose", "action", "configure"):
+    INTENT_TOOLS[_intent] |= {"search_items", "clarify_request"}
+INTENT_TOOLS["advisory"] |= {"list_review_queue", "get_current_values", "get_recommendation"}
+
 # Branches a read-only role may never be routed into. graph.classify downgrades
 # to `lookup` rather than refusing, so a viewer still gets an answer -- they
 # just cannot reach a tool that writes or stages.
@@ -1319,16 +1336,41 @@ def dispatch(ctx: ToolContext, name: str, args: dict) -> str:
     configured, LLM_REDACT_PROMPTS=1 masked nothing that actually left the
     process.
     """
-    entry = REGISTRY.get(name)
-    if entry is None:
-        return json.dumps({"error": f"unknown tool {name}"})
-    _, fn = entry
+    def notice(status, message):
+        del ctx.sources[source_start:]
+        ctx.notices.append({"status": status, "message": message})
+        return {"error": message, "response_status": status}
+
+    source_start = len(ctx.sources)
     try:
+        entry = REGISTRY.get(name)
+        if entry is None:
+            raise ToolError("The requested data tool is unavailable.", "invalid_arguments")
+        if not isinstance(args, dict):
+            raise ToolError("The tool request contained invalid arguments. Please retry the request.", "invalid_arguments")
         bid = args.get("batch_id")
+        if bid is not None and (isinstance(bid, bool) or not isinstance(bid, int) or bid <= 0):
+            raise ToolError("Use a positive integer workspace ID.", "invalid_arguments")
         _require_workspace(ctx, bid if bid is not None else ctx.batch_id,
                            allow_shared=name in READ_ONLY_TOOLS)
-        return json.dumps(redact_for_prompt(fn(ctx, **args)), default=str)
+        _, fn = entry
+        result = fn(ctx, **args)
+        if name in WRITE_TOOLS:
+            ctx.writes_succeeded = True
+        if result.get("_empty"):
+            result = {**result, "message": empty_message(ctx, name, args), "response_status": "no_results"}
+        if result.get("response_status"):
+            ctx.notices.append({"status": result["response_status"], "message": result["message"]})
     except ToolError as e:
-        return json.dumps({"error": str(e), "response_status": e.status})
-    except TypeError as e:
-        return json.dumps({"error": f"bad arguments for {name}: {e}"})
+        result = notice(e.status, str(e))
+    except (TypeError, ValueError):
+        result = notice("invalid_arguments", f"The request to {name} contained invalid arguments. Check the item, workspace and filters.")
+    except Exception:
+        # A failed read is not an empty result. Writes must still propagate to
+        # the request's transaction handler; do not conceal partial mutations.
+        if name not in READ_ONLY_TOOLS or ctx.writes_succeeded:
+            raise
+        if hasattr(ctx.conn, "rollback"):
+            ctx.conn.rollback()
+        result = notice("data_error", "The data source could not be read. Please retry; if this continues, check the backend connection.")
+    return json.dumps(redact_for_prompt(result), default=str)

@@ -420,14 +420,15 @@ def test_viewer_is_downgraded_not_served(client, synth_csv, db_file):
 # -- empty-state edges ------------------------------------------------------
 
 def test_assist_verdict_before_assist_has_run(client, synth_csv):
-    """No assist_result row is "I don't know", not an invented verdict."""
+    """An absent assist result explains its prerequisite without inventing a verdict."""
     batch_id = scored_batch(client, synth_csv)
 
     r = client.post("/chat",
                     json={"question": "what does assist say about item 100005",
                           "batch_id": batch_id}, headers=ENG)
     assert r.status_code == 200, r.text
-    assert "I don't know" in r.json()["answer"]
+    assert "No saved assist verdict" in r.json()["answer"]
+    assert r.json()["response_status"] == "no_results"
     assert r.json()["sources"] == []
 
 
@@ -471,7 +472,9 @@ def test_dormant_coverage_on_a_batch_without_dormant_rows(client, synth_csv):
         conn.close()
 
     if dormant == 0:
-        assert out == {"_empty": True}
+        assert out["_empty"] is True
+        assert out["response_status"] == "no_results"
+        assert "No scored dormant rows" in out["message"]
     else:
         assert out["dormant_rows"] == dormant
         assert out["matched"] + out["uncovered"] == dormant

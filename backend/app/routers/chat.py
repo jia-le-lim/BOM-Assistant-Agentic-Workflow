@@ -6,7 +6,7 @@ The endpoint's guarantees, all enforced structurally rather than by prompt:
     `review_history`, so nothing it does can reach a WINGS export file
   * it never generates Min/Max/ROP -- `propose_change` rejects any number the
     engineer did not write themselves
-  * with no retrieved source it answers "I don't know" rather than inventing
+  * factual BOM answers require retrieved sources; social/help replies do not
   * every turn is logged verbatim to `conversation_turn` and to `audit_log`
 
 The verbatim log is not only for audit. Feature_Selection_TCB_Jan26.md section
@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from ..agent import tools as agent_tools
 from ..agent.graph import run_chat
 from ..agent.loop import log_turn
+from ..agent.prompts import DONT_KNOW
 from ..agent.suggestions import predict_next_steps
 from ..audit import audit
 from ..db import get_conn
@@ -76,11 +77,16 @@ def _record_turn(conn, result: dict, actor: dict, question: str,
     turn_id = log_turn(conn, result, actor, question)
     audit(conn, actor, "POST", endpoint, "chat", batch_id or "-",
           {"question": question[:500],
-           "answered": bool(result["sources"]),
+           "answered": bool(result["sources"]) or (
+               result.get("intent") == "conversation" and not result.get("fallback")),
            "tools": [c["name"] for c in result["tool_calls"]],
            "intent": result.get("intent"),
            "staged_action": bool(result.get("staged_action")),
-           "turn_id": turn_id})
+           "fallback": result.get("fallback", False),
+           "response_status": result.get("response_status", "answered"),
+           "response_reason": result.get("response_reason", ""),
+           "model_calls": result.get("model_calls", 0),
+           "turn_id": turn_id, "skill": (result.get("skill") or {}).get("name")})
     conn.commit()
     return turn_id
 
@@ -128,7 +134,7 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
         turn_id = _record_turn(conn, result, actor, body.question.strip(), batch_id)
 
         next_steps = None
-        if first_turn:
+        if first_turn and result.get("intent") != "conversation":
             try:
                 next_steps = _predict_next_steps(body.question.strip(), result["answer"])
             except Exception:
@@ -136,13 +142,17 @@ def chat(body: ChatRequest, actor: dict = Depends(any_role())):
 
         return {"answer": result["answer"],
                 "sources": result["sources"],
+                "tool_calls": result["tool_calls"],
                 "batch_id": batch_id,
                 "session_id": result["session_id"],
                 "turn_id": turn_id,
                 "intent": result["intent"],
+                "fallback": result.get("fallback", False),
+                "response_status": result.get("response_status", "answered"),
+                "response_reason": result.get("response_reason", ""),
                 "staged_action": result.get("staged_action"),
                 "page_actions": result.get("page_actions", []),
-                "next_steps": next_steps}
+                "next_steps": next_steps, "skill": result.get("skill")}
     finally:
         conn.close()
 
@@ -181,10 +191,27 @@ def get_chat_session(session_id: str, actor: dict = Depends(any_role())):
         ).fetchall()
         if not rows:
             raise HTTPException(404, "conversation not found")
+        # Reuse the audit record; no schema migration or change to the stored
+        # tool_calls list. Scope by user and time, then match exact turn IDs.
+        outcomes = {}
+        for event in conn.execute(
+                "SELECT detail FROM audit_log WHERE entity=? AND user=? "
+                "AND ts>=? ORDER BY id",
+                ("chat", actor.get("user"), rows[0]["ts"])):
+            try:
+                detail = json.loads(event["detail"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(detail, dict) and isinstance(detail.get("turn_id"), int):
+                outcomes[detail["turn_id"]] = detail
         turns = []
         for row in rows:
             turn = dict(row)
             turn["tool_calls"] = _stored_tool_calls(turn.get("tool_calls"))
+            outcome = outcomes.get(turn["turn_id"], {})
+            turn["fallback"] = outcome.get("fallback", turn["answer"] == DONT_KNOW)
+            turn["response_status"] = outcome.get("response_status", "unsupported" if turn["fallback"] else "answered")
+            turn["response_reason"] = outcome.get("response_reason", "No authoritative data source matched this query." if turn["fallback"] else "")
             turns.append(turn)
         return {"session_id": session_id, "turns": turns}
     finally:
@@ -226,7 +253,7 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
                 emit({"type": "answer_delta",
                       "delta": answer[offset:offset + 56]})
             next_steps = None
-            if first_turn:
+            if first_turn and result.get("intent") != "conversation":
                 emit({
                     "type": "prediction_start",
                     "provider": result["provider"],
@@ -252,9 +279,13 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
                 "model": result["model"],
                 "tool_calls": result["tool_calls"],
                 "intent": result["intent"],
+                "fallback": result.get("fallback", False),
+                "response_status": result.get("response_status", "answered"),
+                "response_reason": result.get("response_reason", ""),
                 "staged_action": result.get("staged_action"),
                 "page_actions": result.get("page_actions", []),
                 "next_steps": next_steps,
+                "skill": result.get("skill"),
             })
         except Exception as exc:
             if conn is not None:
