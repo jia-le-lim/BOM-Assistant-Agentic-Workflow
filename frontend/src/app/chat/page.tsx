@@ -15,6 +15,8 @@ import type {
 import { Banner } from "@/components/ui";
 import { ChatAnswer } from "@/components/ChatAnswer";
 import { ChatComposer } from "@/components/ChatComposer";
+import { ReminderEditor } from "@/components/ReminderEditor";
+import { useImageAttachment } from "@/lib/image-attachment";
 import { ActivityIcon, ChatActivityPanel } from "@/components/ChatActivityPanel";
 import type { AgentTrace, AgentTraceStep } from "@/components/AgentActivity";
 import { NextStepSuggestions } from "@/components/NextStepSuggestions";
@@ -331,6 +333,7 @@ function Chat() {
   const [activityOpen, setActivityOpen] = useState(false);
   const [selectedActivity, setSelectedActivity] = useState<number | null>(null);
   const [workspaceId, setWorkspaceId] = useState<number | null>(null);
+  const [reminderCapture, setReminderCapture] = useState<{ file?: File; note?: string } | null>(null);
   const [workspaces, setWorkspaces] = useState<Batch[]>([]);
   const [workspacesLoading, setWorkspacesLoading] = useState(true);
   const [workspacesError, setWorkspacesError] = useState<string | null>(null);
@@ -421,6 +424,7 @@ function Chat() {
   // Reopening a recent ask prefills it. Re-sending a mutation on navigation
   // could stage a duplicate proposal, so only an explicit submit sends it.
   const navigationKey = params.toString();
+  const imageAttachment = useImageAttachment(user + ":" + navigationKey);
   const qParam = params.get("q");
   const newParam = params.get("new");
   const sessionParam = params.get("session");
@@ -952,6 +956,8 @@ function Chat() {
         <ChatComposer key={navigationKey} value={q} onChange={setQ} onSend={(question) => void ask(question)}
                       inputRef={composer} busy={busy} sending={Boolean(sending)} loadingHistory={loadingHistory}
                       canUpload={canUpload} onUpload={(file) => void attach(file)}
+                      onCapture={canReview ? (file, note) => setReminderCapture({ file, note }) : undefined}
+                      imageAttachment={canReview ? imageAttachment : undefined}
                       workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId} workspaces={workspaces}
                       workspacesLoading={workspacesLoading} workspacesError={workspacesError}
                       onRetryWorkspaces={() => void loadWorkspaces()}
@@ -960,6 +966,10 @@ function Chat() {
 
         <p className="chat-composer-note">{canReview ? "Changes are staged for your approval." : `Read-only access as ${role}.`}</p>
       </div>
+      {reminderCapture && <ReminderEditor initialFile={reminderCapture.file} initialNote={reminderCapture.note}
+        batchId={workspaces.find((workspace) => workspace.batch_id === workspaceId)?.uploaded_by === user ? workspaceId : null}
+        onClose={() => setReminderCapture(null)}
+        onSaved={() => { setReminderCapture(null); imageAttachment.clear(); setQ(""); setNote("Reminder saved. Find it in Engineer reminders."); }} />}
       <ChatActivityPanel traces={turns.map((turn) => turn.trace)} activeTrace={activeTrace}
                          selectedTurn={selectedActivity} onSelectTurn={setSelectedActivity}
                          open={activityOpen} loading={loadingHistory} />

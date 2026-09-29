@@ -11,6 +11,7 @@ import type { ChatSessionPage, ChatSessionSummary } from "@/lib/types";
 /** Group destinations by the work people come here to do. */
 const WORKSPACE_LINKS = [
   { href: "/", label: "Workspaces", icon: "batches" as const, hint: "Open your BOM review cycles" },
+  { href: "/reminders", label: "Engineer reminders", icon: "history" as const, hint: "Follow-ups between review cycles" },
   { href: "/#new-workspace", label: "New workspace", icon: "new" as const, hint: "Create a workspace for a new BOM review cycle" },
 ];
 const CONFIG_LINKS = [
@@ -70,6 +71,26 @@ export function Sidebar({ onNavigate, onToggleRail, railOpen = true }: {
   const historyId = `${instanceId}-history`;
   const account = useRef<HTMLDetailsElement>(null);
   const accountSummary = useRef<HTMLElement>(null);
+  const [reminderDue, setReminderDue] = useState<{ owner: string; count: number } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      void call<{ total: number }>("reminders?due_only=true&limit=1")
+        .then((result) => { if (active) setReminderDue({ owner: user, count: result.total }); })
+        .catch(() => { if (active) setReminderDue(null); });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("bom:reminders-changed", refresh);
+    return () => {
+      active = false; window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("bom:reminders-changed", refresh);
+    };
+  }, [call, user]);
 
 
   useEffect(() => {
@@ -115,6 +136,8 @@ export function Sidebar({ onNavigate, onToggleRail, railOpen = true }: {
       }} aria-current={active ? "page" : undefined}
       className={`side-link${active ? " is-active" : ""}`}>
       <Icon name={link.icon} /><span className="side-label">{link.label}</span>
+      {link.href === "/reminders" && reminderDue?.owner === user && reminderDue.count > 0 &&
+        <span className="side-count" style={{ color: "var(--seq)", whiteSpace: "nowrap" }}>{reminderDue.count} due</span>}
     </Link>;
   }
 

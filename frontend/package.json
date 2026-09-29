@@ -14,7 +14,8 @@
     "check:workspaces": "node scripts/check_workspaces.mjs",
     "check:settings": "node scripts/check_settings.mjs",
     "check:chat-workspaces": "node scripts/check_chat_workspaces.mjs",
-    "check:skills": "node scripts/check_chat_skills.mjs"
+    "check:skills": "node scripts/check_chat_skills.mjs",
+    "check:reminders": "node scripts/check_reminders.mjs"
   },
   "dependencies": {
     "bcryptjs": "3.0.3",

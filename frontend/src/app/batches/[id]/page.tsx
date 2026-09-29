@@ -1,5 +1,7 @@
 "use client";
 
+import { ReminderContext } from "@/components/ReminderContext";
+
 import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -449,6 +451,8 @@ export default function BatchPage({ params }: { params: Promise<{ id: string }> 
           </div>
         </>
       )}
+
+      <ReminderContext batchId={batchId} />
 
       <div className={`work-split review-layout-region${view === "split" ? " review-work-split" : ""}`}>
         <div className="flex flex-col gap-6">

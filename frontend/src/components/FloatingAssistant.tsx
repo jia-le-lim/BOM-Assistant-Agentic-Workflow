@@ -10,6 +10,9 @@ import { notifyChatHistoryChanged } from "@/lib/history";
 import type { ChatResponse, PendingChangePage, StagedAction } from "@/lib/types";
 import { ChatAnswer } from "./ChatAnswer";
 import { ActionCard } from "./ActionCard";
+import { ComposerImage } from "./ComposerImage";
+import { ReminderEditor } from "./ReminderEditor";
+import { useImageAttachment } from "@/lib/image-attachment";
 
 interface Turn {
   id: number;
@@ -45,8 +48,12 @@ function sourceLabel(source: Record<string, unknown>): string {
 }
 
 export function FloatingAssistant() {
-  const { call, role } = useApi();
+  const { call, role, user } = useApi();
   const path = usePathname();
+  const imageAttachment = useImageAttachment(user + ":" + path);
+  const [reminderCapture, setReminderCapture] = useState<{ file: File; note: string } | null>(null);
+  const [captureNotice, setCaptureNotice] = useState("");
+  const questionInput = useRef<HTMLTextAreaElement>(null);
   const { capture, applyActions } = useAssistantContext();
   const { title, batch_id: batchId, item_id: itemId } = pageIdentity(path);
   const [attention, setAttention] = useState({ path: "", section: "", selection: "" });
@@ -75,7 +82,7 @@ export function FloatingAssistant() {
       });
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && container.current?.open) {
+      if (event.key === "Escape" && container.current?.open && !document.querySelector("dialog[open]")) {
         container.current.open = false;
         container.current.querySelector("summary")?.focus();
       }
@@ -106,7 +113,13 @@ export function FloatingAssistant() {
 
   async function ask() {
     const clean = question.trim();
-    if (!clean || busy) return;
+    if (busy) return;
+    setCaptureNotice("");
+    if (imageAttachment.file && can.review(role)) {
+      setReminderCapture({ file: imageAttachment.file, note: question });
+      return;
+    }
+    if (!clean) return;
 
     setQuestion("");
     setBusy(true);
@@ -187,7 +200,7 @@ export function FloatingAssistant() {
   if (path === "/chat" || path.startsWith("/chat/")) return null;
 
   return (
-    <details ref={container} className="assistant-float">
+    <><details ref={container} className="assistant-float">
       <summary title="Open or close NYRA assistant">
         <AgentIcon />
         <span>Ask NYRA</span>
@@ -256,12 +269,18 @@ export function FloatingAssistant() {
           {error && <p className="assistant-error" role="alert">{error}</p>}
         </div>
 
-        <form className="assistant-composer" onSubmit={(event) => {
+        <form className="assistant-composer" onPaste={(event) => {
+          if (can.review(role)) imageAttachment.paste(event, busy);
+        }} onSubmit={(event) => {
           event.preventDefault();
           void ask();
         }}>
+          {imageAttachment.file && <ComposerImage file={imageAttachment.file} disabled={busy}
+            onRemove={() => { imageAttachment.clear(); questionInput.current?.focus(); }} />}
+          {imageAttachment.error && <p className="composer-image-error" role="alert">{imageAttachment.error}</p>}
+          {captureNotice && <p className="composer-image-hint" role="status">{captureNotice}</p>}
           <label className="sr-only" htmlFor="assistant-question">Ask NYRA</label>
-          <textarea id="assistant-question" rows={3} value={question} maxLength={20000}
+          <textarea ref={questionInput} id="assistant-question" rows={3} value={question} maxLength={20000}
                     placeholder={isSettings ? "Paste parts, rules or settings to fill…" : "Ask about what you’re viewing…"}
                     onChange={(event) => setQuestion(event.target.value)}
                     onKeyDown={(event) => {
@@ -270,14 +289,26 @@ export function FloatingAssistant() {
                         void ask();
                       }
                     }} />
+          {can.review(role) && <p className="composer-image-hint">Ctrl+V to attach an image for a reminder.</p>}
           <div>
             <Link href={fullChat}>Open full chat</Link>
-            <button className="btn btn-primary" disabled={busy || !question.trim()}>
+            <button className="btn btn-primary" disabled={busy || (!question.trim() && !imageAttachment.file)}>
               {busy ? "Working…" : "Send"}
             </button>
           </div>
         </form>
       </section>
     </details>
+    {reminderCapture && <ReminderEditor initialFile={reminderCapture.file} initialNote={reminderCapture.note}
+      itemId={itemId ?? undefined}
+      onClose={() => {
+        setReminderCapture(null); requestAnimationFrame(() => questionInput.current?.focus());
+      }}
+      onSaved={() => {
+        setReminderCapture(null); imageAttachment.clear(); setQuestion("");
+        setCaptureNotice("Reminder saved. Find it in Engineer reminders.");
+        requestAnimationFrame(() => questionInput.current?.focus());
+      }} />}
+    </>
   );
 }

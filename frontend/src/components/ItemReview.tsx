@@ -1,5 +1,7 @@
 "use client";
 
+import { ReminderContext } from "./ReminderContext";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, fmtUsd, useApi } from "@/lib/api";
@@ -210,6 +212,8 @@ export function ItemReview({ batchId, itemId, stockroomId, embedded = false,
           {String(d.context.item_desc ?? "")}
         </p>
       </div>
+
+      <ReminderContext batchId={batchId} itemId={itemId} stockroomId={stockroomId} canCreate={canReview} />
       {err && <Banner kind="error">{err} <button className="btn text-xs" onClick={() => void load()}>Retry details</button></Banner>}
       {evidenceLoading && <p role="status" className="text-xs" style={{ color: "var(--text-muted)" }}>Loading history and supporting evidence…</p>}
       {note && <Banner kind="success">{note}</Banner>}

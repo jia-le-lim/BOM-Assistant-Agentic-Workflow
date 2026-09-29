@@ -46,6 +46,10 @@ from .config import (ENGINE_DIR, database_url, db_path, is_postgres,
 # already on the Supabase project, so the migration is a no-op against it.
 # tests/test_foreign_keys.py asserts this list and the two DDL blocks agree.
 FOREIGN_KEYS = [
+    ("engineer_reminder_origin_fk", "engineer_reminder", ("origin_batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
+    ("engineer_reminder_match_fk", "engineer_reminder", ("matched_batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
     ("bom_rows_batch_fk", "bom_rows", ("batch_id",),
      "batches", ("batch_id",), "CASCADE"),
     ("recommendation_result_batch_fk", "recommendation_result", ("batch_id",),
@@ -96,6 +100,9 @@ FOREIGN_KEYS = [
 # (bom_rows, recommendation_result composite) no extra index is needed.
 # Identical on SQLite so the two dialects stay comparable.
 FK_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS ix_reminder_origin ON engineer_reminder(origin_batch_id);
+CREATE INDEX IF NOT EXISTS ix_reminder_match ON engineer_reminder(matched_batch_id);
+
 CREATE INDEX IF NOT EXISTS ix_bom_rows_batch ON bom_rows(batch_id);
 CREATE INDEX IF NOT EXISTS ix_recommendation_result_batch
   ON recommendation_result(batch_id);
@@ -138,6 +145,27 @@ CREATE TABLE IF NOT EXISTS batches (
   scored_config_hash TEXT,
   scored_at TEXT
 );
+
+
+CREATE TABLE IF NOT EXISTS engineer_reminder (
+  reminder_id TEXT PRIMARY KEY,
+  owner_user TEXT NOT NULL,
+  title TEXT NOT NULL,
+  item_id TEXT NOT NULL DEFAULT '',
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  timing TEXT NOT NULL DEFAULT 'next_cycle' CHECK (timing IN ('next_cycle', 'date')),
+  due_date TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'dismissed')),
+  origin_batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
+  matched_batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
+  image_mime TEXT,
+  image_data TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_reminder_owner_status
+  ON engineer_reminder(owner_user, status, item_id, stockroom_id);
 
 CREATE TABLE IF NOT EXISTS bom_rows (
   batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
@@ -506,6 +534,32 @@ CREATE TABLE IF NOT EXISTS batches (
   scored_config_hash TEXT,
   scored_at TEXT
 );
+
+
+CREATE TABLE IF NOT EXISTS engineer_reminder (
+  reminder_id TEXT PRIMARY KEY,
+  owner_user TEXT NOT NULL,
+  title TEXT NOT NULL,
+  item_id TEXT NOT NULL DEFAULT '',
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  timing TEXT NOT NULL DEFAULT 'next_cycle' CHECK (timing IN ('next_cycle', 'date')),
+  due_date TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'dismissed')),
+  origin_batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
+  matched_batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
+  image_mime TEXT,
+  image_data TEXT,
+  created_at TEXT DEFAULT {PG_NOW},
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+CREATE INDEX IF NOT EXISTS ix_reminder_owner_status
+  ON engineer_reminder(owner_user, status, item_id, stockroom_id);
+
+-- The pilot uses a trusted server identity, not browser Supabase JWT identities.
+-- Only the backend service may access this table; every route also checks owner_user.
+ALTER TABLE engineer_reminder ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON engineer_reminder FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS bom_rows (
   batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,

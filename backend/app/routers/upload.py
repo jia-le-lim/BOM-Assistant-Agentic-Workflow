@@ -7,6 +7,7 @@ from ..audit import audit
 from ..config import DEFAULT_MODULE_FILTER, MAX_UPLOAD_BYTES
 from ..db import get_conn
 from ..ingestion import IngestionConflict, IngestionError, ingest
+from ..reminders import match_cycle_reminders
 from ..security import UPLOAD_ROLES, require_role, require_workspace
 
 router = APIRouter()
@@ -74,6 +75,7 @@ async def upload_bom_file(
             raise HTTPException(409, str(e)) from e
         except IngestionError as e:
             raise HTTPException(400, str(e)) from e
+        match_cycle_reminders(conn, summary["batch_id"], actor["user"])
         audit(conn, actor, "POST", "/upload-bom-file", "batch",
               summary["batch_id"], summary)
         conn.commit()
