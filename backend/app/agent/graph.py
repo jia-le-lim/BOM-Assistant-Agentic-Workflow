@@ -325,6 +325,9 @@ def run_chat(conn, question: str, batch_id: int | None, actor: dict,
         # question. The branch's own copy is filtered out; see _branch_sink.
         on_event({"type": "request", "query": question, "batch_id": batch_id,
                   "provider": provider.name, "model": provider.model})
+    if question.lstrip().startswith("/"):
+        from .skills import run_skill
+        return run_skill(conn, question, batch_id, actor, sid, allow_writes, on_event, page_context)
     final = CHAT_GRAPH.invoke({
         "conn": conn, "question": question, "batch_id": batch_id,
         "actor": actor, "session_id": sid, "on_event": on_event,

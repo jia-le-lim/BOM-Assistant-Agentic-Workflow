@@ -28,6 +28,7 @@ from ..agent.graph import run_chat
 from ..agent.loop import log_turn
 from ..agent.prompts import DONT_KNOW
 from ..agent.suggestions import predict_next_steps
+from ..agent.skills import catalog, stored_skill
 from ..audit import audit
 from ..db import get_conn
 from ..schemas import ChatRequest
@@ -112,6 +113,11 @@ def _predict_next_steps(question: str, answer: str) -> dict:
         answer,
         agent_tools.specs(allow_writes=False, names=safe),
     )
+
+
+@router.get("/chat/skills")
+def chat_skills(actor: dict = Depends(any_role())):
+    return {"skills": catalog(actor)}
 
 
 @router.post("/chat")
@@ -208,6 +214,7 @@ def get_chat_session(session_id: str, actor: dict = Depends(any_role())):
         for row in rows:
             turn = dict(row)
             turn["tool_calls"] = _stored_tool_calls(turn.get("tool_calls"))
+            turn["skill"] = stored_skill(turn["question"])
             outcome = outcomes.get(turn["turn_id"], {})
             turn["fallback"] = outcome.get("fallback", turn["answer"] == DONT_KNOW)
             turn["response_status"] = outcome.get("response_status", "unsupported" if turn["fallback"] else "answered")
