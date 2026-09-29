@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { fmtUsd, useApi } from "@/lib/api";
 import { can, useSession } from "@/lib/session";
@@ -8,6 +7,7 @@ import type { DormantRule, DormantRuleCoverage, DormantRulePage, DormantRuleDraf
 import { useAssistantForm } from "@/lib/assistant-context";
 import { AssistantDraftTable } from "@/components/AssistantDraftTable";
 import { Banner, Spinner } from "@/components/ui";
+import { SettingsActions, SettingsRow, SettingsWorkspace } from "@/components/SettingsWorkspace";
 
 /* Dormant stocking rules. The engine sizes a part with no consumption in any
  * window to zero; over eight review cycles engineers overrode that on 1,344 of
@@ -37,7 +37,7 @@ export default function DormantRulesPage() {
   const [drafts, setDrafts] = useState<DormantRuleDraft[]>([]);
 
   useAssistantForm({ scope, match_key: matchKey, policy, fixed_qty: qty, batch_id: batchId, drafts,
-    dirty: !!(matchKey || qty || drafts.length), busy, ready: !!page }, (actions) => {
+    dirty: !!(matchKey || qty || drafts.length || scope !== "category" || policy !== "hold_current"), busy, ready: !!page }, (actions) => {
     if (!can.review(role) || busy) return;
     for (const action of actions) if (action.section === "dormant_rules") {
       if (action.rows.length === 1 && !drafts.length && !matchKey && !qty) {
@@ -86,9 +86,9 @@ export default function DormantRulesPage() {
           fixed_qty: policy === "fixed_qty" ? Number(qty) : null,
         }),
       });
-      setNote("Proposed. It sizes nothing until a different person with senior " +
-              "rights confirms it, and it applies from the next engine run.");
-      setMatchKey(""); setQty(""); await load();
+      setNote("Proposed for your account. Confirm it with senior or administrator rights " +
+              "to apply it on your next engine run.");
+      setMatchKey(""); setQty(""); setScope("category"); setPolicy("hold_current"); await load();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -115,47 +115,31 @@ export default function DormantRulesPage() {
     finally { setBusy(false); }
   }
 
-  if (!page && !err) return <Spinner label="Loading dormant rules…" />;
+  if (!page && !err) return <SettingsWorkspace active="dormant"><Spinner label="Loading dormant rules…" /></SettingsWorkspace>;
+  const dirty = !!(matchKey || qty || drafts.length || scope !== "category" || policy !== "hold_current");
 
   return (
-    <div className="page flex flex-col gap-6">
-      <div className="page-head">
-        <Link href="/config" className="text-xs" style={{ color: "var(--text-muted)" }}>
-          ← Rules &amp; criticality
-        </Link>
-        <h1 className="text-xl font-semibold mt-1">Dormant stocking rules</h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-          What a part with no recorded consumption keeps on the shelf. The engine
-          would size these to zero; these rules override it.
-        </p>
-      </div>
+    <SettingsWorkspace active="dormant">
+      {err && <div role="alert"><Banner kind="error">{err}</Banner></div>}
+      {note && <div role="status"><Banner kind="success">{note}</Banner></div>}
 
-      {err && <Banner kind="error">{err}</Banner>}
-      {note && <Banner kind="success">{note}</Banner>}
-
-      <Banner kind="info">
-        Rules are read when the engine <strong>scores</strong> a batch, not when you
-        review it. Editing one here changes the next <code>Run engine</code>; a batch
-        already on screen keeps the numbers its reviewer saw.
-      </Banner>
-
-      <div className="card p-5" data-assistant-section="Coverage & stock impact">
-        <h2 className="text-sm font-semibold mb-1">Coverage &amp; stock impact</h2>
-        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          These rules move inventory. Match rate alone is not the decision — the book
-          value against what the engine itself proposed is the other half of it.
-        </p>
-        <div className="flex flex-wrap gap-3 items-end">
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Scored batch</span>
-            <input className="field w-28 tnum" type="number" value={batchId}
-                   placeholder="13" onChange={(e) => setBatchId(e.target.value)} />
-          </label>
-          <button className="btn" onClick={checkCoverage}
-                  disabled={busy || !batchId || !can.review(role)}>Check</button>
+      <div className="settings-card" data-assistant-section="Coverage & stock impact">
+        <header className="settings-card-heading">
+          <h2>Coverage &amp; stock impact</h2>
+          <p>See how dormant rules affect a scored batch before the next engine run.</p>
+        </header>
+        <SettingsRow id="coverage-batch" label="Scored batch" description="Enter a batch ID to check its matching parts and stock value.">
+          <input id="coverage-batch" className="field tnum" type="number" min={1} value={batchId}
+            aria-describedby="coverage-batch-hint" placeholder="e.g. 13" disabled={busy}
+            onChange={(e) => setBatchId(e.target.value)} />
+        </SettingsRow>
+        <div className="settings-actions">
+          <p className="settings-status">Existing batch results stay unchanged.</p>
+          <button type="button" className="btn" onClick={checkCoverage}
+            disabled={busy || !batchId || !can.review(role)}>Check coverage</button>
         </div>
         {coverage && (
-          <p className="text-sm mt-3">
+          <p className="settings-helper">
             {coverage.matched.toLocaleString()} of {coverage.dormant_rows.toLocaleString()}{" "}
             dormant rows matched ({coverage.pct}%) by {coverage.confirmed_rules} confirmed{" "}
             {coverage.confirmed_rules === 1 ? "rule" : "rules"}. Proposed book{" "}
@@ -168,18 +152,16 @@ export default function DormantRulesPage() {
         )}
       </div>
 
-      <div className="card p-5" data-assistant-section="Dormant rules" data-assistant-target="dormant_rules">
-        <h2 className="text-sm font-semibold mb-1">Rules</h2>
-        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          An item rule beats a category rule beats the default, and each part
-          matches at most one rule per tier — a per-part exception is just an
-          item rule. Same two-person rule as criticality: propose, then a{" "}
-          <strong>different</strong> senior confirms.
-          {page && ` ${page.confirmed} confirmed · ${page.pending} pending.`}
-        </p>
+      <div className="settings-card" data-assistant-section="Dormant rules" data-assistant-target="dormant_rules">
+        <header className="settings-card-heading">
+          <h2>Dormant stocking rules</h2>
+          <p>Set stock levels for parts with no consumption. Item rules take priority over category rules, then the default.</p>
+          <p>Confirm your proposals with senior or administrator rights before your next engine run.
+            {page && ` ${page.confirmed} confirmed · ${page.pending} pending.`}</p>
+        </header>
 
         {page && page.rules.length > 0 && (
-          <div className="scroll-x mb-4">
+          <div className="settings-table scroll-x">
             <table className="w-full text-sm min-w-[560px]">
               <thead>
                 <tr>
@@ -240,49 +222,44 @@ export default function DormantRulesPage() {
             { key: "fixed_qty", label: "Quantity", type: "number", disabled: (row) => row.policy !== "fixed_qty" },
           ]} />
 
-        <div className="flex flex-wrap gap-3 items-end">
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Scope</span>
-            <select className="field" value={scope} disabled={!can.review(role)}
-                    onChange={(e) => setScope(e.target.value as DormantRule["scope"])}>
-              <option value="category">category</option>
-              <option value="item">item</option>
-              <option value="default">default</option>
+        <div className="settings-rows">
+          <SettingsRow id="dormant-scope" label="Scope" description="Apply this rule to an item, a category, or all dormant parts." changed={scope !== "category"}>
+            <select id="dormant-scope" className="field" value={scope} disabled={busy || !can.review(role)}
+              aria-describedby="dormant-scope-hint" onChange={(e) => setScope(e.target.value as DormantRule["scope"])}>
+              <option value="category">Category</option><option value="item">Item</option><option value="default">Default</option>
             </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>
-              {scope === "item" ? "Item id" : scope === "category" ? "Category" : "—"}
-            </span>
-            <input className="field w-40 font-mono" value={matchKey}
-                   disabled={!can.review(role) || scope === "default"}
-                   placeholder={scope === "item" ? "500699364" : "filter"}
-                   onChange={(e) => setMatchKey(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Policy</span>
-            <select className="field" value={policy} disabled={!can.review(role)}
-                    onChange={(e) => setPolicy(e.target.value as DormantRule["policy"])}>
-              {POLICIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </SettingsRow>
+          <SettingsRow id="dormant-match" label={scope === "item" ? "Item id" : scope === "category" ? "Category" : "Matches"}
+            description={scope === "default" ? "The default applies when no more specific rule matches." : "Use the exact item ID or category name."}
+            changed={!!matchKey && scope !== "default"}>
+            <input id="dormant-match" className="field font-mono" value={scope === "default" ? "" : matchKey}
+              aria-describedby="dormant-match-hint" disabled={busy || !can.review(role) || scope === "default"}
+              placeholder={scope === "item" ? "e.g. 500699364" : scope === "category" ? "e.g. filter" : "All dormant parts"}
+              onChange={(e) => setMatchKey(e.target.value)} />
+          </SettingsRow>
+          <SettingsRow id="dormant-policy" label="Policy" description="Choose the stocking level for matching parts." changed={policy !== "hold_current"}>
+            <select id="dormant-policy" className="field" value={policy} disabled={busy || !can.review(role)}
+              aria-describedby="dormant-policy-hint" onChange={(e) => setPolicy(e.target.value as DormantRule["policy"])}>
+              {POLICIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Quantity</span>
-            <input className="field w-20 tnum" type="number" min={0} max={10000}
-                   value={qty} disabled={!can.review(role) || policy !== "fixed_qty"}
-                   onChange={(e) => setQty(e.target.value)} />
-          </label>
-          <button className="btn" onClick={propose}
-                  disabled={busy || !can.review(role)
-                            || (scope !== "default" && !matchKey.trim())
-                            || (policy === "fixed_qty" && qty === "")}>
+          </SettingsRow>
+          <SettingsRow id="dormant-qty" label="Quantity" description="Required for a fixed quantity. Enter 0–10,000 units." changed={!!qty && policy === "fixed_qty"}>
+            <input id="dormant-qty" className="field tnum" type="number" min={0} max={10000}
+              aria-describedby="dormant-qty-hint" value={policy === "fixed_qty" ? qty : ""}
+              placeholder={policy === "fixed_qty" ? "Enter units" : "Determined by policy"}
+              disabled={busy || !can.review(role) || policy !== "fixed_qty"} onChange={(e) => setQty(e.target.value)} />
+          </SettingsRow>
+        </div>
+        <p className="settings-helper">{POLICIES.find(([value]) => value === policy)?.[2]}</p>
+        <SettingsActions dirty={dirty} disabled={busy} status={dirty ? "Unsaved dormant rule proposal" : "No pending edits"}
+          onCancel={() => { setScope("category"); setMatchKey(""); setPolicy("hold_current"); setQty(""); setDrafts([]); setErr(null); setNote(null); }}>
+          <button type="button" className="btn btn-primary" onClick={propose}
+            disabled={busy || !can.review(role) || (scope !== "default" && !matchKey.trim())
+              || (policy === "fixed_qty" && (qty === "" || !Number.isInteger(Number(qty)) || Number(qty) < 0 || Number(qty) > 10000))}>
             Propose
           </button>
-        </div>
-        <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
-          {POLICIES.find(([v]) => v === policy)?.[2]}
-        </p>
+        </SettingsActions>
       </div>
-    </div>
+    </SettingsWorkspace>
   );
 }

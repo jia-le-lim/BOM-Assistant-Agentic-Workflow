@@ -51,7 +51,7 @@ export function AssistantDraftTable<T extends object>({ rows, onChange, columns,
     onChange(failed);
     setErrors(failures);
     setNote(`${rows.length - failed.length} of ${rows.length} proposals submitted. `
-      + "A different senior must confirm them before they take effect on the next engine run."
+      + "Confirm your proposals with senior or administrator rights before your next engine run."
       + (failed.length ? " Unsubmitted rows remain below for correction or retry." : ""));
     try { await onSaved(); } finally { setBusy(false); onBusyChange(false); }
   }
@@ -68,7 +68,7 @@ export function AssistantDraftTable<T extends object>({ rows, onChange, columns,
       {errors.length > 0 && <Banner kind="error">{errors.join(" ")}</Banner>}
       {!!rows.length && <>
         {replacesActive && rows.some(replacesActive) && <Banner kind="info">
-          This draft includes active rules. Proposing replacements resets their approval until a different senior confirms them.
+          This draft includes active rules. Proposing replacements resets their approval until you confirm them with approval rights.
         </Banner>}
         <div className="scroll-x">
           <table className="w-full text-sm">

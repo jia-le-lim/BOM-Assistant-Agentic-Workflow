@@ -7,14 +7,15 @@ import type { PartCategoryPage, RuleConfig, CriticalityDraft, CategoryDraft } fr
 import { useAssistantForm } from "@/lib/assistant-context";
 import { AssistantDraftTable } from "@/components/AssistantDraftTable";
 import { Banner, Spinner } from "@/components/ui";
+import { SETTINGS_SECTIONS, SettingsActions, SettingsRow, SettingsWorkspace, type SettingsSection } from "@/components/SettingsWorkspace";
 
 const EDITABLE = [
   ["long_lead_time_threshold", "Long lead time (days)", "Workload/safety dial: 30 → 47% review & 7.6% miss; 60 → 38% review & 10.7% miss"],
   ["zero_stock_risk_clt", "Zero-stock risk lead time (days)", "Dormant parts at/above this lead time are carved out of auto-clear"],
   ["high_cost_threshold", "High cost ($)", "Override rate roughly doubles above ~$1,500"],
   ["low_cost_threshold", "Low cost ($)", "Rule 1 low-cost recurring usage"],
-  ["recent_usage_days", "Recent usage (days)", ""],
-  ["min_usage_months", "Min usage months", ""],
+  ["recent_usage_days", "Recent usage (days)", "How far back to look for recent consumption."],
+  ["min_usage_months", "Min usage months", "Minimum months of usage for a recurring-demand signal."],
   ["max_change_pct_review", "Max change before review", "0.5 = +50%"],
   ["value_gate_usd", "Value gate ($)", "Exposure at/above this always reaches a human"],
   ["min_protective_stock", "Protective floor (units)", "Applied when the source algorithm says 0 but risk exists"],
@@ -32,6 +33,7 @@ const AUTOCLEAR = [
 export default function ConfigPage() {
   const { call } = useApi();
   const { role } = useSession();
+  const [section, setSection] = useState<SettingsSection>("thresholds");
   const [cfg, setCfg] = useState<RuleConfig | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [version, setVersion] = useState("");
@@ -50,10 +52,26 @@ export default function ConfigPage() {
   const [criticalityDrafts, setCriticalityDrafts] = useState<CriticalityDraft[]>([]);
   const [categoryDrafts, setCategoryDrafts] = useState<CategoryDraft[]>([]);
 
+  useEffect(() => {
+    const syncSection = () => {
+      const id = window.location.hash.slice(1);
+      const match = SETTINGS_SECTIONS.find((entry) => entry.id === id);
+      if (match) setSection(match.id);
+    };
+    const frame = window.requestAnimationFrame(syncSection);
+    window.addEventListener("hashchange", syncSection);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("hashchange", syncSection); };
+  }, []);
+
+  function selectSection(id: SettingsSection) {
+    setSection(id);
+    window.history.replaceState(null, "", `#${id}`);
+  }
+
   useAssistantForm({ edits, rule_version: version, pattern, criticality: crit,
     catPattern, catName, catPriority, reliableEdit, triageEnabledEdit,
     criticalityDrafts, categoryDrafts, busy, ready: !!cfg,
-    dirty: !!(Object.keys(edits).length || version || pattern || catPattern || catName
+    dirty: !!(Object.keys(edits).length || version || pattern || crit !== "High" || catPattern || catName || catPriority !== "500"
       || reliableEdit || triageEnabledEdit || criticalityDrafts.length || categoryDrafts.length),
   }, (actions) => {
     if (busy || !can.review(role)) return;
@@ -86,6 +104,16 @@ export default function ConfigPage() {
         });
       }
     }
+    const first = actions[0];
+    if (first) {
+      if (first.section === "criticality") selectSection("criticality");
+      else if (first.section === "part_categories") selectSection("part-categories");
+      else if (first.section === "thresholds") {
+        const keys = Object.keys(first.updates);
+        selectSection(keys.every((key) => key.startsWith("autoclear_")) ? "autoclear"
+          : keys.every((key) => key === "triage_guarded_assist_enabled") ? "review-assist" : "thresholds");
+      }
+    }
     setNote("NYRA filled an editable draft. Review the fields, then use Save or Propose.");
   });
 
@@ -107,6 +135,10 @@ export default function ConfigPage() {
   }, [load, loadCategories]);
 
   async function save() {
+    if (!can.configWrite(role) || busy || !version.trim()) return;
+    if (Object.values(edits).some((value) => !value.trim() || !Number.isFinite(Number(value)))) {
+      setErr("Enter a valid number for each changed setting."); return;
+    }
     setBusy(true); setErr(null); setNote(null);
     try {
       const updates: Record<string, number | boolean> = {};
@@ -124,7 +156,7 @@ export default function ConfigPage() {
       if (!Object.keys(updates).length) { setErr("No changes to apply."); return; }
       const r = await call<{ rule_version: string }>("config/rules", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rule_version: version, updates }),
+        body: JSON.stringify({ rule_version: version.trim(), updates }),
       });
       setNote(`Saved as ${r.rule_version}. Re-run the engine or triage on a batch to apply it — ` +
               `existing results keep the version they were scored with.`);
@@ -140,9 +172,9 @@ export default function ConfigPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pattern, criticality: crit }),
       });
-      setNote(`Proposed "${pattern}" as ${crit}. It is NOT active until a different ` +
-              `person with senior rights confirms it — the engine reads confirmed rows only.`);
-      setPattern(""); await load();
+      setNote(`Proposed "${pattern}" as ${crit}. Confirm it with senior or administrator ` +
+              `rights for your account — the engine reads confirmed rows only.`);
+      setPattern(""); setCrit("High"); await load();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -166,8 +198,8 @@ export default function ConfigPage() {
                                priority: Number(catPriority) || 500 }),
       });
       setNote(`Proposed "${catPattern}" → ${catName}. It does NOT affect peer ` +
-              `retrieval until a different person with senior rights confirms it.`);
-      setCatPattern(""); setCatName(""); await loadCategories();
+              `retrieval until you confirm it with senior or administrator rights.`);
+      setCatPattern(""); setCatName(""); setCatPriority("500"); await loadCategories();
     } catch (e) { setErr((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -183,312 +215,225 @@ export default function ConfigPage() {
     finally { setBusy(false); }
   }
 
-  if (!cfg) return err ? <Banner kind="error">{err}</Banner> : <Spinner />;
+  if (!cfg) return (
+    <SettingsWorkspace active={section} onSelect={selectSection}>
+      {err ? <Banner kind="error">{err}</Banner> : <Spinner label="Loading settings…" />}
+    </SettingsWorkspace>
+  );
 
   const criticality = (cfg.config.machine_criticality ?? {}) as Record<string, string>;
+  const numericChanged = (key: string) => edits[key] !== undefined
+    && (edits[key] === "" || Number(edits[key]) !== Number(cfg.config[key]));
+  const reliableChanged = reliableEdit !== ""
+    && (reliableEdit === "true") !== Boolean(cfg.config.autoclear_reliable);
+  const triageChanged = triageEnabledEdit !== ""
+    && (triageEnabledEdit === "true") !== Boolean(cfg.config.triage_guarded_assist_enabled);
+  const rulesChanged = Object.keys(edits).some(numericChanged) || reliableChanged || triageChanged;
+  const rulesDirty = rulesChanged || !!version;
+  const criticalityDirty = !!(pattern || crit !== "High" || criticalityDrafts.length);
+  const categoriesDirty = !!(catPattern || catName || catPriority !== "500" || categoryDrafts.length);
+  const invalidNumber = Object.values(edits).some((value) => !value.trim() || !Number.isFinite(Number(value)));
+  const changedSections: SettingsSection[] = [];
+  if (EDITABLE.some(([key]) => numericChanged(key))) changedSections.push("thresholds");
+  if (AUTOCLEAR.some(([key]) => numericChanged(key)) || reliableChanged) changedSections.push("autoclear");
+  if (triageChanged) changedSections.push("review-assist");
+  if (criticalityDirty) changedSections.push("criticality");
+  if (categoriesDirty) changedSections.push("part-categories");
+  const isRuleSection = section === "thresholds" || section === "autoclear" || section === "review-assist";
+
+  function cancelRules() {
+    setEdits({}); setReliableEdit(""); setTriageEnabledEdit(""); setVersion("");
+    setErr(null); setNote(null);
+  }
+
+  function numericRows(rows: typeof EDITABLE | typeof AUTOCLEAR) {
+    return rows.map(([key, label, hint]) => (
+      <SettingsRow key={key} id={key} label={label} description={hint} changed={numericChanged(key)}>
+        <input id={key} className="field tnum" type="number" step="any"
+          aria-label={label} aria-describedby={`${key}-hint`}
+          disabled={busy || !can.configWrite(role)}
+          value={edits[key] ?? String(cfg?.config[key] ?? "")}
+          onChange={(e) => setEdits((current) => ({ ...current, [key]: e.target.value }))} />
+      </SettingsRow>
+    ));
+  }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold">Rules &amp; criticality</h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-          Thresholds are versioned config, never hard-coded. Active version:{" "}
-          <code>{cfg.rule_version}</code>
-        </p>
-      </div>
+    <SettingsWorkspace active={section} onSelect={selectSection} changed={changedSections} version={cfg.rule_version}>
+      {err && <div role="alert"><Banner kind="error">{err}</Banner></div>}
+      {note && <div role="status"><Banner kind="success">{note}</Banner></div>}
 
-      {err && <Banner kind="error">{err}</Banner>}
-      {note && <Banner kind="success">{note}</Banner>}
+      <div className="settings-card">
+        <section hidden={section !== "thresholds"} data-assistant-section="Thresholds" data-assistant-target={section === "thresholds" ? "thresholds" : undefined}>
+          <header className="settings-card-heading">
+            <h2>Thresholds</h2>
+            <p>Lead times, costs, and stock levels used across BOM reviews.</p>
+          </header>
+          <div className="settings-rows">{numericRows(EDITABLE)}</div>
+        </section>
 
-      <div className="card p-5" data-assistant-section="Thresholds" data-assistant-target="thresholds">
-        <h2 className="text-sm font-semibold mb-3">Thresholds</h2>
-        <div className="scroll-x">
-          <table className="w-full text-sm min-w-[640px]">
-            <thead>
-              <tr><th>Setting</th><th className="text-right">Active</th>
-                  <th className="text-right w-32">New value</th><th>Why it matters</th></tr>
-            </thead>
-            <tbody>
-              {EDITABLE.map(([key, label, hint]) => (
-                <tr key={key}>
-                  <td>{label}</td>
-                  <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
-                  <td className="text-right">
-                    <input className="field w-28 tnum text-right" type="number"
-                           aria-label={label}
-                           disabled={!can.configWrite(role)}
-                           value={edits[key] ?? ""}
-                           placeholder={String(cfg.config[key] ?? "")}
-                           onChange={(e) => setEdits({ ...edits, [key]: e.target.value })} />
-                  </td>
-                  <td className="text-xs" style={{ color: "var(--text-muted)" }}>{hint}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="flex flex-wrap gap-3 items-end mt-4">
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>New rule version (required)</span>
-            <input className="field" value={version} placeholder="e.g. 0.2.1-tcb"
-                   disabled={!can.configWrite(role)}
-                   onChange={(e) => setVersion(e.target.value)} />
-          </label>
-          <button className="btn btn-primary" onClick={save}
-                  disabled={busy || !can.configWrite(role) || !version}>
-            Save as new version
-          </button>
-        </div>
-        <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-          {can.configWrite(role)
-            ? "The version must change whenever config changes — that is what makes a past result reproducible."
-            : `Role ${role} cannot edit thresholds. Switch to admin.`}
-        </p>
-      </div>
-
-      <div className="card p-5" data-assistant-section="Auto-clear policy">
-        <h2 className="text-sm font-semibold mb-1">Auto-clear policy (statistical engine)</h2>
-        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          Auto-clear decides whether a row skips human review — it never changes Min/ROP/Max.
-          Calibrated OFF on Jan&rsquo;26 (expanding it lowered agreement with engineers); tune
-          here and re-check with <code>analysis/s15_autoclear_calibration.py</code> before enabling.
-          Saving uses the same new-version box above.
-        </p>
-        <div className="scroll-x">
-          <table className="w-full text-sm min-w-[640px]">
-            <thead>
-              <tr><th>Setting</th><th className="text-right">Active</th>
-                  <th className="text-right w-32">New value</th><th>What it does</th></tr>
-            </thead>
-            <tbody>
-              {AUTOCLEAR.map(([key, label, hint]) => (
-                <tr key={key}>
-                  <td>{label}</td>
-                  <td className="text-right tnum">{String(cfg.config[key] ?? "—")}</td>
-                  <td className="text-right">
-                    <input className="field w-28 tnum text-right" type="number" step="any"
-                           aria-label={label}
-                           disabled={!can.configWrite(role)}
-                           value={edits[key] ?? ""}
-                           placeholder={String(cfg.config[key] ?? "")}
-                           onChange={(e) => setEdits({ ...edits, [key]: e.target.value })} />
-                  </td>
-                  <td className="text-xs" style={{ color: "var(--text-muted)" }}>{hint}</td>
-                </tr>
-              ))}
-              <tr>
-                <td>Reliable-stable lever</td>
-                <td className="text-right tnum">{cfg.config.autoclear_reliable ? "on" : "off"}</td>
-                <td className="text-right">
-                  <select className="field w-28" disabled={!can.configWrite(role)}
-                          aria-label="Reliable-stable lever"
-                          value={reliableEdit}
-                          onChange={(e) => setReliableEdit(e.target.value)}>
-                    <option value="">—</option>
-                    <option value="true">on</option>
-                    <option value="false">off</option>
-                  </select>
-                </td>
-                <td className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  Auto-clear regular, stable, moderate-exposure parts. Opt-in — off by default.
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="card p-5" data-assistant-section="Guarded bulk acceptance">
-        <h2 className="text-sm font-semibold mb-1">Guarded bulk acceptance</h2>
-        <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-          Review assist ranks review work but never changes Min/ROP/Max. Guarded assistance
-          only preselects its bulk-accept candidates; an engineer still confirms the action.
-        </p>
-        <div className="scroll-x">
-          <table className="w-full text-sm min-w-[640px]">
-            <thead>
-              <tr><th>Setting</th><th className="text-right">Active</th>
-                  <th className="text-right w-32">New value</th><th>What it does</th></tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Guarded bulk acceptance</td>
-                <td className="text-right tnum">
-                  {cfg.config.triage_guarded_assist_enabled ? "on" : "off"}
-                </td>
-                <td className="text-right">
-                  <select className="field w-28" disabled={!can.configWrite(role)}
-                          aria-label="Guarded bulk acceptance"
-                          value={triageEnabledEdit}
-                          onChange={(e) => setTriageEnabledEdit(e.target.value)}>
-                    <option value="">—</option>
-                    <option value="true">on</option>
-                    <option value="false">off</option>
-                  </select>
-                </td>
-                <td className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  Enables human-confirmed bulk acceptance of assist&apos;s bulk-accept
-                  candidates. Off by default.
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
-          Saving uses the same new-version box above. Re-run review assist to rebuild
-          existing results.
-        </p>
-      </div>
-
-      <div className="card p-5" data-assistant-section="Machine criticality" data-assistant-target="criticality">
-        <h2 className="text-sm font-semibold mb-1">Machine criticality</h2>
-        <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
-          Not derivable from the data — engineers own it. Anyone with review rights may
-          propose; a <strong>different</strong> person with senior rights must confirm.
-          The engine reads confirmed entries only, so an assistant can capture intent
-          but never silently change what the engine does.
-        </p>
-
-        {Object.keys(criticality).length > 0 && (
-          <div className="mb-4">
-            <div className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-              Confirmed &amp; active
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(criticality).map(([p, c]) => (
-                <span key={p} className="text-xs px-2 py-1 rounded"
-                      style={{ background: "var(--seq-soft)" }}>
-                  <span aria-hidden style={{ color: "var(--success-text)" }}>✓ </span>
-                  {p} → {c}
-                </span>
-              ))}
-            </div>
+        <section hidden={section !== "autoclear"} data-assistant-section="Auto-clear policy" data-assistant-target={section === "autoclear" ? "thresholds" : undefined}>
+          <header className="settings-card-heading">
+            <h2>Auto-clear policy</h2>
+            <p>Choose when a part can skip human review. These settings do not change Min/ROP/Max.</p>
+          </header>
+          <div className="settings-rows">
+            {numericRows(AUTOCLEAR)}
+            <SettingsRow id="autoclear-reliable" label="Reliable-stable lever" changed={reliableChanged}
+              description="Auto-clear regular, stable parts with moderate exposure. Off by default.">
+              <select id="autoclear-reliable" className="field" aria-label="Reliable-stable lever"
+                aria-describedby="autoclear-reliable-hint" disabled={busy || !can.configWrite(role)}
+                value={reliableEdit || String(Boolean(cfg.config.autoclear_reliable))}
+                onChange={(e) => setReliableEdit(e.target.value)}>
+                <option value="false">Off</option><option value="true">On</option>
+              </select>
+            </SettingsRow>
           </div>
-        )}
+          <p className="settings-helper">Auto-clear is calibrated off. Check agreement with engineers before enabling it.</p>
+        </section>
 
-        <AssistantDraftTable rows={criticalityDrafts} onChange={setCriticalityDrafts} section="criticality"
-          endpoint="config/criticality" canPropose={can.review(role) && !busy} onSaved={load}
-          onBusyChange={setBusy}
-          valid={(row) => row.pattern.trim().length >= 2}
-          replacesActive={(row) => Object.hasOwn(criticality, row.pattern)}
-          columns={[{ key: "pattern", label: "Machine type contains" },
-            { key: "criticality", label: "Criticality", options: ["High", "Medium", "Low"] }]} />
+        <section hidden={section !== "review-assist"} data-assistant-section="Guarded bulk acceptance" data-assistant-target={section === "review-assist" ? "thresholds" : undefined}>
+          <header className="settings-card-heading">
+            <h2>Review assist</h2>
+            <p>Control how review assist prepares parts for bulk acceptance.</p>
+          </header>
+          <div className="settings-rows">
+            <SettingsRow id="guarded-assist" label="Guarded bulk acceptance" changed={triageChanged}
+              description="Preselect eligible candidates. An engineer still confirms every bulk action.">
+              <select id="guarded-assist" className="field" aria-label="Guarded bulk acceptance"
+                aria-describedby="guarded-assist-hint" disabled={busy || !can.configWrite(role)}
+                value={triageEnabledEdit || String(Boolean(cfg.config.triage_guarded_assist_enabled))}
+                onChange={(e) => setTriageEnabledEdit(e.target.value)}>
+                <option value="false">Off</option><option value="true">On</option>
+              </select>
+            </SettingsRow>
+          </div>
+          <p className="settings-helper">Re-run review assist on a batch to rebuild its candidates after saving.</p>
+        </section>
 
-        <div className="flex flex-wrap gap-3 items-end">
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>machine_type contains</span>
-            <input className="field" value={pattern} placeholder="e.g. KnS TCX3"
-                   onChange={(e) => setPattern(e.target.value)}
-                   disabled={!can.review(role)} />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Criticality</span>
-            <select className="field" value={crit} onChange={(e) => setCrit(e.target.value)}
-                    aria-label="Criticality"
-                    disabled={!can.review(role)}>
-              <option>High</option><option>Medium</option><option>Low</option>
-            </select>
-          </label>
-          <button className="btn" onClick={propose}
-                  disabled={busy || !pattern || !can.review(role)}>Propose</button>
-          <button className="btn" onClick={() => confirm(pattern)}
-                  disabled={busy || !pattern || !can.approve(role)}
-                  title={can.approve(role) ? "Confirm this pattern" : "Needs senior or admin"}>
-            Confirm as senior
-          </button>
-        </div>
-      </div>
+        {isRuleSection && <>
+          <div className="settings-version">
+            <SettingsRow id="rule-version" label="New rule version" changed={!!version}
+              description={`Required to save. Active version: ${cfg.rule_version}.`}>
+              <input id="rule-version" className="field" aria-label="New rule version (required)"
+                aria-describedby="rule-version-hint" value={version} placeholder="e.g. 0.2.1-tcb"
+                disabled={busy || !can.configWrite(role)} onChange={(e) => setVersion(e.target.value)} />
+            </SettingsRow>
+          </div>
+          {!can.configWrite(role) && <p className="settings-helper">Administrator access is required to edit these settings.</p>}
+          <SettingsActions dirty={rulesDirty} disabled={busy} onCancel={cancelRules}
+            status={rulesDirty ? "Unsaved changes in rules" : "All changes saved"}>
+            <button type="button" className="btn btn-primary" onClick={save}
+              disabled={busy || !can.configWrite(role) || !version.trim() || !rulesChanged || invalidNumber}>
+              {busy ? "Saving…" : "Save changes"}
+            </button>
+          </SettingsActions>
+          {changedSections.filter((id) => ["thresholds", "autoclear", "review-assist"].includes(id)).length > 1
+            && <p className="settings-helper">Saving includes your changes in Thresholds, Auto-clear policy, and Review assist.</p>}
+        </>}
 
-      <div className="card p-5" data-assistant-section="Part categories" data-assistant-target="part_categories">
-        <h2 className="text-sm font-semibold mb-1">Part categories</h2>
-        <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
-          What KIND of part each row is, matched against its description. This is a
-          <strong> constraint</strong> on peer similarity, not a weighting: a part of a
-          different known category is never shown as a peer. Lower priority wins, so
-          specific rules must sit above generic ones — <code>SENSOR BRACKET ASSY</code> is
-          a sensor, not a bracket. Same two-person rule as criticality: propose, then a
-          different senior confirms.
-        </p>
+        <section hidden={section !== "criticality"} data-assistant-section="Machine criticality" data-assistant-target="criticality">
+          <header className="settings-card-heading">
+            <h2>Machine criticality</h2>
+            <p>Set the importance of each machine type. Confirm your proposals with senior or administrator rights to activate them.</p>
+          </header>
+          {Object.keys(criticality).length > 0 ? (
+            <div className="settings-list">
+              <h3>Confirmed &amp; active</h3>
+              <div className="settings-badges">
+                {Object.entries(criticality).map(([p, c]) => <span key={p}>✓ {p} → {c}</span>)}
+              </div>
+            </div>
+          ) : <p className="settings-empty">No confirmed machine rules yet. Add a proposal below.</p>}
 
-        {cats && (
-          <p className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
-            {cats.confirmed} confirmed · {cats.pending} pending
-          </p>
-        )}
+          <AssistantDraftTable rows={criticalityDrafts} onChange={setCriticalityDrafts} section="criticality"
+            endpoint="config/criticality" canPropose={can.review(role) && !busy} onSaved={load}
+            onBusyChange={setBusy} valid={(row) => row.pattern.trim().length >= 2}
+            replacesActive={(row) => Object.hasOwn(criticality, row.pattern)}
+            columns={[{ key: "pattern", label: "Machine type contains" },
+              { key: "criticality", label: "Criticality", options: ["High", "Medium", "Low"] }]} />
 
-        {cats && cats.rules.length > 0 && (
-          <div className="scroll-x mb-4">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  <th className="text-right">Pri</th>
-                  <th className="text-left">Category</th>
-                  <th className="text-left">Pattern</th>
-                  <th className="text-left">Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cats.rules.map((r) => (
+          <div className="settings-rows">
+            <SettingsRow id="machine-pattern" label="Machine type contains" description="Match part of a machine name." changed={!!pattern}>
+              <input id="machine-pattern" className="field" value={pattern} placeholder="e.g. KnS TCX3"
+                aria-describedby="machine-pattern-hint" onChange={(e) => setPattern(e.target.value)} disabled={busy || !can.review(role)} />
+            </SettingsRow>
+            <SettingsRow id="machine-criticality" label="Criticality" description="The risk level assigned to matching machines." changed={crit !== "High"}>
+              <select id="machine-criticality" className="field" value={crit} onChange={(e) => setCrit(e.target.value)}
+                aria-label="Criticality" aria-describedby="machine-criticality-hint" disabled={busy || !can.review(role)}>
+                <option>High</option><option>Medium</option><option>Low</option>
+              </select>
+            </SettingsRow>
+          </div>
+          <SettingsActions dirty={criticalityDirty} disabled={busy}
+            status={criticalityDirty ? "Unsaved criticality proposal" : "No pending edits"}
+            onCancel={() => { setPattern(""); setCrit("High"); setCriticalityDrafts([]); setErr(null); setNote(null); }}>
+            <button type="button" className="btn" onClick={() => confirm(pattern)}
+              disabled={busy || !pattern.trim() || !can.approve(role)}
+              title="Confirm your personal proposal with approval rights">Confirm as senior</button>
+            <button type="button" className="btn btn-primary" onClick={propose}
+              disabled={busy || pattern.trim().length < 2 || !can.review(role)}>Propose</button>
+          </SettingsActions>
+        </section>
+
+        <section hidden={section !== "part-categories"} data-assistant-section="Part categories" data-assistant-target="part_categories">
+          <header className="settings-card-heading">
+            <h2>Part categories</h2>
+            <p>Group similar parts by description. Lower priorities match first; confirm your proposals with senior or administrator rights.</p>
+          </header>
+          {cats && cats.rules.length > 0 ? (
+            <div className="settings-table scroll-x">
+              <p className="settings-helper">{cats.confirmed} confirmed · {cats.pending} pending</p>
+              <table className="w-full">
+                <thead><tr><th>Priority</th><th>Category</th><th>Pattern</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead>
+                <tbody>{cats.rules.map((r) => (
                   <tr key={r.pattern}>
-                    <td className="text-right tnum">{r.priority}</td>
-                    <td>{r.category}</td>
+                    <td className="tnum">{r.priority}</td><td>{r.category}</td>
                     <td className="font-mono text-xs">{r.pattern}</td>
-                    <td className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                      {r.confirmed
-                        ? <span><span aria-hidden style={{ color: "var(--success-text)" }}>✓ </span>
-                            active{r.confirmed_by ? ` (${r.confirmed_by})` : ""}</span>
-                        : <span><span aria-hidden style={{ color: "var(--warning)" }}>◷ </span>
-                            pending{r.set_by ? ` (${r.set_by})` : ""}</span>}
-                    </td>
-                    <td className="text-right">
-                      {!r.confirmed && (
-                        <button className="btn text-xs" disabled={busy || !can.approve(role)}
-                                onClick={() => confirmCategory(r.pattern)}>
-                          Confirm
-                        </button>
-                      )}
-                    </td>
+                    <td>{r.confirmed ? `✓ Active${r.confirmed_by ? ` (${r.confirmed_by})` : ""}`
+                      : `◷ Pending${r.set_by ? ` (${r.set_by})` : ""}`}</td>
+                    <td>{!r.confirmed && <button type="button" className="btn" disabled={busy || !can.approve(role)}
+                      onClick={() => confirmCategory(r.pattern)}>Confirm</button>}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <p className="settings-empty">{cats ? "No category rules yet. Add a proposal below." : "Loading category rules…"}</p>}
+
+          <AssistantDraftTable rows={categoryDrafts} onChange={setCategoryDrafts} section="part_categories"
+            endpoint="config/part-categories" canPropose={can.review(role) && !busy} onSaved={loadCategories}
+            onBusyChange={setBusy}
+            valid={(row) => row.pattern.length >= 2 && row.category.length >= 2
+              && Number.isInteger(row.priority) && row.priority >= 1 && row.priority <= 9999}
+            replacesActive={(row) => !!cats?.rules.some((rule) => rule.confirmed && rule.pattern === row.pattern)}
+            columns={[{ key: "pattern", label: "Pattern" }, { key: "category", label: "Category" },
+              { key: "priority", label: "Priority", type: "number" }]} />
+
+          <div className="settings-rows">
+            <SettingsRow id="category-pattern" label="Pattern (regex on description)" description="Match words in the part description." changed={!!catPattern}>
+              <input id="category-pattern" className="field font-mono" value={catPattern} disabled={busy || !can.review(role)}
+                aria-describedby="category-pattern-hint" onChange={(e) => setCatPattern(e.target.value)}
+                placeholder="e.g. GRIPPER|VACUUM CUP" />
+            </SettingsRow>
+            <SettingsRow id="category-name" label="Category" description="Only parts in the same known category can be peers." changed={!!catName}>
+              <input id="category-name" className="field" value={catName} disabled={busy || !can.review(role)}
+                aria-describedby="category-name-hint" onChange={(e) => setCatName(e.target.value)} placeholder="e.g. gripper" />
+            </SettingsRow>
+            <SettingsRow id="category-priority" label="Priority" description="Use 1–9999. Give specific patterns a lower number." changed={catPriority !== "500"}>
+              <input id="category-priority" className="field tnum" type="number" min={1} max={9999}
+                aria-describedby="category-priority-hint" value={catPriority} disabled={busy || !can.review(role)}
+                onChange={(e) => setCatPriority(e.target.value)} />
+            </SettingsRow>
           </div>
-        )}
-
-        <AssistantDraftTable rows={categoryDrafts} onChange={setCategoryDrafts} section="part_categories"
-          endpoint="config/part-categories" canPropose={can.review(role) && !busy} onSaved={loadCategories}
-          onBusyChange={setBusy}
-          valid={(row) => row.pattern.length >= 2 && row.category.length >= 2
-            && Number.isInteger(row.priority) && row.priority >= 1 && row.priority <= 9999}
-          replacesActive={(row) => !!cats?.rules.some((rule) => rule.confirmed && rule.pattern === row.pattern)}
-          columns={[{ key: "pattern", label: "Pattern" }, { key: "category", label: "Category" },
-            { key: "priority", label: "Priority", type: "number" }]} />
-
-        <div className="flex gap-3 flex-wrap items-end">
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Pattern (regex on description)</span>
-            <input className="field font-mono" value={catPattern} disabled={!can.review(role)}
-                   onChange={(e) => setCatPattern(e.target.value)}
-                   placeholder="\b(GRIPPER|VACUUM CUP)\b" />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Category</span>
-            <input className="field w-32" value={catName} disabled={!can.review(role)}
-                   onChange={(e) => setCatName(e.target.value)} placeholder="gripper" />
-          </label>
-          <label className="flex flex-col gap-1 text-xs">
-            <span style={{ color: "var(--text-secondary)" }}>Priority</span>
-            <input className="field w-20 tnum" type="number" min={1} max={9999}
-                   value={catPriority} disabled={!can.review(role)}
-                   onChange={(e) => setCatPriority(e.target.value)} />
-          </label>
-          <button className="btn" onClick={proposeCategory}
-                  disabled={busy || !catPattern || !catName || !can.review(role)}>
-            Propose
-          </button>
-        </div>
+          <SettingsActions dirty={categoriesDirty} disabled={busy}
+            status={categoriesDirty ? "Unsaved category proposal" : "No pending edits"}
+            onCancel={() => { setCatPattern(""); setCatName(""); setCatPriority("500"); setCategoryDrafts([]); setErr(null); setNote(null); }}>
+            <button type="button" className="btn btn-primary" onClick={proposeCategory}
+              disabled={busy || catPattern.trim().length < 2 || catName.trim().length < 2 || !can.review(role)
+                || !Number.isInteger(Number(catPriority)) || Number(catPriority) < 1 || Number(catPriority) > 9999}>Propose</button>
+          </SettingsActions>
+        </section>
       </div>
-    </div>
+    </SettingsWorkspace>
   );
 }

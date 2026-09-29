@@ -11,7 +11,8 @@
     "setup:auth": "node scripts/setup_pilot_auth.mjs",
     "check:auth": "node --test scripts/pilot_auth.test.mjs && node scripts/check_login.mjs",
     "check:sidebar": "node scripts/check_sidebar.mjs",
-    "check:workspaces": "node scripts/check_workspaces.mjs"
+    "check:workspaces": "node scripts/check_workspaces.mjs",
+    "check:settings": "node scripts/check_settings.mjs"
   },
   "dependencies": {
     "bcryptjs": "3.0.3",
