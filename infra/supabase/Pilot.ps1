@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'start', 'local-start', 'stop', 'tunnel-stop', 'status', 'link', 'logs')]
+    [ValidateSet('build', 'start', 'local-start', 'stop', 'tunnel-stop', 'status', 'link', 'logs', 'monitor-start', 'monitor-stop', 'monitor-status')]
     [string]$Action = 'status',
     [string]$DeploymentRoot = $PSScriptRoot
 )
@@ -12,6 +12,13 @@ if (Test-Path -LiteralPath $lanLayer) { $composeArgs += @('-f', $lanLayer) }
 function Invoke-PilotCompose {
     & docker @composeArgs @args
     if ($LASTEXITCODE -ne 0) { throw "Pilot Docker command failed (exit $LASTEXITCODE)." }
+}
+function Set-TunnelRecovery([bool]$Enabled) {
+    $monitorRoot = Join-Path $pilotRoot 'monitor'
+    New-Item -ItemType Directory -Path $monitorRoot -Force | Out-Null
+    $temporary = Join-Path $monitorRoot 'control.next'
+    @{ enabled = $Enabled } | ConvertTo-Json | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination (Join-Path $monitorRoot 'control.json') -Force
 }
 function Show-PilotLink {
     $container = Invoke-PilotCompose ps -q tunnel
@@ -45,7 +52,7 @@ switch ($Action) {
         try {
             $protected = $false
             for ($attempt = 0; $attempt -lt 10; $attempt++) {
-                try { $null = $http.DownloadString('http://127.0.0.1:13010/'); break }
+                try { $null = $http.DownloadString('http://127.0.0.1:13010/api/backend/health'); break }
                 catch [System.Net.WebException] {
                     if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) {
                         $protected = $true; break
@@ -67,9 +74,23 @@ switch ($Action) {
             throw 'Cloudflare did not connect within 70 seconds; tunnel stopped. Check Pilot.ps1 logs and corporate proxy connectivity.'
         }
         Show-PilotLink
+        Set-TunnelRecovery $true
     }
-    'stop' { Invoke-PilotCompose stop; Write-Output 'Pilot closed. Local application and database remain running.' }
-    'tunnel-stop' { Invoke-PilotCompose stop tunnel; Write-Output 'Public tunnel closed. Local gateway and application remain running.' }
+    'stop' { Set-TunnelRecovery $false; Invoke-PilotCompose stop; Write-Output 'Pilot closed; automatic tunnel recovery paused. Local application and database remain running.' }
+    'tunnel-stop' { Set-TunnelRecovery $false; Invoke-PilotCompose stop tunnel; Write-Output 'Public tunnel closed; automatic recovery paused. Local gateway and application remain running.' }
+    'monitor-start' {
+        $task = Get-ScheduledTask -TaskName 'BOM-Cloudflare-Monitor' -ErrorAction Stop
+        Set-TunnelRecovery $true
+        if ($task.State -ne 'Running') { Start-ScheduledTask -InputObject $task }
+        Write-Output 'Tunnel recovery enabled. Status: http://127.0.0.1:13011'
+    }
+    'monitor-stop' { Set-TunnelRecovery $false; Write-Output 'Automatic recovery paused. The existing tunnel stays open; use tunnel-stop to close it.' }
+    'monitor-status' {
+        $monitorHttp = New-Object System.Net.WebClient
+        $monitorHttp.Proxy = $null
+        try { $monitorHttp.DownloadString('http://127.0.0.1:13011/api/status') }
+        finally { $monitorHttp.Dispose() }
+    }
     'status' { Invoke-PilotCompose ps }
     'link' { Show-PilotLink }
     'logs' { Invoke-PilotCompose logs --tail 80 tunnel }

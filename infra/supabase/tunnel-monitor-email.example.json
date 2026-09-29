@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "delivery": "outlook",
+  "host": "smtp.example.com",
+  "port": 587,
+  "tls": "starttls",
+  "sender": "bom-monitor@example.com",
+  "recipient": "your-address@example.com",
+  "username": "",
+  "password": ""
+}

@@ -18,6 +18,9 @@ The start command checks the login gate, starts the gateway and tunnel, waits fo
 the tunnel connection, and prints the current URL. The tunnel-stop command closes
 only the public tunnel. The stop command also closes the gateway and LAN access.
 The app and database remain running.
+Both stop commands also pause automatic tunnel recovery. See
+[TUNNEL_MONITOR.md](TUNNEL_MONITOR.md) for the Windows monitor, Outlook alerts and
+the local status page at http://127.0.0.1:13011.
 
 Proxy-Tunnel.ps1 remains a shortcut to these Docker operations. Its stop action
 stops only the tunnel; it no longer launches Windows Python or Cloudflared processes.
@@ -32,7 +35,8 @@ Python provisions the Quick Tunnel using verified HTTPS through
 proxy-png.intel.com:912. A loopback relay passes Cloudflared's encrypted HTTP/2
 connection through HTTP CONNECT to Cloudflare on TCP 7844. The origin is
 http://pilot-gateway:8080; the helper refuses to publish it unless anonymous access
-returns HTTP 401. Certificate verification stays enabled. Tunnel credentials stay
+to `/api/backend/health` returns HTTP 401. The custom login page is public.
+Certificate verification stays enabled. Tunnel credentials stay
 in memory, and the tunnel publishes no host ports.
 
 The image runs as user 10001:10001, with a read-only filesystem, dropped Linux

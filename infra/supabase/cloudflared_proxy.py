@@ -39,7 +39,7 @@ def main():
     runtime.mkdir(parents=True, exist_ok=True)
     local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        local.open(args.origin, timeout=10).close()
+        local.open(args.origin.rstrip('/') + '/api/backend/health', timeout=10).close()
     except urllib.error.HTTPError as error:
         if error.code != 401:
             raise RuntimeError(f'Pilot login gate returned HTTP {error.code}') from error

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BOM Assistant · Tunnel monitor</title>
+<style>
+:root{color-scheme:light dark;font:16px/1.55 system-ui,sans-serif;background:#111722;color:#e7edf7}
+body{max-width:850px;margin:6vh auto;padding:24px}h1{font-size:30px;margin:8px 0}h2{font-size:17px}
+.muted,small{color:#a8b6cb}.card{background:#192333;border:1px solid #304058;border-radius:14px;padding:24px;margin:20px 0}
+.badge{padding:5px 12px;border-radius:20px;background:#493f23;color:#ffe29c;display:inline-block}
+.good{background:#143d32;color:#98f3d0}.link{font-size:19px;overflow-wrap:anywhere;color:#9ec9ff}
+button{background:#b6d5ff;color:#101a2a;border:0;border-radius:7px;padding:9px 15px;font:inherit;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}dl{display:grid;grid-template-columns:160px 1fr;gap:10px}dd{margin:0;overflow-wrap:anywhere}
+li{margin:12px 0}.offline{color:#ffb4ad}a{color:#9ec9ff}@media(max-width:560px){dl{grid-template-columns:1fr;gap:3px}dd{margin-bottom:12px}}
+</style>
+<body>
+<small>BOM ASSISTANT / LOCAL OPERATIONS</small><h1>Cloudflare tunnel monitor</h1>
+<p class="muted">The current public link, recovery progress and email delivery status.</p>
+<div class="card" aria-live="polite"><span id="status" class="badge">Connecting</span>
+<p id="message">Reading the monitor status…</p>
+<h2 id="link-title">Latest verified link</h2><p><a class="link" id="link" target="_blank" rel="noreferrer">No verified link yet</a></p>
+<button id="copy" disabled>Copy link</button><span id="copied" role="status"></span>
+<p class="muted" id="availability"></p></div>
+<div class="card"><h2>Monitoring & notifications</h2><dl>
+<dt>Last check</dt><dd id="checked">—</dd><dt>Last successful check</dt><dd id="success">—</dd>
+<dt>Recovery</dt><dd id="recovery">—</dd><dt>Email</dt><dd id="email">—</dd>
+<dt>Last email</dt><dd id="sent">—</dd></dl></div>
+<div class="card"><h2>Recent activity</h2><ul id="events"><li>No events yet.</li></ul></div>
+<p class="muted">This status page is available only on this PC. Docker, the application and the PC's network must be running.
+Stopping the tunnel with <code>Pilot.ps1 tunnel-stop</code> also pauses recovery.</p>
+<script>
+let latest='';const $=id=>document.getElementById(id);const date=value=>value?new Date(value).toLocaleString():'—';
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(latest);$('copied').textContent=' Copied';}catch{$('copied').textContent=' Select the link to copy it.';}};
+async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error();const state=await response.json();
+const healthy=state.status==='healthy';$('status').textContent=state.status.replaceAll('_',' ');$('status').className='badge'+(healthy?' good':'');
+$('message').textContent=state.message;$('checked').textContent=date(state.last_checked_at);$('success').textContent=date(state.last_success_at);
+$('recovery').textContent=state.enabled?`Enabled · every ${state.interval_seconds}s · ${state.failure_threshold} consecutive failures before restart · ${state.restart_count} restarts`:'Paused';
+$('email').textContent=state.email_message||'Waiting for a verified link and email configuration.';$('sent').textContent=date(state.email_sent_at);
+latest=/^https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com$/.test(state.url||'')?state.url:'';
+$('link').textContent=latest||'No verified link yet';if(latest)$('link').href=latest;else $('link').removeAttribute('href');$('copy').disabled=!latest;
+$('link-title').textContent=healthy?'Current public link':'Last verified link';$('availability').textContent=healthy?'Verified reachable. Existing pilot login required.':'The last verified link may be unavailable. A replacement is published here and emailed only after verification.';
+$('events').replaceChildren(...(state.events||[]).slice().reverse().map(event=>{const row=document.createElement('li');row.textContent=`${date(event.time)} — ${event.message}${event.url?' '+event.url:''}`;return row;}));
+}catch{$('status').textContent='Monitor unavailable';$('status').className='badge';$('message').textContent='The local monitor is not responding. The displayed link may be stale.';}}
+refresh();setInterval(refresh,5000);
+</script></body></html>
