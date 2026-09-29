@@ -7,15 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:assistant": "node scripts/check_floating_assistant.mjs",
     "setup:auth": "node scripts/setup_pilot_auth.mjs",
-    "check:auth": "node --test scripts/pilot_auth.test.mjs && node scripts/check_login.mjs",
+    "check:assistant": "node scripts/check_floating_assistant.mjs",
+    "check:settings": "node scripts/check_settings.mjs",
     "check:sidebar": "node scripts/check_sidebar.mjs",
     "check:workspaces": "node scripts/check_workspaces.mjs",
-    "check:settings": "node scripts/check_settings.mjs",
     "check:chat-workspaces": "node scripts/check_chat_workspaces.mjs",
     "check:skills": "node scripts/check_chat_skills.mjs",
-    "check:reminders": "node scripts/check_reminders.mjs"
+    "check:reminders": "node scripts/check_reminders.mjs",
+    "check:auth": "node --test scripts/pilot_auth.test.mjs && node scripts/check_login.mjs"
   },
   "dependencies": {
     "bcryptjs": "3.0.3",

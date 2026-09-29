@@ -3,7 +3,7 @@
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 
-const BASE = process.env.BASE ?? "http://127.0.0.1:3010";
+const BASE = process.env.BASE ?? "http://127.0.0.1:3011";
 const OUT = process.argv[2] ?? "./shots";
 mkdirSync(OUT, { recursive: true });
 
@@ -23,9 +23,6 @@ for (const theme of ["light", "dark"]) {
     viewport: { width: 1440, height: 1000 },
     colorScheme: theme,
   });
-  // seed the role-switcher so pages load as an engineer
-  await ctx.addInitScript(() =>
-    localStorage.setItem("bom-session", JSON.stringify({ user: "alice", role: "engineer" })));
 
   for (const [name, path] of PAGES) {
     const page = await ctx.newPage();

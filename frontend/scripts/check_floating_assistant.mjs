@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
 
-const base = process.env.BASE_URL ?? "http://127.0.0.1:3010";
+const base = process.env.BASE_URL ?? "http://127.0.0.1:3011";
 let browser;
 try { browser = await chromium.launch(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}); }
 catch (error) {
@@ -13,6 +13,7 @@ catch (error) {
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
 await context.addInitScript(() => localStorage.setItem("bom-session", JSON.stringify({ user: "root", role: "admin" })));
 const page = await context.newPage();
+await page.route("**/api/pilot-session", (route) => route.fulfill({ json: { required: false, user: "root" } }));
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("console", (message) => {
@@ -64,7 +65,7 @@ async function open() {
 async function ask(question) {
   await open();
   const previous = requests.length;
-  await page.getByLabel("Ask NYRA", { exact: true }).fill(question);
+  await panel.getByLabel("Ask NYRA", { exact: true }).fill(question);
   await panel.getByRole("button", { name: "Send", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".assistant-thinking"));
   assert.equal(requests.length, previous + 1);
@@ -96,6 +97,7 @@ try {
 
   await go("/config");
   const criticality = page.locator('[data-assistant-section="Machine criticality"]');
+  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Machine criticality" }).click();
   await criticality.scrollIntoViewIfNeeded();
   await criticality.getByLabel("Criticality", { exact: true }).selectOption("Medium");
   await criticality.getByLabel("Criticality", { exact: true }).focus();
@@ -160,11 +162,11 @@ try {
   holdResponse = new Promise((resolve) => { release = resolve; });
   const moved = ask("hold current for 000222");
   await page.waitForFunction(() => !!document.querySelector(".assistant-thinking"));
-  await page.locator('.rail a[href="/config"]').click();
+  await page.locator('.rail .side-nav a[href="/config"]').click();
   await page.getByLabel("High cost ($)", { exact: true }).waitFor();
   release(); holdResponse = null; await moved;
   assert.match(await panel.innerText(), /moved from Dormant stocking rules/);
-  assert.equal(await page.getByLabel("High cost ($)", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByLabel("High cost ($)", { exact: true }).inputValue(), "1500");
   const afterMove = await ask("What page am I on now?");
   assert.equal(afterMove.page_context.path, "/config");
   assert.equal(afterMove.batch_id, null);

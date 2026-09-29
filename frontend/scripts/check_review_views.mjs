@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright";
 
-const base = process.env.BASE_URL ?? "http://localhost:3010";
+const base = process.env.BASE_URL ?? "http://localhost:3011";
 let browser;
 try { browser = await chromium.launch(); }
 catch { browser = await chromium.launch({ channel: "msedge" }); }
@@ -48,7 +48,8 @@ const rows = Array.from({ length: 27 }, (_, i) => ({
 const assist = rows.map((row) => ({ ...row, verdict: "flag_for_review", reasons: ["PRIOR_OVERRIDE"],
   narrative: "Prior decisions suggest keeping a smaller protective stock.", suggested_max: 8,
   suggested_rop: 4, suggestion_basis: "prior_accepted", assisted_at: "2026-09-11" }));
-let delayRoomB = false, failDetail = false, failHistory = false;
+let delayRoomB = false, failDetail = false, failHistory = false, sharedWorkspace = false;
+await page.route("**/api/pilot-session", (route) => route.fulfill({ json: { required: false, user: "pilot", role: "admin" } }));
 await page.route("**/api/backend/**", async (route) => {
   const request = route.request(), url = new URL(request.url());
   const path = url.pathname.split("/api/backend/")[1];
@@ -58,6 +59,7 @@ await page.route("**/api/backend/**", async (route) => {
   if (path === "pending-changes") return reply({ pending: [], count: 0 });
   if (path === "config/rules") return reply({ rule_version: "test", config: { triage_guarded_assist_enabled: false } });
   if (path === "batches/1/summary") return reply({
+    read_only: sharedWorkspace,
     batch: { batch_id: 1, label: "Review layout check", status: "scored", row_count: 27, quarantined_count: 0, scored_rule_version: "test" },
     scored: 27, statuses: { pending_review: rows.filter((r) => r.status === "pending_review").length },
     risk_levels: { Medium: 27 }, actions: { Decrease: 27 }, consumables: { constant: 27 },
@@ -76,7 +78,7 @@ await page.route("**/api/backend/**", async (route) => {
     assert.ok(room, "Detail must specify its stockroom");
     if (delayRoomB && room === "ROOM B") await new Promise((resolve) => setTimeout(resolve, 900));
     const row = rows.find((r) => r.item_id === decodeURIComponent(path.split("/")[1]) && r.stockroom_id === room);
-    return reply({ recommendation: row, status: row.status, latest_review: null,
+    return reply({ recommendation: row, status: row.status, latest_review: null, read_only: sharedWorkspace,
       context: { item_desc: row.item_desc, max_qty: row.current_max, rop_qty: row.current_rop, min_qty: 1 } });
   }
   if (path.startsWith("history/")) return failHistory ? reply({ detail: "History unavailable" }, 503) : reply({ reviews: [] });
@@ -161,7 +163,7 @@ try {
   await itemButtons.nth(1).click();
   await ready();
   await page.locator(".assistant-float > summary").click();
-  await page.getByLabel("Ask NYRA", { exact: true }).fill("Explain this item");
+  await page.getByRole("textbox", { name: "Ask NYRA", exact: true }).fill("Explain this item");
   await page.locator(".assistant-panel").getByRole("button", { name: "Send", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".assistant-thinking"));
   assert.equal(chats.at(-1).page_context.item_id, "PART-001");
@@ -277,10 +279,18 @@ try {
   await page.goto(base + "/batches/1");
   await page.getByRole("button", { name: "Split view", exact: true }).click();
   await ready();
-  await page.locator(".side-role").selectOption("viewer");
-  await panel.getByText(/has read-only access/).waitFor();
+  assert.equal(await page.locator(".side-user select").count(), 0);
+  assert.equal(await page.locator(".side-access").textContent(), "Administrator");
+  assert.equal(await panel.getByRole("button", { name: "Record decision", exact: true }).count(), 1);
+  assert.ok(await page.locator(".review-list-row input[type=checkbox]").count() > 0);
+  sharedWorkspace = true;
+  const previousWrites = writes.length;
+  await page.reload();
+  await page.getByText("Viewing another user's workspace. You have read-only access.").waitFor();
+  await panel.getByText("You have read-only access to this user's workspace.").waitFor();
   assert.equal(await panel.getByRole("button", { name: "Record decision", exact: true }).count(), 0);
-  assert.equal(await page.locator(".review-list-row input[type=checkbox]").count(), 0);
+  assert.equal(await page.getByRole("button", { name: /re-run engine/i }).isDisabled(), true);
+  assert.equal(writes.length, previousWrites, "Viewing shared rows must not record decisions");
   assert.deepEqual(errors, []);
-  console.log("PASS: animated layouts and items, rapid switching, reduced motion, animation fallback, layout persistence, stockrooms, stale responses, drafts, bulk safeguards, assistant context, review refresh, pagination, search, errors, mobile, standalone detail and read-only roles.");
+  console.log("PASS: animated layouts and items, rapid switching, reduced motion, animation fallback, layout persistence, stockrooms, stale responses, drafts, bulk safeguards, assistant context, review refresh, pagination, search, errors, mobile, standalone detail and Administrator access.");
 } finally { await browser.close(); }

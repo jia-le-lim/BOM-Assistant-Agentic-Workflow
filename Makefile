@@ -2,14 +2,15 @@
 #
 # Works on Windows (GNU make + cmd.exe, e.g. ezwinports make) and on Unix.
 #
-#   make dev        # start BOTH (backend :8011 + frontend :3010) in parallel
-#   make backend    # FastAPI on http://127.0.0.1:8011  (Supabase from backend/.env)
-#   make frontend   # Next.js console on http://localhost:3010 (webpack)
+#   make dev        # start BOTH (backend :8012 + frontend :3011) in parallel
+#   make backend    # FastAPI on http://127.0.0.1:8012  (Supabase from backend/.env)
+#   make frontend   # Next.js console on http://localhost:3011 (webpack)
 #   make install    # install backend (venv) + frontend (npm) dependencies
 #   make test       # run the backend test suite
 
-BACKEND_PORT := 8011
-FRONTEND_PORT := 3010
+# Development ports are separate from Docker's frontend :3010 and backend :8011.
+BACKEND_PORT ?= 8012
+FRONTEND_PORT ?= 3011
 
 # Prefer the working local-model environment when present. Other checkouts
 # keep using .venv; either choice can be overridden with VENV_DIR=... .
@@ -22,10 +23,12 @@ ifeq ($(OS),Windows_NT)
     .SHELLFLAGS := /c
     VENV_PY ?= $(VENV_DIR)\Scripts\python.exe
     BACKEND_ENV := set "PYTHONIOENCODING=utf-8" &&
+    FRONTEND_ENV := set "BACKEND_URL=http://127.0.0.1:$(BACKEND_PORT)" &&
     TEST_ENV := set "BOM_ALLOW_SQLITE=1" && set "BOM_DB_PATH=backend/data/bom_review.db" && set "PYTHONIOENCODING=utf-8" &&
 else
     VENV_PY ?= $(VENV_DIR)/bin/python
     BACKEND_ENV := PYTHONIOENCODING=utf-8
+    FRONTEND_ENV := BACKEND_URL=http://127.0.0.1:$(BACKEND_PORT)
     TEST_ENV := BOM_ALLOW_SQLITE=1 BOM_DB_PATH=backend/data/bom_review.db PYTHONIOENCODING=utf-8
 endif
 
@@ -47,7 +50,7 @@ backend:
 	$(BACKEND_ENV) "$(VENV_PY)" -m uvicorn app.main:app --app-dir backend --port $(BACKEND_PORT)
 
 frontend:
-	cd frontend && npm run dev -- --webpack --port $(FRONTEND_PORT)
+	cd frontend && $(FRONTEND_ENV) npm run dev -- --webpack --port $(FRONTEND_PORT)
 
 install:
 	"$(VENV_PY)" -m pip install -r backend/requirements.txt
