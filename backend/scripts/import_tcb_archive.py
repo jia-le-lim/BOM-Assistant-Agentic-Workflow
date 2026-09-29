@@ -37,6 +37,11 @@ TABLE_KEYS = {
     "machine_criticality_config": "pattern",
     "part_category_config": "pattern",
     "dormant_rule_config": "rule_id",
+    "user_settings": "owner_user",
+    "user_rule_config": "config_id",
+    "user_machine_criticality_config": "owner_user,pattern",
+    "user_part_category_config": "owner_user,pattern",
+    "user_dormant_rule_config": "rule_id",
 }
 DATA_TABLES = tuple(TABLE_KEYS)[:4]
 MONTHS = {m: i for i, m in enumerate(

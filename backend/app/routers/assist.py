@@ -13,7 +13,7 @@ from ..assist import rules
 from ..assist.chain import run_batch
 from ..audit import audit
 from ..db import active_config, get_conn
-from ..security import REVIEW_ROLES, any_role, require_role
+from ..security import REVIEW_ROLES, any_role, require_role, require_workspace
 from ..similarity import run_similarity
 
 router = APIRouter()
@@ -35,9 +35,7 @@ def assist_batch(batch_id: int, refresh_peers: bool = False,
     """
     conn = get_conn()
     try:
-        if conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
-                        (batch_id,)).fetchone() is None:
-            raise HTTPException(404, f"batch {batch_id} not found")
+        require_workspace(conn, batch_id, actor)
         has_peers = conn.execute(
             "SELECT 1 FROM similarity_result WHERE batch_id=? LIMIT 1",
             (batch_id,)).fetchone() is not None
@@ -49,7 +47,7 @@ def assist_batch(batch_id: int, refresh_peers: bool = False,
                 raise HTTPException(400, str(e)) from e
             audit(conn, actor, "POST", "/assist/run", "similarity",
                   batch_id, similarity)
-        summary = run_batch(conn, batch_id, actor, active_config(conn))
+        summary = run_batch(conn, batch_id, actor, active_config(conn, actor["user"]))
         summary["similarity"] = similarity
         audit(conn, actor, "POST", "/assist/run", "assist", batch_id, summary)
         conn.commit()
@@ -71,6 +69,7 @@ def get_assist(batch_id: int, verdict: str | None = None,
         raise HTTPException(400, f"verdict must be one of {list(rules.VERDICTS)}")
     conn = get_conn()
     try:
+        require_workspace(conn, batch_id, actor, allow_shared=True)
         sql = ("SELECT batch_id, item_id, stockroom_id, verdict, reasons_json, "
                "narrative, suggested_max, suggested_rop, suggestion_basis, "
                "model_version, assisted_at FROM assist_result WHERE batch_id=?")

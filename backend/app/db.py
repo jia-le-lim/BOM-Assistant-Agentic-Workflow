@@ -187,6 +187,62 @@ CREATE TABLE IF NOT EXISTS review_history (
     ON DELETE RESTRICT
 );
 
+
+-- Account-owned copies; legacy settings above are a frozen migration baseline.
+CREATE TABLE IF NOT EXISTS user_settings (
+  owner_user TEXT PRIMARY KEY,
+  dormant_seeded INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_rule_config (
+  owner_user TEXT NOT NULL,
+  config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_version TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  active INTEGER DEFAULT 0,
+  updated_by TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_machine_criticality_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  criticality TEXT NOT NULL,
+  service_level_target REAL,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_part_category_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_dormant_rule_config (
+  owner_user TEXT NOT NULL,
+  rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (owner_user, scope, match_key)
+);
+CREATE INDEX IF NOT EXISTS ix_user_rule_config_active
+  ON user_rule_config(owner_user, active, config_id);
+
 CREATE TABLE IF NOT EXISTS rule_config (
   config_id INTEGER PRIMARY KEY AUTOINCREMENT,
   rule_version TEXT NOT NULL,
@@ -499,6 +555,67 @@ CREATE TABLE IF NOT EXISTS review_history (
     ON DELETE RESTRICT
 );
 
+
+-- Account-owned copies; legacy settings above are a frozen migration baseline.
+CREATE TABLE IF NOT EXISTS user_settings (
+  owner_user TEXT PRIMARY KEY,
+  dormant_seeded INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_rule_config (
+  owner_user TEXT NOT NULL,
+  config_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  rule_version TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  active INTEGER DEFAULT 0,
+  updated_by TEXT,
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+
+CREATE TABLE IF NOT EXISTS user_machine_criticality_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  criticality TEXT NOT NULL,
+  service_level_target DOUBLE PRECISION,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_part_category_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_dormant_rule_config (
+  owner_user TEXT NOT NULL,
+  rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  UNIQUE (owner_user, scope, match_key)
+);
+CREATE INDEX IF NOT EXISTS ix_user_rule_config_active
+  ON user_rule_config(owner_user, active, config_id);
+ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_rule_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_machine_criticality_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_part_category_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_dormant_rule_config ENABLE ROW LEVEL SECURITY;
+
 CREATE TABLE IF NOT EXISTS rule_config (
   config_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   rule_version TEXT NOT NULL,
@@ -734,6 +851,8 @@ IDENTITY_PK = {
     "batches": "batch_id",
     "review_history": "review_id",
     "rule_config": "config_id",
+    "user_rule_config": "config_id",
+    "user_dormant_rule_config": "rule_id",
     "audit_log": "id",
     "pending_change": "pending_id",
     "conversation_turn": "turn_id",
@@ -995,6 +1114,14 @@ def init_db() -> None:
         else:
             conn._raw.executescript(ddl)
         _ensure_columns(conn)
+        # Old advisory caches used a shared history pool. Drop only these
+        # recomputable results so their narratives/peer quantities cannot leak
+        # another owner's data after the ownership boundary is enabled.
+        from .similarity import MODEL_VERSION as similarity_version
+        from .assist.rules import MODEL_VERSION as assist_version
+        conn.execute("DELETE FROM similarity_result WHERE similarity_model_version<>?",
+                     (similarity_version,))
+        conn.execute("DELETE FROM assist_result WHERE model_version<>?", (assist_version,))
         # Seed rule_config from the analysed engine config on first run.
         n = conn.execute("SELECT COUNT(*) c FROM rule_config").fetchone()["c"]
         if n == 0:
@@ -1026,7 +1153,7 @@ def init_db() -> None:
         conn.close()
 
 
-def stored_config(conn: Conn) -> dict:
+def stored_config(conn: Conn, owner: str) -> dict:
     """The active rule config exactly as persisted -- no criticality merge.
 
     Anything that WRITES a config back must start here. active_config() returns
@@ -1034,21 +1161,25 @@ def stored_config(conn: Conn) -> dict:
     that view would bake a snapshot of a mutable table into the immutable
     rule_version stamp, and later criticality edits would then be ignored.
     """
+    from .account_settings import ensure_settings
+    ensure_settings(conn, owner)
     row = conn.execute(
-        "SELECT config_json FROM rule_config WHERE active=1 ORDER BY config_id DESC LIMIT 1"
+        "SELECT config_json FROM user_rule_config WHERE owner_user=? AND active=1 "
+        "ORDER BY config_id DESC LIMIT 1", (owner,)
     ).fetchone()
     return json.loads(row["config_json"])
 
 
-def active_config(conn: Conn) -> dict:
-    cfg = stored_config(conn)
+def active_config(conn: Conn, owner: str) -> dict:
+    cfg = stored_config(conn, owner)
     # Merge engineer-confirmed criticality (PRD 5.3). Only confirmed rows count:
     # an agent/LLM may WRITE a proposal, a human must confirm before the engine
     # reads it.
     crit = {
         r["pattern"]: r["criticality"]
         for r in conn.execute(
-            "SELECT pattern, criticality FROM machine_criticality_config WHERE confirmed=1"
+            "SELECT pattern, criticality FROM user_machine_criticality_config "
+            "WHERE owner_user=? AND confirmed=1", (owner,)
         )
     }
     if crit:

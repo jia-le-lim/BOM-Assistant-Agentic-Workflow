@@ -38,6 +38,7 @@ from typing import Annotated, Any, Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..llm import Message, get_provider
+from ..security import can_read_all_workspaces
 from . import tools as T
 from .loop import run_agent
 from .prompts import (ACTION_SYSTEM, ADVISORY_SYSTEM, ASSIST_SYSTEM,
@@ -130,8 +131,10 @@ def _history(conn, session_id: str | None, user: str | None) -> list[dict]:
     rows = conn.execute(
         "SELECT question, answer FROM conversation_turn "
         "WHERE session_id=? AND user=? "
+        "AND (batch_id IS NULL OR batch_id IN "
+        "(SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)) "
         "ORDER BY turn_id DESC LIMIT ?",
-        (session_id, user, HISTORY_TURNS)).fetchall()
+        (session_id, user, user, int(can_read_all_workspaces({"user": user})), HISTORY_TURNS)).fetchall()
     return [dict(r) for r in reversed(list(rows))]
 
 

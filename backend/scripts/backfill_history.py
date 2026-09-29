@@ -211,7 +211,7 @@ def main() -> int:
             print(rollback(conn, args.rollback))
             return 0
 
-        rule_version = stored_config(conn)["rule_version"]
+        rule_version = stored_config(conn, "backfill")["rule_version"]
         done = existing_labels(conn)
         files = sorted(Path(p) for p in
                        glob.glob(str(WORKBOOKS / "*.xlsx"))

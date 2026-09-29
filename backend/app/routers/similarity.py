@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..audit import audit
 from ..db import get_conn
 from ..schemas import SimilarityRunRequest
-from ..security import REVIEW_ROLES, require_role
+from ..security import REVIEW_ROLES, require_role, require_workspace
 from ..similarity import attach_neighbour_desc, run_similarity
 
 router = APIRouter()
@@ -20,6 +20,7 @@ def similarity_batch(body: SimilarityRunRequest,
                      actor: dict = Depends(require_role(*REVIEW_ROLES))):
     conn = get_conn()
     try:
+        require_workspace(conn, body.batch_id, actor)
         try:
             summary = run_similarity(conn, body.batch_id, body.refresh)
         except ValueError as e:
@@ -37,9 +38,7 @@ def list_similarity(batch_id: int,
                     actor: dict = Depends(require_role(*REVIEW_ROLES))):
     conn = get_conn()
     try:
-        if conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
-                        (batch_id,)).fetchone() is None:
-            raise HTTPException(404, f"batch {batch_id} not found")
+        require_workspace(conn, batch_id, actor, allow_shared=True)
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM similarity_result WHERE batch_id=? "
             "ORDER BY is_outlier DESC, outlier_score DESC, item_id",
@@ -54,6 +53,7 @@ def get_similarity(batch_id: int, item_id: str, stockroom_id: str | None = None,
                    actor: dict = Depends(require_role(*REVIEW_ROLES))):
     conn = get_conn()
     try:
+        require_workspace(conn, batch_id, actor, allow_shared=True)
         sql = ("SELECT * FROM similarity_result WHERE batch_id=? AND item_id=?")
         params: list = [batch_id, item_id]
         if stockroom_id is not None:

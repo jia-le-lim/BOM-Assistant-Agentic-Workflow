@@ -14,7 +14,7 @@ from ..audit import audit
 from ..db import active_config, get_conn
 from ..justifications import JUSTIFICATION_TEMPLATES
 from ..schemas import BulkReviewRequest, ConfirmPendingRequest, ReviewRequest
-from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, require_role
+from ..security import APPROVE_ROLES, REVIEW_ROLES, any_role, can_read_all_workspaces, require_role, require_workspace
 from ..services import (AmbiguousItem, current_values, derive_status,
                         latest_reviews, resolve_rec)
 
@@ -75,7 +75,7 @@ def _record_review(conn, actor, batch_id, rec, decision, final,
     return review_id, cur, eng, requires_senior
 
 
-def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
+def _bulk_targets(conn, req: BulkReviewRequest, actor: dict) -> tuple[list, list]:
     """Resolve a bulk request to recommendation rows; returns (recs, failures)."""
     failures: list[dict] = []
     if req.items:
@@ -121,7 +121,7 @@ def _bulk_targets(conn, req: BulkReviewRequest) -> tuple[list, list]:
         # graph it was named for: it is the single switch an admin flips to
         # allow ANY pre-ticked bulk acceptance, and renaming a live config key
         # costs a migration for nothing.
-        cfg = active_config(conn)
+        cfg = active_config(conn, actor["user"])
         if not cfg.get("triage_guarded_assist_enabled", False):
             raise HTTPException(409, "guarded preselection is disabled")
         where.append("a.verdict='bulk_accept_candidate'")
@@ -147,7 +147,8 @@ def bulk_review(body: BulkReviewRequest,
     """
     conn = get_conn()
     try:
-        recs, failed = _bulk_targets(conn, body)
+        require_workspace(conn, body.batch_id, actor)
+        recs, failed = _bulk_targets(conn, body, actor)
         reviews = latest_reviews(conn, body.batch_id)
 
         reviewed = awaiting = skipped = 0
@@ -186,6 +187,7 @@ def submit_review(item_id: str, batch_id: int, body: ReviewRequest,
                   actor: dict = Depends(require_role(*REVIEW_ROLES))):
     conn = get_conn()
     try:
+        require_workspace(conn, batch_id, actor)
         try:
             rec = resolve_rec(conn, batch_id, item_id, stockroom_id)
         except AmbiguousItem as e:
@@ -233,6 +235,7 @@ def confirm_pending(item_id: str, body: ConfirmPendingRequest,
                          (body.pending_id,)).fetchone()
         if p is None:
             raise HTTPException(404, f"no pending change {body.pending_id}")
+        require_workspace(conn, p["batch_id"], actor)
         if p["status"] != "pending":
             raise HTTPException(409, f"pending change {body.pending_id} is "
                                      f"already {p['status']}")
@@ -302,6 +305,7 @@ def discard_pending(item_id: str, pending_id: int,
                          (pending_id,)).fetchone()
         if p is None or p["status"] != "pending":
             raise HTTPException(404, f"no open pending change {pending_id}")
+        require_workspace(conn, p["batch_id"], actor)
         # Same ownership check confirm_pending makes. Without it, discarding
         # under the wrong item_id succeeds and the audit entry names an item
         # that had nothing to do with the proposal.
@@ -323,6 +327,7 @@ def approve_review(item_id: str, batch_id: int, stockroom_id: str | None = None,
                    actor: dict = Depends(require_role(*APPROVE_ROLES))):
     conn = get_conn()
     try:
+        require_workspace(conn, batch_id, actor)
         # Without stockroom_id an item stocked in two stockrooms would approve
         # whichever review happens to be newer, not the one the senior meant.
         sql = "SELECT * FROM review_history WHERE batch_id=? AND item_id=?"
@@ -355,13 +360,14 @@ def approve_review(item_id: str, batch_id: int, stockroom_id: str | None = None,
 
 @router.get("/history/{item_id}")
 def get_history(item_id: str, actor: dict = Depends(any_role())):
-    """Review history for an item across ALL batches -- the memory layer
+    """Review history for an item across readable batches -- the memory layer
     (process owner, 28 Jul 2026: history records when and what was reviewed)."""
     conn = get_conn()
     try:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM review_history WHERE item_id=? ORDER BY review_id DESC",
-            (item_id,))]
+            "SELECT * FROM review_history WHERE item_id=? "
+            "AND batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1) "
+            "ORDER BY review_id DESC", (item_id, actor["user"], int(can_read_all_workspaces(actor))))]
         return {"item_id": item_id, "reviews": rows}
     finally:
         conn.close()

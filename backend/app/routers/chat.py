@@ -30,7 +30,7 @@ from ..agent.suggestions import predict_next_steps
 from ..audit import audit
 from ..db import get_conn
 from ..schemas import ChatRequest
-from ..security import REVIEW_ROLES, any_role
+from ..security import REVIEW_ROLES, any_role, can_read_all_workspaces, require_workspace
 
 router = APIRouter()
 
@@ -43,27 +43,32 @@ def _stored_tool_calls(raw: str | None) -> list[dict]:
     return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
 
 
-def _latest_scored_batch(conn) -> int | None:
+def _latest_scored_batch(conn, actor: dict) -> int | None:
     r = conn.execute(
-        "SELECT batch_id FROM batches WHERE status='scored' "
-        "ORDER BY batch_id DESC LIMIT 1").fetchone()
+        "SELECT batch_id FROM batches WHERE status='scored' AND (uploaded_by=? OR ?=1) "
+        "ORDER BY batch_id DESC LIMIT 1", (actor["user"], int(can_read_all_workspaces(actor)))).fetchone()
     return r["batch_id"] if r else None
 
 
-def _resolve_batch(conn, requested: int | None, page_context=None) -> int | None:
+def _resolve_batch(conn, requested: int | None, actor: dict, page_context=None) -> int | None:
     if page_context is not None:
         if requested is not None and requested != page_context.batch_id:
             raise HTTPException(422, "batch_id does not match the current page")
         batch_id = page_context.batch_id
         if batch_id is None and page_context.path == "/chat":
-            batch_id = _latest_scored_batch(conn)
+            batch_id = _latest_scored_batch(conn, actor)
     else:
-        batch_id = requested or _latest_scored_batch(conn)
-    if batch_id is not None and conn.execute(
-            "SELECT batch_id FROM batches WHERE batch_id=?",
-            (batch_id,)).fetchone() is None:
-        raise HTTPException(404, f"no batch {batch_id}")
+        batch_id = requested if requested is not None else _latest_scored_batch(conn, actor)
+    if batch_id is not None:
+        require_workspace(conn, batch_id, actor, allow_shared=True)
     return batch_id
+
+
+def _allow_workspace_writes(conn, batch_id: int | None, actor: dict) -> bool:
+    if actor.get("role") not in REVIEW_ROLES:
+        return False
+    return batch_id is None or require_workspace(
+        conn, batch_id, actor, allow_shared=True)["uploaded_by"] == actor["user"]
 
 
 def _record_turn(conn, result: dict, actor: dict, question: str,
@@ -107,12 +112,12 @@ def _predict_next_steps(question: str, answer: str) -> dict:
 def chat(body: ChatRequest, actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
-        batch_id = _resolve_batch(conn, body.batch_id, body.page_context)
+        batch_id = _resolve_batch(conn, body.batch_id, actor, body.page_context)
         first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
         # Staging a proposal is a review action. Viewers and auditors get the
         # read-only tool surface, so the write tool is not even offered to the
         # model for them.
-        allow_writes = actor.get("role") in REVIEW_ROLES
+        allow_writes = _allow_workspace_writes(conn, batch_id, actor)
 
         result = run_chat(conn, question=body.question.strip(),
                           batch_id=batch_id, actor=actor,
@@ -152,9 +157,11 @@ def list_chat_sessions(actor: dict = Depends(any_role())):
             "MAX(ts) OVER (PARTITION BY session_id) AS updated_at, "
             "COUNT(*) OVER (PARTITION BY session_id) AS turn_count, "
             "ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY turn_id) AS position "
-            "FROM conversation_turn WHERE user=? AND session_id IS NOT NULL) saved "
+            "FROM conversation_turn WHERE user=? AND session_id IS NOT NULL "
+            "AND (batch_id IS NULL OR batch_id IN "
+            "(SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1))) saved "
             "WHERE position=1 ORDER BY updated_at DESC, turn_id DESC LIMIT 40",
-            (actor.get("user"),),
+            (actor["user"], actor["user"], int(can_read_all_workspaces(actor))),
         ).fetchall()
         return {"sessions": [dict(row) for row in rows]}
     finally:
@@ -168,8 +175,9 @@ def get_chat_session(session_id: str, actor: dict = Depends(any_role())):
         rows = conn.execute(
             "SELECT turn_id, session_id, batch_id, question, answer, tool_calls, "
             "provider, model, ts FROM conversation_turn "
-            "WHERE session_id=? AND user=? ORDER BY turn_id",
-            (session_id, actor.get("user")),
+            "WHERE session_id=? AND user=? AND (batch_id IS NULL OR batch_id IN "
+            "(SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)) ORDER BY turn_id",
+            (session_id, actor["user"], actor["user"], int(can_read_all_workspaces(actor))),
         ).fetchall()
         if not rows:
             raise HTTPException(404, "conversation not found")
@@ -185,6 +193,12 @@ def get_chat_session(session_id: str, actor: dict = Depends(any_role())):
 
 @router.post("/chat/stream")
 def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
+    # Deny foreign IDs before opening a stream or calling the model.
+    conn = get_conn()
+    try:
+        _resolve_batch(conn, body.batch_id, actor, body.page_context)
+    finally:
+        conn.close()
     question = body.question.strip()
     events: Queue[dict | None] = Queue()
 
@@ -195,9 +209,9 @@ def chat_stream(body: ChatRequest, actor: dict = Depends(any_role())):
         conn = None
         try:
             conn = get_conn()
-            batch_id = _resolve_batch(conn, body.batch_id, body.page_context)
+            batch_id = _resolve_batch(conn, body.batch_id, actor, body.page_context)
             first_turn = _is_first_turn(conn, body.session_id, actor.get("user"))
-            allow_writes = actor.get("role") in REVIEW_ROLES
+            allow_writes = _allow_workspace_writes(conn, batch_id, actor)
             result = run_chat(
                 conn, question=question, batch_id=batch_id, actor=actor,
                 session_id=body.session_id, allow_writes=allow_writes,
@@ -282,12 +296,19 @@ def list_pending(batch_id: int | None = None, status: str = "pending",
     """The confirmation tray: what the agent staged, awaiting a human."""
     conn = get_conn()
     try:
-        where, params = ["status=?"], [status]
+        # The unscoped confirmation tray stays owned. An explicit shared
+        # workspace may show its proposals, with action controls disabled.
+        shared = batch_id is not None and can_read_all_workspaces(actor)
+        where = ["status=?", "batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)"]
+        params = [status, actor["user"], int(shared)]
+        read_only = False
         if batch_id is not None:
+            workspace = require_workspace(conn, batch_id, actor, allow_shared=True)
+            read_only = workspace["uploaded_by"] != actor["user"]
             where.append("batch_id=?"); params.append(batch_id)
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM pending_change WHERE " + " AND ".join(where)
             + " ORDER BY pending_id DESC LIMIT 100", params)]
-        return {"pending": rows, "count": len(rows)}
+        return {"pending": rows, "count": len(rows), "read_only": read_only}
     finally:
         conn.close()

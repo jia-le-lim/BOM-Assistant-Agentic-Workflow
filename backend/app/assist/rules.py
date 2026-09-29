@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from ..engine_statistical import AGREE_TOL
 
-MODEL_VERSION = "assist-v2"
+MODEL_VERSION = "assist-v2-owner"
 
 VERDICTS = ("flag_for_review", "bulk_accept_candidate", "needs_context")
 

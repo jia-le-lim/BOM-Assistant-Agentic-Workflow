@@ -17,6 +17,7 @@ import pandas as pd
 
 from .config import ENGINE_DIR
 from .db import Conn, active_config
+from .account_settings import batch_owner
 from . import dormant_rules, engine_statistical
 from .part_category import categorise, load_rules as load_category_rules
 
@@ -68,6 +69,8 @@ _PRIOR_SQL = (
     "JOIN bom_rows b ON b.batch_id=h.batch_id AND b.item_id=h.item_id "
     "AND b.stockroom_id=h.stockroom_id "
     "WHERE h.batch_id != ? AND h.reviewed_at IS NOT NULL AND h.reviewed_at <= ? "
+    "AND h.batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by="
+    "(SELECT uploaded_by FROM batches WHERE batch_id=?)) "
     "ORDER BY h.reviewed_at, h.review_id")
 
 
@@ -118,7 +121,7 @@ def _attach_prior_benchmark(conn: Conn, batch_id: int, df: pd.DataFrame) -> pd.D
     and recommend.bulk_acceptable, so future information would be clearing rows.
     """
     prior: dict[tuple[str, str], tuple] = {}
-    for row in conn.execute(_PRIOR_SQL, (batch_id, _vintage(conn, batch_id, df))):
+    for row in conn.execute(_PRIOR_SQL, (batch_id, _vintage(conn, batch_id, df), batch_id)):
         payload = json.loads(row["payload"])
         prior[(str(row["item_id"]), str(row["stockroom_id"]))] = (
             row["final_max"], row["final_rop"], row["final_min"],
@@ -143,15 +146,16 @@ def score_batch(conn: Conn, batch_id: int) -> dict:
     # The engine matches category-scoped dormant rules on this column. Resolved
     # here, not in the engine: categorising needs the confirmed lexicon, and
     # engine_statistical.run() holds no database handle by design.
-    category_rules, _broken = load_category_rules(conn)
+    owner = batch_owner(conn, batch_id)
+    category_rules, _broken = load_category_rules(conn, owner)
     df["part_category"] = [categorise(d, category_rules)
                            for d in df.get("item_desc", pd.Series("", index=df.index))]
 
-    cfg = active_config(conn)
+    cfg = active_config(conn, owner)
     # Engineer-owned dormant stocking rules travel in cfg for the same reason.
     # Folded in BEFORE cfg_hash so editing a rule invalidates the fingerprint --
     # otherwise a re-score would claim the same config produced a new number.
-    cfg = {**cfg, "dormant_rules": dormant_rules.load_rules(conn)}
+    cfg = {**cfg, "dormant_rules": dormant_rules.load_rules(conn, owner)}
     cfg_hash = hashlib.sha256(
         json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16]
 

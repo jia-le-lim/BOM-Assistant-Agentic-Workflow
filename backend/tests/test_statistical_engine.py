@@ -584,7 +584,7 @@ def test_prior_review_benchmark_round_trips_through_score_batch(client, monkeypa
                         f"&stockroom_id={item['stockroom_id']}",
                         json={"decision": "accept", "comment": "steady consumer",
                               "justification": "Matches observed demand"},
-                        headers=SENIOR)
+                        headers={**SENIOR, "X-User": "alice"})
         assert r.status_code == 200, r.text
 
     # Next month: same parts, engineer column blanked -- a real new upload.

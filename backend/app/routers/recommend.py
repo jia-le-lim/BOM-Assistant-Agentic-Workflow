@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..audit import audit
 from ..db import get_conn
 from ..engine_adapter import score_batch
-from ..security import UPLOAD_ROLES, any_role, require_role
+from ..security import UPLOAD_ROLES, any_role, can_read_all_workspaces, require_role, require_workspace
 from ..services import (AmbiguousItem, build_export, derive_status,
                         latest_reviews, resolve_rec)
 
@@ -64,7 +64,8 @@ def list_batches(actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
         return [dict(r) for r in conn.execute(
-            "SELECT * FROM batches ORDER BY batch_id DESC")]
+            "SELECT * FROM batches WHERE (uploaded_by=? OR ?=1) ORDER BY batch_id DESC",
+            (actor["user"], int(can_read_all_workspaces(actor))))]
     finally:
         conn.close()
 
@@ -74,9 +75,7 @@ def batch_summary(batch_id: int, actor: dict = Depends(any_role())):
     """Counts the review console needs: workflow states, risk, actions, exposure."""
     conn = get_conn()
     try:
-        b = conn.execute("SELECT * FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
-        if b is None:
-            raise HTTPException(404, f"batch {batch_id} not found")
+        b = require_workspace(conn, batch_id, actor, allow_shared=True)
 
         reviews = latest_reviews(conn, batch_id)
         recs = conn.execute(
@@ -134,6 +133,7 @@ def batch_summary(batch_id: int, actor: dict = Depends(any_role())):
         export = build_export(conn, batch_id) if b["status"] == "scored" else {"rows": []}
         return {
             "batch": dict(b),
+            "read_only": b["uploaded_by"] != actor["user"],
             "scored": len(recs),
             "statuses": statuses,
             "risk_levels": risk,
@@ -161,9 +161,9 @@ def run_recommendation(batch_id: int,
                        actor: dict = Depends(require_role(*UPLOAD_ROLES))):
     conn = get_conn()
     try:
-        b = conn.execute("SELECT * FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
-        if b is None:
-            raise HTTPException(404, f"batch {batch_id} not found")
+        b = require_workspace(conn, batch_id, actor)
+        if b["status"] in ("draft", "uploading"):
+            raise HTTPException(409, "Upload a datasheet to this workspace before running the review engine.")
         try:
             summary = score_batch(conn, batch_id)
         except ValueError as e:
@@ -198,6 +198,7 @@ def list_recommendations(
 ):
     conn = get_conn()
     try:
+        require_workspace(conn, batch_id, actor, allow_shared=True)
         where, params = ["batch_id=?"], [batch_id]
         if review_required:
             where.append("review_required=?"); params.append(review_required)
@@ -254,6 +255,7 @@ def get_recommendation(item_id: str, batch_id: int,
                        actor: dict = Depends(any_role())):
     conn = get_conn()
     try:
+        workspace = require_workspace(conn, batch_id, actor, allow_shared=True)
         try:
             r = resolve_rec(conn, batch_id, item_id, stockroom_id)
         except AmbiguousItem as e:
@@ -268,6 +270,7 @@ def get_recommendation(item_id: str, batch_id: int,
         p = json.loads(payload["payload"]) if payload else {}
         return {
             "recommendation": dict(r),
+            "read_only": workspace["uploaded_by"] != actor["user"],
             "status": derive_status(r, review),
             "latest_review": dict(review) if review else None,
             "context": {k: p.get(k) for k in (

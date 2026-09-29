@@ -16,7 +16,7 @@ hostile providers rather than happy-path stubs:
 import json
 import sqlite3
 
-from conftest import ENG, VIEWER, upload
+from conftest import ENG, OWNER_VIEWER as VIEWER, upload
 
 
 def scored_batch(client, csv_bytes):
@@ -242,7 +242,7 @@ def test_run_assist_refuses_a_read_only_role(client, synth_csv):
     batch_id = scored_batch(client, synth_csv)
     conn = get_conn()
     try:
-        ctx = T.ToolContext(conn=conn, actor={"user": "eve", "role": "viewer"},
+        ctx = T.ToolContext(conn=conn, actor={"user": "alice", "role": "viewer"},
                             batch_id=batch_id, question="run assist")
         out = json.loads(T.dispatch(ctx, "run_assist",
                                     {"batch_id": batch_id, "confirm": True}))
@@ -355,8 +355,8 @@ def test_a_stock_level_request_is_not_a_dormant_rule(client, synth_csv, db_file)
                           "batch_id": batch_id}, headers=ENG)
     assert r.status_code == 200, r.text
     assert "propose_dormant_rule" not in tools_used(db_file)
-    assert rows(db_file, "SELECT COUNT(*) FROM dormant_rule_config "
-                         "WHERE scope='item'")[0][0] == 0
+    assert rows(db_file, "SELECT COUNT(*) FROM user_dormant_rule_config "
+                         "WHERE owner_user='alice' AND scope='item'")[0][0] == 0
 
 
 def test_assist_rows_survive_a_failure_later_in_the_turn(client, synth_csv,
@@ -395,7 +395,7 @@ def test_advisory_reads_match_their_endpoint_role_gate(client, synth_csv):
     batch_id = scored_batch(client, synth_csv)
     conn = get_conn()
     try:
-        ctx = T.ToolContext(conn=conn, actor={"user": "eve", "role": "viewer"},
+        ctx = T.ToolContext(conn=conn, actor={"user": "alice", "role": "viewer"},
                             batch_id=batch_id, question="outliers")
         for name in ("get_similarity_outliers", "get_dormant_coverage"):
             out = json.loads(T.dispatch(ctx, name, {"batch_id": batch_id}))

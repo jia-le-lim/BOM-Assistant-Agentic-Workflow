@@ -25,10 +25,13 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from fastapi import HTTPException
+
 from ..db import Conn, active_config
+from ..account_settings import ensure_settings
 from ..llm.provider import ToolSpec
 from ..redact import prompt_redaction_on, redact_for_prompt
-from ..security import REVIEW_ROLES
+from ..security import REVIEW_ROLES, can_read_all_workspaces, require_workspace
 from ..services import (AmbiguousItem, current_values, derive_status,
                         latest_reviews, resolve_rec)
 
@@ -49,8 +52,22 @@ class ToolContext:
 class ToolError(Exception):
     """Rejected at the tool boundary; surfaced to the model, not raised to HTTP."""
 
+    def __init__(self, message: str, status: str = "clarification"):
+        super().__init__(message)
+        self.status = status
+
 
 EMPTY: dict[str, Any] = {"_empty": True}
+
+
+def _require_workspace(ctx: ToolContext, bid: int | None, *, allow_shared: bool = True):
+    if bid is None:
+        return None
+    try:
+        return require_workspace(ctx.conn, bid, ctx.actor, allow_shared=allow_shared)
+    except HTTPException as exc:
+        raise ToolError("Workspace not found or unavailable to this account.",
+                        "permission_denied") from exc
 
 
 def _require_review_role(ctx: "ToolContext", what: str) -> None:
@@ -63,7 +80,7 @@ def _require_review_role(ctx: "ToolContext", what: str) -> None:
     """
     if ctx.actor.get("role") not in REVIEW_ROLES:
         raise ToolError(f"{what} needs a review role; this account has "
-                        f"read-only access.")
+                        f"read-only access.", "permission_denied")
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +90,7 @@ def _require_review_role(ctx: "ToolContext", what: str) -> None:
 def _resolve(ctx: ToolContext, bid: int | None, item_id: str,
              stockroom_id: str | None):
     """resolve_rec, with ambiguity turned into a question for the model."""
+    _require_workspace(ctx, bid)
     try:
         return resolve_rec(ctx.conn, bid, item_id, stockroom_id)
     except AmbiguousItem as e:
@@ -90,6 +108,7 @@ def get_recommendation(ctx: ToolContext, item_id: str,
                        batch_id: int | None = None,
                        stockroom_id: str | None = None) -> dict:
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     r = _resolve(ctx, bid, item_id, stockroom_id)
     if r is None:
         return EMPTY
@@ -116,6 +135,7 @@ def get_triage_context(ctx: ToolContext, item_id: str,
     Keeping the quantity columns out of this tool makes that boundary structural.
     """
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     r = _resolve(ctx, bid, item_id, stockroom_id)
     if r is None:
         return EMPTY
@@ -138,6 +158,7 @@ def get_procurement_context(ctx: ToolContext, item_id: str,
                             stockroom_id: str | None = None) -> dict:
     """Read procurement signals without exposing or proposing stock levels."""
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     rec = _resolve(ctx, bid, item_id, stockroom_id)
     if rec is None:
         return EMPTY
@@ -149,7 +170,7 @@ def get_procurement_context(ctx: ToolContext, item_id: str,
     payload = json.loads(row["payload"])
     machine = str(payload.get("machine_type") or "")
     configured = next((level for pattern, level in
-                       active_config(ctx.conn).get("machine_criticality", {}).items()
+                       active_config(ctx.conn, ctx.actor["user"]).get("machine_criticality", {}).items()
                        if pattern.lower() in machine.lower()), None)
     ctx.sources.append({"type": "bom_rows", "batch_id": bid,
                         "item_id": item_id,
@@ -168,6 +189,7 @@ def get_current_values(ctx: ToolContext, item_id: str,
                        batch_id: int | None = None,
                        stockroom_id: str | None = None) -> dict:
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     # current_values matches stockroom_id exactly, so the hardcoded "" this used
     # to pass missed every real row -- the tool always answered "I don't know".
     # Take the stockroom off the scored row instead.
@@ -185,12 +207,14 @@ def get_current_values(ctx: ToolContext, item_id: str,
 
 
 def get_item_history(ctx: ToolContext, item_id: str) -> dict:
-    """Across ALL batches -- the monthly roster rotates, so an item's history
+    """Across readable batches -- the monthly roster rotates, so an item's history
     is not confined to the batch currently loaded."""
     rows = [dict(r) for r in ctx.conn.execute(
         "SELECT reviewer, decision, final_max, final_rop, final_min, "
         "reviewed_at, batch_id FROM review_history WHERE item_id=? "
-        "ORDER BY review_id DESC LIMIT 20", (item_id,))]
+        "AND batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1) "
+        "ORDER BY review_id DESC LIMIT 20",
+        (item_id, ctx.actor["user"], int(can_read_all_workspaces(ctx.actor))))]
     if not rows:
         return EMPTY
     ctx.sources.append({"type": "review_history", "item_id": item_id,
@@ -203,7 +227,7 @@ def get_agreement_history(ctx: ToolContext, item_id: str,
     """This item's engine-vs-engineer verdict, one row per past cycle.
 
     Reads recommendation_result joined to the decision that was actually taken
-    on it, across ALL batches -- the monthly roster rotates, so an item's
+    on it, across owned batches -- the monthly roster rotates, so an item's
     history is not confined to the batch currently loaded (same reasoning as
     get_item_history).
 
@@ -211,7 +235,8 @@ def get_agreement_history(ctx: ToolContext, item_id: str,
     twice in 2024-07 under two stockrooms with opposite verdicts, and keying on
     item_id alone silently merges them into one incoherent streak.
     """
-    where, params = ["r.item_id=?"], [item_id]
+    where = ["r.item_id=?", "r.batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)"]
+    params = [item_id, ctx.actor["user"], int(can_read_all_workspaces(ctx.actor))]
     if stockroom_id is not None:
         where.append("r.stockroom_id=?")
         params.append(stockroom_id)
@@ -253,8 +278,12 @@ def get_item_notes(ctx: ToolContext, item_id: str) -> dict:
     """Item-keyed engineer context that survives batch rotation."""
     rows = [dict(r) for r in ctx.conn.execute(
         "SELECT note, author, created_at, origin_batch_id FROM item_note "
-        "WHERE item_id=? AND active=1 ORDER BY note_id DESC LIMIT 20",
-        (item_id,))]
+        "WHERE item_id=? AND active=1 AND (author=? OR (?=1 AND origin_batch_id IS NOT NULL)) "
+        "AND (origin_batch_id IS NULL OR origin_batch_id IN "
+        "(SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)) "
+        "ORDER BY note_id DESC LIMIT 20",
+        (item_id, ctx.actor["user"], int(can_read_all_workspaces(ctx.actor)),
+         ctx.actor["user"], int(can_read_all_workspaces(ctx.actor))))]
     if not rows:
         return EMPTY
     ctx.sources.append({"type": "item_note", "item_id": item_id,
@@ -281,6 +310,7 @@ def get_similar_parts(ctx: ToolContext, item_id: str,
     """
     _require_review_role(ctx, "Peer evidence")
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     rec = _resolve(ctx, bid, item_id, stockroom_id)
     if rec is None:
         return EMPTY
@@ -339,7 +369,9 @@ def search_similar_reviews(ctx: ToolContext, query: str,
         params = [f"%{query.strip().lower()}%"]
     sql = ("SELECT h.item_id, h.batch_id, h.decision, h.final_max, h.final_rop, "
            "h.final_min, h.comment, h.justification, h.reviewed_at "
-           "FROM review_history h WHERE " + where)
+           "FROM review_history h WHERE " + where +
+           " AND h.batch_id IN (SELECT batch_id FROM batches WHERE uploaded_by=? OR ?=1)")
+    params.extend([ctx.actor["user"], int(can_read_all_workspaces(ctx.actor))])
     if item_id:
         sql += " AND h.item_id=?"
         params.append(item_id)
@@ -356,6 +388,7 @@ def search_similar_reviews(ctx: ToolContext, query: str,
 def top_exposure(ctx: ToolContext, n: int = 5,
                  batch_id: int | None = None) -> dict:
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     n = max(1, min(int(n), 25))
     rows = [dict(r) for r in ctx.conn.execute(
         "SELECT item_id, exposure_usd, risk_level, reason_code "
@@ -373,6 +406,7 @@ def list_review_queue(ctx: ToolContext, batch_id: int | None = None,
                       reason_code: str | None = None,
                       limit: int = 20) -> dict:
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     limit = max(1, min(int(limit), 100))
     where, params = ["batch_id=?"], [bid]
     if risk_level in ("Low", "Medium", "High"):
@@ -403,6 +437,7 @@ def list_review_queue(ctx: ToolContext, batch_id: int | None = None,
 
 def batch_summary(ctx: ToolContext, batch_id: int | None = None) -> dict:
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     b = ctx.conn.execute("SELECT * FROM batches WHERE batch_id=?",
                          (bid,)).fetchone()
     if b is None:
@@ -424,7 +459,7 @@ def batch_summary(ctx: ToolContext, batch_id: int | None = None) -> dict:
 
 
 def explain_rules(ctx: ToolContext) -> dict:
-    cfg = active_config(ctx.conn)
+    cfg = active_config(ctx.conn, ctx.actor["user"])
     ctx.sources.append({"type": "rule_config",
                         "rule_version": cfg.get("rule_version")})
     return {"rule_version": cfg.get("rule_version"),
@@ -460,6 +495,7 @@ def get_assist_verdict(ctx: ToolContext, item_id: str,
     never from a model -- see assist/chain._evaluate.
     """
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     rec = _resolve(ctx, bid, item_id, stockroom_id)
     if rec is None:
         return EMPTY
@@ -491,6 +527,7 @@ def list_assist_queue(ctx: ToolContext, batch_id: int | None = None,
     from ..assist import rules as assist_rules
 
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     if verdict is not None and verdict not in assist_rules.VERDICTS:
         raise ToolError(f"verdict must be one of "
                         f"{list(assist_rules.VERDICTS)}.")
@@ -533,6 +570,7 @@ def get_similarity_outliers(ctx: ToolContext, batch_id: int | None = None,
     """
     _require_review_role(ctx, "Peer outlier evidence")
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid)
     limit = max(1, min(int(limit), 25))
     rows = [dict(r) for r in ctx.conn.execute(
         "SELECT item_id, stockroom_id, neighbour_count, is_outlier, "
@@ -561,8 +599,10 @@ def get_dormant_coverage(ctx: ToolContext, batch_id: int | None = None) -> dict:
 
     _require_review_role(ctx, "Dormant-rule coverage")
     bid = batch_id or ctx.batch_id
-    rules = dormant_rules.load_rules(ctx.conn)
-    category_rules, _broken = load_category_rules(ctx.conn)
+    workspace = _require_workspace(ctx, bid)
+    owner = workspace["uploaded_by"] if workspace else ctx.actor["user"]
+    rules = dormant_rules.load_rules(ctx.conn, owner)
+    category_rules, _broken = load_category_rules(ctx.conn, owner)
     matched = total = 0
     engine_usd = rule_usd = 0.0
     for row in ctx.conn.execute(
@@ -620,6 +660,7 @@ def propose_change(ctx: ToolContext, item_id: str,
     engineer's own message. A model that infers "so about 5 then" is rejected.
     """
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid, allow_shared=False)
     stated = set(INT_RE.findall(ctx.question))
     proposed = {"proposed_max": proposed_max, "proposed_rop": proposed_rop,
                 "proposed_min": proposed_min}
@@ -701,6 +742,7 @@ def run_assist(ctx: ToolContext, batch_id: int | None = None,
         raise ToolError("Running assist needs a review role; this account has "
                         "read-only access.")
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid, allow_shared=False)
     if bid is None:
         raise ToolError("No scored batch to assist. Name a batch id.")
     if ctx.conn.execute("SELECT 1 FROM batches WHERE batch_id=?",
@@ -731,7 +773,7 @@ def run_assist(ctx: ToolContext, batch_id: int | None = None,
             raise ToolError(str(e)) from e
         audit(ctx.conn, ctx.actor, "POST", "/chat", "similarity", bid,
               similarity)
-    summary = run_batch(ctx.conn, bid, ctx.actor, active_config(ctx.conn))
+    summary = run_batch(ctx.conn, bid, ctx.actor, active_config(ctx.conn, ctx.actor["user"]))
     summary["similarity"] = similarity
     audit(ctx.conn, ctx.actor, "POST", "/chat", "assist", bid, summary)
     # Committed here, not left to the end of the turn, exactly as
@@ -770,6 +812,7 @@ def stage_review_action(ctx: ToolContext, kind: str, item_id: str,
     if kind not in ALLOWED_ACTIONS:
         raise ToolError(f"kind must be one of {list(ALLOWED_ACTIONS)}.")
     bid = batch_id or ctx.batch_id
+    _require_workspace(ctx, bid, allow_shared=False)
     action: dict[str, Any] = {"kind": kind, "item_id": item_id,
                               "batch_id": bid, "stockroom_id": stockroom_id,
                               "pending_id": pending_id,
@@ -781,8 +824,9 @@ def stage_review_action(ctx: ToolContext, kind: str, item_id: str,
                         f"Ask which one they mean.")
     p = ctx.conn.execute("SELECT * FROM pending_change WHERE pending_id=?",
                          (pending_id,)).fetchone()
-    if p is None:
+    if p is None or p["batch_id"] is None:
         raise ToolError(f"There is no pending change {pending_id}.")
+    _require_workspace(ctx, p["batch_id"], allow_shared=False)
     if p["status"] != "pending":
         raise ToolError(f"Pending change {pending_id} is already "
                         f"{p['status']}; it cannot be confirmed again.")
@@ -832,7 +876,7 @@ def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
     Same shape as propose_change: the agent writes a row the system does not act
     on, and a human turns it into something real. `load_rules()` reads
     `WHERE confirmed=1`, so a row written here sizes nothing, and confirming it
-    needs approval rights AND a different person.
+    needs approval rights and the same account owner.
 
     The `replace` gate is the part that is not obvious. The underlying upsert
     resets `confirmed=0` on conflict -- deliberate for a console edit, which
@@ -884,7 +928,7 @@ def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
 
     note_suffix = ""
     if scope == "category":
-        rules, _broken = load_category_rules(ctx.conn)
+        rules, _broken = load_category_rules(ctx.conn, ctx.actor["user"])
         known = category_names(rules)
         if match_key not in known:
             raise ToolError(
@@ -902,9 +946,10 @@ def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
                 f"Item {match_key} is not in scored batch {ctx.batch_id}, so "
                 f"the id cannot be checked. Confirm the part number.")
 
+    ensure_settings(ctx.conn, ctx.actor["user"])
     existing = ctx.conn.execute(
-        "SELECT rule_id, confirmed, policy, fixed_qty FROM dormant_rule_config "
-        "WHERE scope=? AND match_key=?", (scope, match_key)).fetchone()
+        "SELECT rule_id, confirmed, policy, fixed_qty FROM user_dormant_rule_config "
+        "WHERE owner_user=? AND scope=? AND match_key=?", (ctx.actor["user"], scope, match_key)).fetchone()
     if existing is not None and existing["confirmed"] and not replace:
         current = str(existing["policy"])
         if existing["fixed_qty"] is not None:
@@ -917,14 +962,14 @@ def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
             f"replace=true.")
 
     ctx.conn.execute(
-        "INSERT INTO dormant_rule_config (scope, match_key, policy, "
+        "INSERT INTO user_dormant_rule_config (owner_user, scope, match_key, policy, "
         "fixed_qty, set_by, confirmed, updated_at) "
-        "VALUES (?,?,?,?,?,0,datetime('now')) "
-        "ON CONFLICT(scope, match_key) DO UPDATE SET "
+        "VALUES (?,?,?,?,?,?,0,datetime('now')) "
+        "ON CONFLICT(owner_user, scope, match_key) DO UPDATE SET "
         "policy=excluded.policy, fixed_qty=excluded.fixed_qty, "
         "set_by=excluded.set_by, "
         "confirmed=0, confirmed_by=NULL, updated_at=datetime('now')",
-        (scope, match_key, policy, fixed_qty, ctx.actor.get("user")))
+        (ctx.actor["user"], scope, match_key, policy, fixed_qty, ctx.actor["user"]))
     audit(ctx.conn, ctx.actor, "POST", "/chat", "dormant_rule",
           f"{scope}:{match_key}",
           {"scope": scope, "match_key": match_key, "policy": policy,
@@ -932,16 +977,16 @@ def propose_dormant_rule(ctx: ToolContext, scope: str, policy: str,
            "replaced_confirmed": bool(replace and existing)})
 
     row = ctx.conn.execute(
-        "SELECT rule_id FROM dormant_rule_config WHERE scope=? AND match_key=?",
-        (scope, match_key)).fetchone()
+        "SELECT rule_id FROM user_dormant_rule_config WHERE owner_user=? AND scope=? AND match_key=?",
+        (ctx.actor["user"], scope, match_key)).fetchone()
     rule_id = row["rule_id"] if row else None
     ctx.sources.append({"type": "dormant_rule", "rule_id": rule_id,
                         "scope": scope, "match_key": match_key,
                         "confirmed": False})
     return {"rule_id": rule_id, "scope": scope, "match_key": match_key,
             "policy": policy, "fixed_qty": fixed_qty, "confirmed": False,
-            "note": "proposed only; it sizes nothing until a different person "
-                    "with approval rights confirms it, and it takes effect on "
+            "note": "personal proposal only; confirm it with approval rights "
+                    "before it takes effect on "
                     "the next engine run -- a batch already scored keeps the "
                     "numbers its reviewer saw." + note_suffix}
 
@@ -1169,7 +1214,7 @@ REGISTRY: dict[str, tuple[ToolSpec, Callable[..., dict]]] = {
         "category. Policy 'hold_current' keeps today's level, 'fixed_qty' a "
         "stated quantity, 'zero' the engine's own answer. Use for 'keep all "
         "filter parts at 2', 'hold the current level for 100005'. This does "
-        "NOT activate the rule -- a second person confirms it. NOT for "
+        "NOT activate the rule -- the owner explicitly confirms it with approval rights. NOT for "
         "changing one item's Max/ROP/Min on a scored batch, which is "
         "propose_change.",
         {"type": "object", "properties": {
@@ -1279,8 +1324,11 @@ def dispatch(ctx: ToolContext, name: str, args: dict) -> str:
         return json.dumps({"error": f"unknown tool {name}"})
     _, fn = entry
     try:
+        bid = args.get("batch_id")
+        _require_workspace(ctx, bid if bid is not None else ctx.batch_id,
+                           allow_shared=name in READ_ONLY_TOOLS)
         return json.dumps(redact_for_prompt(fn(ctx, **args)), default=str)
     except ToolError as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "response_status": e.status})
     except TypeError as e:
         return json.dumps({"error": f"bad arguments for {name}: {e}"})

@@ -33,7 +33,7 @@ import numpy as np
 from .db import Conn, active_config
 from .part_category import UNCATEGORISED, categorise, load_rules
 
-MODEL_VERSION = "knn-v1"
+MODEL_VERSION = "knn-v1-owner"
 
 # Weights sum to 1.0, so the composite Gower distance is also in [0, 1].
 # Criticality and machine identity dominate: without that a cheap consumable
@@ -313,7 +313,9 @@ _POOL_SQL = (
     "JOIN recommendation_result r ON r.batch_id=h.batch_id "
     "AND r.item_id=h.item_id AND r.stockroom_id=h.stockroom_id "
     "JOIN bom_rows b ON b.batch_id=h.batch_id AND b.item_id=h.item_id "
-    "AND b.stockroom_id=h.stockroom_id ORDER BY h.review_id")
+    "AND b.stockroom_id=h.stockroom_id "
+    "JOIN batches owned ON owned.batch_id=h.batch_id "
+    "WHERE owned.uploaded_by=? ORDER BY h.review_id")
 
 # Column order in ONE place. _summarise returns a dict and the tuple is built
 # from this list, so adding a column cannot silently shift every value by one --
@@ -357,7 +359,7 @@ def _round_up(value: float, moq: int) -> int:
     return int(math.ceil(value / moq) * moq)
 
 
-def _load_pool(conn: Conn, crit_config: dict, category_rules=()) -> list[dict]:
+def _load_pool(conn: Conn, crit_config: dict, category_rules=(), *, owner: str) -> list[dict]:
     """One precedent per stocking row, not one per month.
 
     Keyed on (item_id, stockroom_id) rather than including batch_id: the roster
@@ -369,7 +371,7 @@ def _load_pool(conn: Conn, crit_config: dict, category_rules=()) -> list[dict]:
     orders by review_id, so the surviving row is the most recent decision.
     """
     latest: dict[tuple, dict] = {}
-    for row in conn.execute(_POOL_SQL):
+    for row in conn.execute(_POOL_SQL, (owner,)):
         rec = dict(row)
         payload = json.loads(rec.pop("payload"))
         rec["features"] = extract_features(payload, rec, crit_config,
@@ -379,14 +381,14 @@ def _load_pool(conn: Conn, crit_config: dict, category_rules=()) -> list[dict]:
 
 
 def run_similarity(conn: Conn, batch_id: int, refresh: bool = False) -> dict:
-    batch = conn.execute("SELECT status FROM batches WHERE batch_id=?",
+    batch = conn.execute("SELECT status, uploaded_by FROM batches WHERE batch_id=?",
                          (batch_id,)).fetchone()
     if batch is None:
         raise ValueError(f"batch {batch_id} not found")
     if batch["status"] != "scored":
         raise ValueError(f"batch {batch_id} has not been scored")
 
-    cfg = active_config(conn)
+    cfg = active_config(conn, batch["uploaded_by"])
     max_distance = float(cfg.get("similarity_max_distance", MAX_DISTANCE))
     min_neighbours = int(cfg.get("similarity_min_neighbours", MIN_NEIGHBOURS))
     k = int(cfg.get("similarity_k", K_NEIGHBOURS))
@@ -394,7 +396,7 @@ def run_similarity(conn: Conn, batch_id: int, refresh: bool = False) -> dict:
     crit_config = cfg.get("machine_criticality", {})
     # Compiled once per run, never per row -- an engineer-entered regex is
     # arbitrary work for the matching engine.
-    category_rules, broken_rules = load_rules(conn)
+    category_rules, broken_rules = load_rules(conn, batch["uploaded_by"])
 
     if refresh:
         # similarity_neighbour cascades off similarity_result.
@@ -409,7 +411,7 @@ def run_similarity(conn: Conn, batch_id: int, refresh: bool = False) -> dict:
                                            category_rules)
         targets.append(rec)
 
-    pool = _load_pool(conn, crit_config, category_rules)
+    pool = _load_pool(conn, crit_config, category_rules, owner=batch["uploaded_by"])
     results: list[dict] = []
     neighbours: list[tuple] = []
     n_outlier = n_diverge = n_no_analogue = n_categorised = 0

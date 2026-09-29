@@ -6,7 +6,7 @@ generic rules last, or "SENSOR BRACKET ASSY" resolves to a bracket.
 
 import re
 
-from conftest import ENG, SENIOR, VIEWER, upload
+from conftest import ENG, OWNER_SENIOR as SENIOR, OWNER_VIEWER as VIEWER, upload
 
 from app import part_category as PC
 
@@ -93,10 +93,10 @@ def test_seed_populates_confirmed_rules_on_first_init(client, db_file):
     from app.db import get_conn
     conn = get_conn()
     try:
-        rules, broken = PC.load_rules(conn)
+        rules, broken = PC.load_rules(conn, "alice")
         assert len(rules) == len(PC.DEFAULT_RULES)
         assert broken == []
-        n = conn.execute("SELECT COUNT(*) c FROM part_category_config "
+        n = conn.execute("SELECT COUNT(*) c FROM user_part_category_config "
                          "WHERE confirmed=1").fetchone()["c"]
         assert n == len(PC.DEFAULT_RULES)
     finally:
@@ -108,12 +108,12 @@ def test_only_confirmed_rules_are_loaded(client, db_file):
     from app.db import get_conn
     conn = get_conn()
     try:
-        before = len(PC.load_rules(conn)[0])
+        before = len(PC.load_rules(conn, "alice")[0])
         conn.execute(
-            "INSERT INTO part_category_config (pattern, category, priority, "
-            "set_by, confirmed) VALUES ('WIDGETRON', 'widget', 5, 'alice', 0)")
+            "INSERT INTO user_part_category_config (owner_user, pattern, category, priority, "
+            "set_by, confirmed) VALUES ('alice', 'WIDGETRON', 'widget', 5, 'alice', 0)")
         conn.commit()
-        rules, _ = PC.load_rules(conn)
+        rules, _ = PC.load_rules(conn, "alice")
         assert len(rules) == before
         assert PC.categorise("WIDGETRON 9000", rules) == PC.UNCATEGORISED
     finally:
@@ -126,11 +126,11 @@ def test_invalid_stored_regex_is_skipped_not_raised(client, db_file):
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO part_category_config (pattern, category, priority, "
-            "set_by, confirmed, confirmed_by) VALUES ('(', 'broken', 1, "
+            "INSERT INTO user_part_category_config (owner_user, pattern, category, priority, "
+            "set_by, confirmed, confirmed_by) VALUES ('alice', '(', 'broken', 1, "
             "'alice', 1, 'boss')")
         conn.commit()
-        rules, broken = PC.load_rules(conn)
+        rules, broken = PC.load_rules(conn, "alice")
         assert broken == ["("]
         assert PC.categorise("CABLE ASSY", rules) == "cable"   # others still work
     finally:
@@ -142,11 +142,11 @@ def test_overlong_pattern_is_skipped(client, db_file):
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO part_category_config (pattern, category, priority, "
-            "set_by, confirmed, confirmed_by) VALUES (?, 'huge', 1, 'a', 1, 'b')",
+            "INSERT INTO user_part_category_config (owner_user, pattern, category, priority, "
+            "set_by, confirmed, confirmed_by) VALUES ('alice', ?, 'huge', 1, 'a', 1, 'b')",
             ("X" * (PC.MAX_PATTERN_LEN + 1),))
         conn.commit()
-        _rules_out, broken = PC.load_rules(conn)
+        _rules_out, broken = PC.load_rules(conn, "alice")
         assert len(broken) == 1
     finally:
         conn.close()
@@ -170,7 +170,7 @@ def test_propose_then_confirm(client):
     assert r.status_code == 200, r.text
     assert r.json()["confirmed"] is False
 
-    # the proposer may not confirm their own rule
+    # the owner still needs approval rights
     same = client.post(
         f"/config/part-categories/{rule['pattern']}/confirm", headers=ENG)
     assert same.status_code == 403

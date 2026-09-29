@@ -14,8 +14,8 @@ being a cable's evidence.
 
 Rules live in part_category_config and are engineer-owned. Only confirmed=1 rows
 are ever read, exactly as machine_criticality_config works: an agent or an
-engineer may PROPOSE a rule, but a second person must confirm it before it can
-move a number.
+engineer may PROPOSE a rule, but the owner with approval rights must explicitly confirm it
+before it can move a number. Settings are private to each account.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ DEFAULT_RULES: list[tuple[int, str, str]] = [   # (priority, category, pattern)
 ]
 
 
-def load_rules(conn) -> tuple[list[tuple[int, str, re.Pattern]], list[str]]:
+def load_rules(conn, owner: str) -> tuple[list[tuple[int, str, re.Pattern]], list[str]]:
     """Confirmed rules in priority order, plus the patterns that would not compile.
 
     `WHERE confirmed=1` is the safety property, not a nicety: an unconfirmed
@@ -77,11 +77,13 @@ def load_rules(conn) -> tuple[list[tuple[int, str, re.Pattern]], list[str]]:
     skipped and reported rather than raised -- a single bad rule must not take
     down scoring for the whole batch.
     """
+    from .account_settings import ensure_settings
+    ensure_settings(conn, owner)
     rules: list[tuple[int, str, re.Pattern]] = []
     broken: list[str] = []
     for r in conn.execute(
-            "SELECT pattern, category, priority FROM part_category_config "
-            "WHERE confirmed=1 ORDER BY priority, pattern"):
+            "SELECT pattern, category, priority FROM user_part_category_config "
+            "WHERE owner_user=? AND confirmed=1 ORDER BY priority, pattern", (owner,)):
         pattern = str(r["pattern"] or "")
         if not pattern or len(pattern) > MAX_PATTERN_LEN:
             broken.append(pattern[:80])

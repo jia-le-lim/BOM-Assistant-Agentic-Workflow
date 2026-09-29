@@ -34,8 +34,8 @@ def conn(db_file):
 
 
 def _batch(conn, label: str) -> int:
-    return conn.insert_returning("INSERT INTO batches (label) VALUES (?)",
-                                 (label,), "batches")
+    return conn.insert_returning("INSERT INTO batches (label, uploaded_by) VALUES (?, ?)",
+                                 (label, "alice"), "batches")
 
 
 def _decision(conn, label: str, item: str, final_max: int, reviewed_at, c365=12):

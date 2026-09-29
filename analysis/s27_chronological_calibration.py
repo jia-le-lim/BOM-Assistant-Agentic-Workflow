@@ -150,19 +150,22 @@ def attach_priors(frame):
     return df
 
 
-def fetch(output):
+def fetch(output, settings_owner):
     output.mkdir(parents=True, exist_ok=True)
     if (output / "selection.json").exists():
         raise ValueError("Selection is frozen; use a new output directory for new data")
     save_json(output / "protocol.json", protocol())
     conn = get_conn()
     try:
+        if not conn.execute("SELECT 1 FROM user_settings WHERE owner_user=?", (settings_owner,)).fetchone():
+            raise ValueError("Open Settings for the requested account before fetching a read-only snapshot")
         before = fingerprints(conn)
         rows = conn.execute(SQL).fetchall()
         batches = {r["batch_id"]: dict(r) for r in conn.execute("SELECT * FROM batches")}
-        config = active_config(conn)
-        config["dormant_rules"] = dormant_rules.load_rules(conn)
-        rules, broken = part_category.load_rules(conn)
+        config = active_config(conn, settings_owner)
+        config["_settings_owner"] = settings_owner
+        config["dormant_rules"] = dormant_rules.load_rules(conn, settings_owner)
+        rules, broken = part_category.load_rules(conn, settings_owner)
         if broken:
             raise ValueError("Invalid confirmed category patterns")
         after = fingerprints(conn)
@@ -436,8 +439,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("fetch", "tune", "holdout"))
     parser.add_argument("--output", type=Path, default=OUT)
+    parser.add_argument("--settings-owner", help="Account whose settings to snapshot (required for fetch)")
     args = parser.parse_args()
-    {"fetch": fetch, "tune": tune, "holdout": holdout}[args.stage](args.output)
+    if args.stage == "fetch":
+        if not args.settings_owner:
+            parser.error("fetch requires --settings-owner")
+        fetch(args.output, args.settings_owner)
+    else:
+        {"tune": tune, "holdout": holdout}[args.stage](args.output)
 
 
 if __name__ == "__main__":

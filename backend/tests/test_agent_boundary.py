@@ -83,12 +83,10 @@ def test_staged_change_is_invisible_to_export_until_confirmed(
     assert "100005" not in body
     assert int(hdrs["X-Awaiting-Senior"]) >= 1
 
-    client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
+    # Another account cannot approve a private workspace.
+    assert client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR).status_code == 404
     body, _ = export_csv(client, b)
-    assert "100005" in body
-    line = next(ln for ln in body.splitlines() if ln.startswith("100005"))
-    # item,stockroom,cur_max,cur_rop,cur_min,new_max,...
-    assert line.split(",")[5] == "3", line
+    assert "100005" not in body
 
 
 def test_confirm_is_recorded_as_a_normal_review(client, synth_csv, db_file):
@@ -101,7 +99,7 @@ def test_confirm_is_recorded_as_a_normal_review(client, synth_csv, db_file):
                 json={"pending_id": pid, "final_max": 3, "final_rop": 2,
                       "final_min": 1}, headers=ENG)
 
-    hist = client.get("/history/100005", headers=VIEWER).json()["reviews"]
+    hist = client.get("/history/100005", headers={**VIEWER, "X-User": "alice"}).json()["reviews"]
     assert len(hist) == 1
     assert hist[0]["reviewer"] == "alice"          # the human, not the model
     assert hist[0]["rule_version"] == "0.2.0-tcb"
@@ -192,7 +190,7 @@ def _stream_events(client, question, headers, **extra):
 
 def test_chat_stream_exposes_grounded_progress(client, synth_csv, db_file):
     scored_batch(client, synth_csv)
-    events = _stream_events(client, "why item 100007?", VIEWER)
+    events = _stream_events(client, "why item 100007?", {**VIEWER, "X-User": "alice"})
     kinds = [event["type"] for event in events]
 
     assert kinds[0] == "request"

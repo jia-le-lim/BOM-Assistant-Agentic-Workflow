@@ -13,7 +13,7 @@ emits no route at all.
 
 import json
 
-from conftest import ENG, VIEWER, make_row, rows_to_csv, upload
+from conftest import ENG, OWNER_VIEWER as VIEWER, make_row, rows_to_csv, upload
 
 from app.assist import chain, rules
 from app.llm.provider import Response

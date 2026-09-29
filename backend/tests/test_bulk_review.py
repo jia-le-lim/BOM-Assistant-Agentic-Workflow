@@ -6,7 +6,7 @@ consumable/agreement are populated; the workflow suite stays on the rule engine.
 
 import pandas as pd
 
-from conftest import ADMIN, ENG, make_row, rows_to_csv, upload
+from conftest import OWNER_ADMIN as ADMIN, ENG, make_row, rows_to_csv, upload
 
 WINS = (5, 30, 90, 180, 365, 547)
 

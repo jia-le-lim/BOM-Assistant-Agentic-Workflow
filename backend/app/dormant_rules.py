@@ -8,7 +8,7 @@ constant quantity regardless of consumption. The engine cannot learn that from
 demand data, because the whole point is that there is no demand signal.
 
 So the quantity is a rule an engineer owns, on the same terms as
-part_category_config: anyone with review rights may PROPOSE, a second person
+part_category_config: anyone with review rights may PROPOSE, the account owner
 with approval rights CONFIRMS, and the engine reads confirmed rows only.
 
 Rules take effect at SCORE time, not review time -- an edited rule changes the
@@ -44,31 +44,37 @@ DEFAULT_RULES: list[tuple[str, str, str, int | None]] = [
 ]
 
 
-def load_rules(conn) -> list[dict]:
+def load_rules(conn, owner: str) -> list[dict]:
     """Confirmed rules. The only DB-touching function here.
 
     `WHERE confirmed=1` is the safety property, not a nicety: an unconfirmed
     proposal must not move a stock level.
     """
+    from .account_settings import ensure_settings
+    ensure_settings(conn, owner)
     return [dict(r) for r in conn.execute(
         "SELECT rule_id, scope, match_key, policy, fixed_qty, updated_at "
-        "FROM dormant_rule_config WHERE confirmed=1")]
+        "FROM user_dormant_rule_config WHERE owner_user=? AND confirmed=1", (owner,))]
 
 
-def seed(conn) -> int:
-    """Insert DEFAULT_RULES unconfirmed if the table is empty; returns rows added.
-
-    Unconfirmed on purpose. Q2 makes this a stock-moving change, so even the
-    default has to be looked at by a human before it sizes anything.
-    """
-    if conn.execute("SELECT 1 FROM dormant_rule_config LIMIT 1").fetchone():
+def seed(conn, owner: str) -> int:
+    """Offer the pending default once per account; never undo a deletion."""
+    from .account_settings import ensure_settings
+    ensure_settings(conn, owner)
+    seeded = conn.execute(
+        "SELECT dormant_seeded FROM user_settings WHERE owner_user=?", (owner,)
+    ).fetchone()["dormant_seeded"]
+    if seeded:
         return 0
     for scope, key, policy, qty in DEFAULT_RULES:
         conn.execute(
-            "INSERT INTO dormant_rule_config (scope, match_key, policy, "
-            "fixed_qty, set_by, confirmed) VALUES (?,?,?,?,'seed',0)",
-            (scope, key, policy, qty))
-    return len(DEFAULT_RULES)
+            "INSERT INTO user_dormant_rule_config (owner_user, scope, match_key, policy, "
+            "fixed_qty, set_by, confirmed) SELECT ?,?,?,?,?,'seed',0 "
+            "WHERE NOT EXISTS (SELECT 1 FROM user_dormant_rule_config WHERE owner_user=?) "
+            "ON CONFLICT(owner_user, scope, match_key) DO NOTHING",
+            (owner, scope, key, policy, qty, owner))
+    conn.execute("UPDATE user_settings SET dormant_seeded=1 WHERE owner_user=?", (owner,))
+    return 1
 
 
 def resolve(rules, item_id, category) -> dict | None:

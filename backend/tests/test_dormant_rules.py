@@ -12,7 +12,7 @@ moved", not "something slightly different".
 
 import pandas as pd
 import pytest
-from conftest import ENG, SENIOR, VIEWER
+from conftest import ENG, OWNER_SENIOR as SENIOR, OWNER_VIEWER as VIEWER
 
 from app import dormant_rules as DR
 
@@ -144,7 +144,7 @@ BODY = {"scope": "category", "match_key": "filter",
         "policy": "fixed_qty", "fixed_qty": 2}
 
 
-def test_propose_is_pending_and_confirm_needs_a_second_person(client):
+def test_propose_is_pending_and_owner_needs_approval_rights(client):
     r = client.post("/config/dormant-rules", json=BODY, headers=ENG)
     assert r.status_code == 200, r.text
     rule_id = r.json()["rule_id"]
@@ -180,7 +180,7 @@ def test_load_rules_reads_confirmed_only(client, db_file):
     client.post("/config/dormant-rules", json=BODY, headers=ENG)
     conn = get_conn()
     try:
-        assert DR.load_rules(conn) == []
+        assert DR.load_rules(conn, "alice") == []
     finally:
         conn.close()
 
@@ -235,7 +235,7 @@ def dispatch(conn, batch_id, question, args, role="engineer", user="alice"):
 
 
 def rule_row(conn, scope="category", key="filter"):
-    r = conn.execute("SELECT * FROM dormant_rule_config WHERE scope=? AND "
+    r = conn.execute("SELECT * FROM user_dormant_rule_config WHERE owner_user='alice' AND scope=? AND "
                      "match_key=?", (scope, key)).fetchone()
     return dict(r) if r is not None else None
 
@@ -258,7 +258,7 @@ def test_chat_proposal_is_unconfirmed_and_sizes_nothing(client, synth_csv):
         assert row["confirmed"] == 0
         assert row["policy"] == "fixed_qty" and row["fixed_qty"] == 2
         assert row["set_by"] == "alice"
-        assert DR.load_rules(conn) == [], "an unconfirmed rule reached the engine"
+        assert DR.load_rules(conn, "alice") == [], "an unconfirmed rule reached the engine"
     finally:
         conn.close()
 
@@ -284,7 +284,7 @@ def test_chat_cannot_replace_a_confirmed_rule(client, synth_csv):
         row = rule_row(conn)
         assert row["confirmed"] == 1, "a refused call still un-confirmed the rule"
         assert row["fixed_qty"] == 2, "a refused call still changed the quantity"
-        assert len(DR.load_rules(conn)) == 1
+        assert len(DR.load_rules(conn, "alice")) == 1
     finally:
         conn.close()
 
@@ -307,7 +307,7 @@ def test_chat_replaces_a_confirmed_rule_only_when_told(client, synth_csv):
         conn.commit()
         row = rule_row(conn)
         assert row["confirmed"] == 0 and row["fixed_qty"] == 3
-        assert DR.load_rules(conn) == [], "the replacement went live unapproved"
+        assert DR.load_rules(conn, "alice") == [], "the replacement went live unapproved"
     finally:
         conn.close()
 
@@ -427,7 +427,7 @@ def test_viewer_cannot_propose_a_dormant_rule(client, synth_csv):
         out = dispatch(conn, batch_id, "keep all filter parts at 2",
                        {"scope": "category", "match_key": "filter",
                         "policy": "fixed_qty", "fixed_qty": 2},
-                       role="viewer", user="eve")
+                       role="viewer", user="alice")
         assert "review role" in out["error"]
         assert rule_row(conn) is None
     finally:

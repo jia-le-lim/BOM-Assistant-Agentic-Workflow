@@ -142,7 +142,7 @@ These tools prepare local editable drafts, never save, propose to the database,
 confirm, delete, or activate rules. Say 'Prepared ... for the form' after a
 successful fill; the browser checks that the page has not changed before applying
 it. Direct the user to Propose/Save on the page to submit. Dormant, criticality,
-and category proposals need a different senior to confirm, then a new engine run.
+and category proposals are private to the account and need the owner with approval rights to confirm, then a new engine run.
 Do not claim a save or activation occurred. If a tool rejects a draft, explain
 the error and ask for the missing input. Answer briefly from retrieved evidence.
 """ + PAGE_CONTEXT_RULES
@@ -309,7 +309,7 @@ quantity; ask for the exact one.
 - `hold_current` and `zero` take no quantity. Do not invent one.
 - A rule with no category or item applies to the whole dormant tail. You \
 cannot record that one — send them to Config > Dormant Rules.
-- A proposed rule activates NOTHING. Say so, say a different person with \
+- A proposed rule activates NOTHING. Say so, say the account owner with \
 approval rights has to confirm it, and say it takes effect on the next engine \
 run rather than on a batch already scored.
 - If a CONFIRMED rule already covers that scope, do not replace it on your own \

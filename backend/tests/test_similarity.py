@@ -143,7 +143,7 @@ def review_everything(client, batch_id, decision="accept"):
                 "justification": "Critical insurance spare"}
         r = client.post(f"/review/{item['item_id']}?batch_id={batch_id}"
                         f"&stockroom_id={item['stockroom_id']}",
-                        json=body, headers=SENIOR)
+                        json=body, headers={**SENIOR, "X-User": "alice"})
         if r.status_code == 200:
             done += 1
     return done
@@ -223,7 +223,7 @@ def test_analogue_range_is_null_below_min_neighbours(client, synth_csv, db_file)
                          headers=ENG).json()["items"][0]
     client.post(f"/review/{listing['item_id']}?batch_id={first}"
                 f"&stockroom_id={listing['stockroom_id']}",
-                json={"decision": "accept"}, headers=SENIOR)
+                json={"decision": "accept"}, headers={**SENIOR, "X-User": "alice"})
 
     second = scored_batch(client, synth_csv, label="FEB")
     client.post("/similarity/run", json={"batch_id": second}, headers=ENG)
@@ -301,7 +301,7 @@ def test_critical_analogue_never_zero(client, db_file):
                     f"&stockroom_id={item['stockroom_id']}",
                     json={"decision": "override", "final_max": 0,
                           "final_rop": 0, "final_min": 0,
-                          "justification": "zeroed"}, headers=SENIOR)
+                          "justification": "zeroed"}, headers={**SENIOR, "X-User": "alice"})
 
     second = scored_batch(client, csv_bytes, label="FEB")
     client.post("/similarity/run", json={"batch_id": second}, headers=ENG)
@@ -338,7 +338,7 @@ def test_run_requires_scored_batch(client, synth_csv):
 
 def test_unknown_batch_is_rejected(client):
     assert client.post("/similarity/run", json={"batch_id": 99999},
-                       headers=ENG).status_code == 400
+                       headers=ENG).status_code == 404
     assert client.get("/similarity/99999", headers=ENG).status_code == 404
 
 
@@ -385,7 +385,7 @@ def test_get_similar_parts_withholds_stockroom(client, synth_csv):
         # The advisory branch is not a WRITE_INTENT, so the router never
         # downgrades a read-only role out of it -- this is the only gate.
         viewer = T.ToolContext(conn=conn,
-                               actor={"user": "eve", "role": "viewer"},
+                               actor={"user": "alice", "role": "viewer"},
                                batch_id=second, question="similar parts")
         refused = json.loads(T.dispatch(viewer, "get_similar_parts",
                                         {"item_id": item["item_id"]}))
@@ -588,8 +588,8 @@ def test_unconfirmed_rule_does_not_affect_retrieval(client, db_file):
 
     conn = sq.connect(db_file)
     try:
-        conn.execute("UPDATE part_category_config SET confirmed=1, "
-                     "confirmed_by='boss' WHERE pattern=?", (r"\bZZZQQQ\b",))
+        conn.execute("UPDATE user_part_category_config SET confirmed=1, "
+                     "confirmed_by='alice' WHERE owner_user='alice' AND pattern=?", (r"\bZZZQQQ\b",))
         conn.commit()
     finally:
         conn.close()

@@ -392,7 +392,7 @@ def main() -> None:
         init_db()
         conn = get_conn()
         try:
-            bar = 100.0 * float(active_config(conn).get("triage_clear_precision_bar",
+            bar = 100.0 * float(active_config(conn, "s17-calibration").get("triage_clear_precision_bar",
                                                         TARGET_PRECISION / 100.0))
             print(f"building peer pool (precision bar {bar}%)\n")
             _, skipped = build_pool(conn, include_large)
