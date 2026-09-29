@@ -1,63 +1,46 @@
 "use client";
 
 /**
- * Pilot gateway identity plus the existing role selector.
+ * One workspace identity with Administrator access.
  *
- * The gateway supplies the authenticated username and overwrites X-User before
- * requests reach the backend. Roles remain selectable for pilot testing.
- * Direct localhost development retains demo identities; production SSO is separate.
+ * The server verifies the HttpOnly session and derives the authenticated username.
+ * The authenticated session also supplies the fixed admin role.
+ * Direct localhost development uses the pilot identity; production SSO is separate.
  */
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import type { Role } from "./types";
 
-export const ROLES: { role: Role; user: string; blurb: string }[] = [
-  { role: "engineer", user: "alice", blurb: "Review, accept, override, reject" },
-  { role: "senior", user: "boss", blurb: "Approve overrides & high-risk items" },
-  { role: "admin", user: "root", blurb: "Edit thresholds & confirm criticality" },
-  { role: "planner", user: "pat", blurb: "View cost detail, export" },
-  { role: "auditor", user: "aud", blurb: "Read-only history & audit" },
-  { role: "viewer", user: "eve", blurb: "Read-only" },
-];
+interface Session { user: string; role: Role; authenticated: boolean }
 
-interface Session { user: string; role: Role; authenticated: boolean; setIdentity: (u: string, r: Role) => void }
-
-const Ctx = createContext<Session>({ user: "alice", role: "engineer", authenticated: false, setIdentity: () => {} });
+const Ctx = createContext<Session>({ user: "pilot", role: "admin", authenticated: false });
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState("alice");
-  const [role, setRole] = useState<Role>("engineer");
-  const [pilotUser, setPilotUser] = useState<string | null>(null);
+  const [session, setSession] = useState<Session>({ user: "pilot", role: "admin", authenticated: false });
 
   useEffect(() => {
     const controller = new AbortController();
     const frame = window.requestAnimationFrame(() => {
-      const s = localStorage.getItem("bom-session");
-      if (s) {
-        try {
-          const p = JSON.parse(s);
-          if (p.user && p.role) { setUser(p.user); setRole(p.role); }
-        } catch { /* ignore malformed */ }
-      }
+      try {
+        // Discard role selections saved by older versions of the pilot.
+        localStorage.removeItem("bom-session");
+      } catch { /* Ignore malformed or unavailable browser storage. */ }
       void fetch("/api/pilot-session", { cache: "no-store", signal: controller.signal })
-        .then((response) => response.ok ? response.json() : null)
+        .then((response) => response.json())
         .then((session) => {
-          if (!controller.signal.aborted && typeof session?.user === "string" && session.user) {
-            setPilotUser(session.user);
-            setUser(session.user);
+          if (!controller.signal.aborted && session?.required && !session.user && window.location.pathname !== "/login") {
+            window.location.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+            return;
           }
-        }).catch(() => { /* Local development can use the demo identities. */ });
+          if (!controller.signal.aborted && typeof session?.user === "string" && session.user) {
+            setSession({ user: session.user, role: "admin", authenticated: Boolean(session.required) });
+          }
+        }).catch(() => { /* Protected APIs still require a valid server session. */ });
     });
     return () => { window.cancelAnimationFrame(frame); controller.abort(); };
   }, []);
 
-  const setIdentity = useCallback((u: string, r: Role) => {
-    const identity = pilotUser ?? u;
-    setUser(identity); setRole(r);
-    localStorage.setItem("bom-session", JSON.stringify({ user: identity, role: r }));
-  }, [pilotUser]);
-
-  return <Ctx.Provider value={{ user, role, authenticated: pilotUser !== null, setIdentity }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={session}>{children}</Ctx.Provider>;
 }
 
 export const useSession = () => useContext(Ctx);

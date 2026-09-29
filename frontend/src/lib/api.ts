@@ -7,13 +7,21 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+async function sessionFetch(input: string, init: RequestInit) {
+  const response = await fetch(input, init);
+  if (response.status === 401 && window.location.pathname !== "/login") {
+    window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+  }
+  return response;
+}
+
 /** All calls route through /api/backend/* (the BFF proxy). */
 export function useApi() {
   const { user, role } = useSession();
 
   const call = useCallback(
     async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
-      const res = await fetch(`/api/backend/${path.replace(/^\//, "")}`, {
+      const res = await sessionFetch(`/api/backend/${path.replace(/^\//, "")}`, {
         ...init,
         headers: { ...(init.headers ?? {}), "X-User": user, "X-Role": role },
       });
@@ -33,7 +41,7 @@ export function useApi() {
 
   const raw = useCallback(
     async (path: string) =>
-      fetch(`/api/backend/${path.replace(/^\//, "")}`, {
+      sessionFetch(`/api/backend/${path.replace(/^\//, "")}`, {
         headers: { "X-User": user, "X-Role": role },
       }),
     [user, role],
@@ -42,7 +50,7 @@ export function useApi() {
   const stream = useCallback(
     async <T,>(path: string, init: RequestInit,
                 onEvent: (event: T) => void | Promise<void>): Promise<void> => {
-      const res = await fetch(`/api/backend/${path.replace(/^\//, "")}`, {
+      const res = await sessionFetch(`/api/backend/${path.replace(/^\//, "")}`, {
         ...init,
         headers: { ...(init.headers ?? {}), "X-User": user, "X-Role": role },
       });

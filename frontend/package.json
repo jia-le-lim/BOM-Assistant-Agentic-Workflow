@@ -7,9 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:assistant": "node scripts/check_floating_assistant.mjs"
+    "check:assistant": "node scripts/check_floating_assistant.mjs",
+    "setup:auth": "node scripts/setup_pilot_auth.mjs",
+    "check:auth": "node --test scripts/pilot_auth.test.mjs && node scripts/check_login.mjs",
+    "check:sidebar": "node scripts/check_sidebar.mjs"
   },
   "dependencies": {
+    "bcryptjs": "3.0.3",
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4"
