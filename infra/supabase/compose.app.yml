@@ -1,0 +1,83 @@
+# Third layer, after the pinned Supabase compose and compose.override.yml.
+# Paths resolve relative to runtime/stack/docker-compose.yml.
+services:
+  backend:
+    image: bom-assistant/backend:local
+    build:
+      context: ../../app-source
+      dockerfile: backend/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: ../backend.docker.env
+        format: raw
+    environment:
+      SUPABASE_URL: http://api-gw:8000
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ""
+      DATABASE_URL: ""
+      MEM0_DATABASE_URL: ""
+      BOM_ALLOW_SQLITE: "0"
+    depends_on:
+      api-gw:
+        condition: service_healthy
+      rest:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8011:8011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  frontend:
+    image: bom-assistant/frontend:local
+    build:
+      context: ../../app-source/frontend
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    restart: unless-stopped
+    init: true
+    environment:
+      BACKEND_URL: http://backend:8011
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOSTNAME: 0.0.0.0
+      PORT: "3010"
+      PILOT_AUTH_REQUIRED: "1"
+      PILOT_AUTH_FILE: /run/bom-auth/accounts.json
+    volumes:
+      - type: bind
+        source: ../pilot/auth.json
+        target: /run/bom-auth/accounts.json
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3010:3010"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/pilot-session',{signal:AbortSignal.timeout(5000)}).then(r=>{if(r.status!==401)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

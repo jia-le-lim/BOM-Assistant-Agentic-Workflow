@@ -20,6 +20,7 @@ os.environ["BOM_ALLOW_SQLITE"] = "1"
 os.environ["DATABASE_URL"] = ""
 os.environ["LLM_BASE_URL"] = ""
 os.environ["MEM0_ENABLED"] = "0"
+os.environ["BOM_WORKSPACE_READ_ALL_USERS"] = ""
 # The REST transport is a SECOND route to the real project, and it needs no
 # DATABASE_URL: config.use_rest() switches on these alone, so clearing
 # DATABASE_URL is no longer enough to keep the suite offline.
@@ -35,6 +36,10 @@ ENG = {"X-User": "alice", "X-Role": "engineer"}
 SENIOR = {"X-User": "boss", "X-Role": "senior"}
 ADMIN = {"X-User": "root", "X-Role": "admin"}
 VIEWER = {"X-User": "eve", "X-Role": "viewer"}
+# Same owner, read-only capability; VIEWER above remains a different user.
+OWNER_VIEWER = {**ENG, "X-Role": "viewer"}
+OWNER_ADMIN = {**ENG, "X-Role": "admin"}
+OWNER_SENIOR = {**ENG, "X-Role": "senior"}
 AUDITOR = {"X-User": "aud", "X-Role": "auditor"}
 
 

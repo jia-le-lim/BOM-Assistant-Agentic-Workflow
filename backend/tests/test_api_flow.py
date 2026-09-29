@@ -3,7 +3,7 @@ import io
 import json
 import sqlite3
 
-from conftest import (ADMIN, AUDITOR, ENG, SENIOR, VIEWER, make_row,
+from conftest import (OWNER_ADMIN, OWNER_SENIOR, ADMIN, AUDITOR, ENG, SENIOR, OWNER_VIEWER as VIEWER, make_row,
                       rows_to_csv, upload)
 
 
@@ -72,7 +72,7 @@ def test_full_review_and_export_flow(client, synth_csv):
     assert client.post(f"/review/100005/approve?batch_id={b}",
                        headers=same_user_senior).status_code == 403
     assert client.post(f"/review/100005/approve?batch_id={b}",
-                       headers=SENIOR).status_code == 200
+                       headers=SENIOR).status_code == 404
 
     # r8: override (always needs senior); invalid ordering rejected first
     bad = client.post(f"/review/100008?batch_id={b}",
@@ -85,7 +85,7 @@ def test_full_review_and_export_flow(client, synth_csv):
                     headers=ENG).json()
     assert r["requires_senior_approval"] is True
     assert client.post(f"/review/100008/approve?batch_id={b}",
-                       headers=SENIOR).status_code == 200
+                       headers=SENIOR).status_code == 404
 
     # r2: accept -> engine says Maintain -> reviewed but nothing to export
     r = client.post(f"/review/100002?batch_id={b}",
@@ -96,21 +96,17 @@ def test_full_review_and_export_flow(client, synth_csv):
     e = client.get(f"/export/wings?batch_id={b}", headers=ENG)
     assert e.status_code == 200
     assert e.headers["X-Pending-Review"] == "1"          # r7
-    assert e.headers["X-Awaiting-Senior"] == "0"
-    rows = list(csv.DictReader(io.StringIO(e.text)))
-    assert e.headers["X-Rows-Exported"] == str(len(rows)) == "2"
-    by_item = {r["item_id"]: r for r in rows}
-    assert by_item["100005"]["current_max"] == "1"
-    assert int(by_item["100005"]["new_max"]) >= 3        # engine value, senior-approved
-    assert by_item["100008"]["current_max"] == "2"
-    assert by_item["100008"]["new_max"] == "3"           # engineer override value
-    assert by_item["100008"]["decision"] == "override"
+    # Strict ownership does not grant a second account access, and the owner
+    # still cannot self-approve. Both gated decisions remain unexportable.
+    assert e.headers["X-Awaiting-Senior"] == "2"
+    assert e.headers["X-Rows-Exported"] == "0"
+    assert list(csv.DictReader(io.StringIO(e.text))) == []
 
 
 def test_history_endpoint(client, synth_csv):
     b, _ = scored_batch(client, synth_csv)
     client.post(f"/review/100005?batch_id={b}", json={"decision": "accept"}, headers=ENG)
-    h = client.get("/history/100005", headers=AUDITOR).json()
+    h = client.get("/history/100005", headers={**AUDITOR, "X-User": "alice"}).json()
     assert len(h["reviews"]) == 1
     assert h["reviews"][0]["decision"] == "accept"
     assert h["reviews"][0]["rule_version"] == "0.2.0-tcb"
@@ -142,7 +138,10 @@ def test_chat_read_only_tools(client, synth_csv):
 
     top = client.post("/chat", json={"question": "top exposure items"},
                       headers=VIEWER).json()
-    assert "100005" in top["answer"]
+    # Accepting this high-risk item moves it to senior approval; top_exposure
+    # is specifically the pending engineer-review queue.
+    assert "100005" not in top["answer"]
+    assert "100002" in top["answer"]
 
     unknown = client.post("/chat", json={"question": "what is the meaning of life"},
                           headers=VIEWER).json()
@@ -160,15 +159,15 @@ def test_config_versioning(client, synth_csv, db_file):
     assert client.post("/config/rules",
                        json={"rule_version": "0.2.0-tcb",
                              "updates": {"long_lead_time_threshold": 45}},
-                       headers=ADMIN).status_code == 400      # version must change
+                       headers=OWNER_ADMIN).status_code == 400      # version must change
     assert client.post("/config/rules",
                        json={"rule_version": "0.2.1-test",
                              "updates": {"nonsense_key": 1}},
-                       headers=ADMIN).status_code == 400
+                       headers=OWNER_ADMIN).status_code == 400
     r = client.post("/config/rules",
                     json={"rule_version": "0.2.1-test",
                           "updates": {"long_lead_time_threshold": 45}},
-                    headers=ADMIN)
+                    headers=OWNER_ADMIN)
     assert r.status_code == 200
 
     # Re-scoring stamps the new version on results (determinism audit trail)
@@ -186,14 +185,14 @@ def test_autoclear_knobs_are_editable_config(client):
                     json={"rule_version": "ac-1",
                           "updates": {"autoclear_immaterial_usd": 150,
                                       "autoclear_reliable": True}},
-                    headers=ADMIN)
+                    headers=OWNER_ADMIN)
     assert r.status_code == 200, r.text
     cfg2 = client.get("/config/rules", headers=VIEWER).json()["config"]
     assert cfg2["autoclear_immaterial_usd"] == 150
     assert cfg2["autoclear_reliable"] is True
 
 
-def test_criticality_two_person_rule(client, synth_csv):
+def test_criticality_owner_confirmation(client, synth_csv):
     scored_batch(client, synth_csv)
     r = client.post("/config/criticality",
                     json={"pattern": "KnS TCX3", "criticality": "High",
@@ -206,9 +205,9 @@ def test_criticality_two_person_rule(client, synth_csv):
 
     same_user = {"X-User": "alice", "X-Role": "senior"}
     assert client.post("/config/criticality/KnS TCX3/confirm",
-                       headers=same_user).status_code == 403   # proposer == confirmer
+                       headers=same_user).status_code == 200   # personal settings
     assert client.post("/config/criticality/KnS TCX3/confirm",
-                       headers=SENIOR).status_code == 200
+                       headers=OWNER_SENIOR).status_code == 200
     cfg = client.get("/config/rules", headers=VIEWER).json()
     assert cfg["config"]["machine_criticality"]["KnS TCX3"] == "High"
 
@@ -281,16 +280,16 @@ def test_confirmed_criticality_is_not_frozen_into_the_stored_config(
                 json={"pattern": "ZZZ Test Machine", "criticality": "High",
                       "service_level_target": 0.98}, headers=ENG)
     assert client.post("/config/criticality/ZZZ Test Machine/confirm",
-                       headers=SENIOR).status_code == 200
+                       headers=OWNER_SENIOR).status_code == 200
 
     assert client.post("/config/rules",
                        json={"rule_version": "0.2.1-test",
                              "updates": {"long_lead_time_threshold": 45}},
-                       headers=ADMIN).status_code == 200
+                       headers=OWNER_ADMIN).status_code == 200
 
     conn = sqlite3.connect(db_file)
     stored = json.loads(conn.execute(
-        "SELECT config_json FROM rule_config WHERE active=1").fetchone()[0])
+        "SELECT config_json FROM user_rule_config WHERE owner_user='alice' AND active=1").fetchone()[0])
     conn.close()
     assert stored["long_lead_time_threshold"] == 45
     assert "ZZZ Test Machine" not in stored.get("machine_criticality", {})
@@ -321,3 +320,48 @@ def test_everything_is_audited(client, synth_csv, db_file):
     conn.close()
     assert {"batch", "review", "chat"} <= entities
     assert "alice" in users
+
+
+def test_queue_search_by_item_id(client, synth_csv):
+    b, _ = scored_batch(client, synth_csv)
+    hit = client.get(f"/recommendations?batch_id={b}&q=00005", headers=VIEWER).json()
+    assert {i["item_id"] for i in hit["items"]} == {"100005"}
+    assert hit["total"] == 1
+    # Search composes with the other filters rather than replacing them.
+    narrowed = client.get(f"/recommendations?batch_id={b}&q=00005&status=auto_cleared",
+                          headers=VIEWER).json()
+    assert narrowed["total"] == 0
+    # Case-insensitive, and blank means "no search" rather than "match nothing".
+    assert client.get(f"/recommendations?batch_id={b}&q=%20", headers=VIEWER).json()["total"] == 7
+    assert client.get(f"/recommendations?batch_id={b}&q=nosuchpart",
+                      headers=VIEWER).json()["total"] == 0
+
+
+def test_queue_rows_carry_the_display_fields(client, synth_csv):
+    """The queue shows description, category and the current Wings settings
+    beside the engine's proposal. None of them lives in recommendation_result,
+    so a dropped join would silently blank a column rather than error."""
+    b, _ = scored_batch(client, synth_csv)
+    items = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"]
+    assert items and all(
+        {"item_desc", "part_category", "current_max", "current_rop",
+         "bench_max", "bench_rop"} <= set(i) for i in items)
+    assert any(i["item_desc"] for i in items)
+    # part_category is written by the similarity run, so it is "" until then --
+    # blank, never missing.
+    assert all(i["part_category"] == "" for i in items)
+
+
+def test_queue_shows_the_part_category_once_peers_are_built(client):
+    """part_category is written by the similarity run -- which now rides on the
+    assist button -- so the column fills in only after peers exist."""
+    csv_text = rows_to_csv([make_row(item_id="700001", item_desc="FLOW SENSOR ARM",
+                                     max_qty="12", rop_qty="4")])
+    b = upload(client, csv_text).json()["batch_id"]
+    client.post(f"/run-recommendation?batch_id={b}", headers=ENG)
+    before = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"][0]
+    assert before["part_category"] == ""
+    assert (before["current_max"], before["current_rop"]) == (12, 4)
+    client.post("/similarity/run", headers=ENG, json={"batch_id": b})
+    after = client.get(f"/recommendations?batch_id={b}", headers=VIEWER).json()["items"][0]
+    assert after["part_category"] == "sensor"

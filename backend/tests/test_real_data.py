@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ENG, VIEWER
+from conftest import ENG, OWNER_VIEWER as VIEWER
 
 REAL_CSV = Path(__file__).resolve().parents[2] / "BOM table" / "BOM REVIEW_Jan'26 .csv"
 

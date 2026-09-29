@@ -31,6 +31,8 @@ FORBIDDEN = {
     "factory_recommended_new_min", "justification", "comments",
     "review_acknowledge", "rop_adoption", "max_adoption", "ooq_adoption",
     "modified_user", "modified_date",
+    # Benchmark carried in by engine_adapter._attach_prior_benchmark.
+    "prior_final_max", "prior_final_rop", "prior_final_min", "prior_c365",
 }
 
 

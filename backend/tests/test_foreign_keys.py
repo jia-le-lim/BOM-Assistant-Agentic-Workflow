@@ -4,7 +4,8 @@ The delete behaviour is picked per relation, not uniformly, and each choice
 encodes a rule about this system:
 
   CASCADE   bom_rows, recommendation_result, model_prediction_log,
-            triage_result -- derived data, reproducible by re-running.
+            triage_result, similarity_*, assist_result -- derived data,
+            reproducible by re-running.
   RESTRICT  review_history, pending_change -- the audit trail. Deleting a batch
             that carries decisions must fail loudly rather than shed them.
   SET NULL  conversation_turn.batch_id, item_note.origin_* -- provenance only.
@@ -177,6 +178,12 @@ def test_fk_supporting_indexes_are_declared():
                   ("recommendation_result",
                    ("batch_id", "item_id", "stockroom_id")),
                   ("triage_result",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("similarity_result",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("similarity_neighbour",
+                   ("batch_id", "item_id", "stockroom_id")),
+                  ("assist_result",
                    ("batch_id", "item_id", "stockroom_id"))}
     flat = FK_INDEX_DDL.replace("\n", " ")
     for _name, child, cols, parent, _pcols, _action in FOREIGN_KEYS:

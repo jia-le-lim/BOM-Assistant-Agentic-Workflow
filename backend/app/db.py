@@ -46,6 +46,10 @@ from .config import (ENGINE_DIR, database_url, db_path, is_postgres,
 # already on the Supabase project, so the migration is a no-op against it.
 # tests/test_foreign_keys.py asserts this list and the two DDL blocks agree.
 FOREIGN_KEYS = [
+    ("engineer_reminder_origin_fk", "engineer_reminder", ("origin_batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
+    ("engineer_reminder_match_fk", "engineer_reminder", ("matched_batch_id",),
+     "batches", ("batch_id",), "SET NULL"),
     ("bom_rows_batch_fk", "bom_rows", ("batch_id",),
      "batches", ("batch_id",), "CASCADE"),
     ("recommendation_result_batch_fk", "recommendation_result", ("batch_id",),
@@ -75,6 +79,18 @@ FOREIGN_KEYS = [
      ("batch_id", "item_id", "stockroom_id"),
      "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
      "CASCADE"),
+    ("similarity_result_recommendation_fk", "similarity_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
+    ("similarity_neighbour_result_fk", "similarity_neighbour",
+     ("batch_id", "item_id", "stockroom_id"),
+     "similarity_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
+    ("assist_result_recommendation_fk", "assist_result",
+     ("batch_id", "item_id", "stockroom_id"),
+     "recommendation_result", ("batch_id", "item_id", "stockroom_id"),
+     "CASCADE"),
 ]
 
 # Postgres does not index the referencing side of a foreign key, so every
@@ -84,6 +100,9 @@ FOREIGN_KEYS = [
 # (bom_rows, recommendation_result composite) no extra index is needed.
 # Identical on SQLite so the two dialects stay comparable.
 FK_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS ix_reminder_origin ON engineer_reminder(origin_batch_id);
+CREATE INDEX IF NOT EXISTS ix_reminder_match ON engineer_reminder(matched_batch_id);
+
 CREATE INDEX IF NOT EXISTS ix_bom_rows_batch ON bom_rows(batch_id);
 CREATE INDEX IF NOT EXISTS ix_recommendation_result_batch
   ON recommendation_result(batch_id);
@@ -127,6 +146,27 @@ CREATE TABLE IF NOT EXISTS batches (
   scored_at TEXT
 );
 
+
+CREATE TABLE IF NOT EXISTS engineer_reminder (
+  reminder_id TEXT PRIMARY KEY,
+  owner_user TEXT NOT NULL,
+  title TEXT NOT NULL,
+  item_id TEXT NOT NULL DEFAULT '',
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  timing TEXT NOT NULL DEFAULT 'next_cycle' CHECK (timing IN ('next_cycle', 'date')),
+  due_date TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'dismissed')),
+  origin_batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
+  matched_batch_id INTEGER REFERENCES batches(batch_id) ON DELETE SET NULL,
+  image_mime TEXT,
+  image_data TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_reminder_owner_status
+  ON engineer_reminder(owner_user, status, item_id, stockroom_id);
+
 CREATE TABLE IF NOT EXISTS bom_rows (
   batch_id INTEGER NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
@@ -148,6 +188,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd REAL,
   model_version TEXT, rule_version TEXT,
   route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
+  agreement_source TEXT DEFAULT '',
   scored_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -174,6 +215,62 @@ CREATE TABLE IF NOT EXISTS review_history (
     ON DELETE RESTRICT
 );
 
+
+-- Account-owned copies; legacy settings above are a frozen migration baseline.
+CREATE TABLE IF NOT EXISTS user_settings (
+  owner_user TEXT PRIMARY KEY,
+  dormant_seeded INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_rule_config (
+  owner_user TEXT NOT NULL,
+  config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_version TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  active INTEGER DEFAULT 0,
+  updated_by TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_machine_criticality_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  criticality TEXT NOT NULL,
+  service_level_target REAL,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_part_category_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_dormant_rule_config (
+  owner_user TEXT NOT NULL,
+  rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (owner_user, scope, match_key)
+);
+CREATE INDEX IF NOT EXISTS ix_user_rule_config_active
+  ON user_rule_config(owner_user, active, config_id);
+
 CREATE TABLE IF NOT EXISTS rule_config (
   config_id INTEGER PRIMARY KEY AUTOINCREMENT,
   rule_version TEXT NOT NULL,
@@ -191,6 +288,66 @@ CREATE TABLE IF NOT EXISTS machine_criticality_config (
   confirmed_by TEXT,
   confirmed INTEGER DEFAULT 0,
   updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- What KIND of part this is, matched against item_desc. Engineer-owned on the
+-- same terms as machine_criticality_config: anyone with review rights may
+-- PROPOSE a rule, only an approver confirms, and similarity reads confirmed
+-- rows only. Lower priority wins, so specific rules sit above generic ones.
+CREATE TABLE IF NOT EXISTS part_category_config (
+  pattern TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- How much stock a DORMANT part keeps. Engineer-owned on the same terms as
+-- part_category_config: review rights may PROPOSE, an approver CONFIRMS, and
+-- the engine reads confirmed rows only. Lower priority wins; item beats
+-- category beats default. Seeded from what engineers actually decided -- the
+-- engine's own zero is wrong on 1,344 of 8,343 dormant rows in the TCB history.
+CREATE TABLE IF NOT EXISTS dormant_rule_config (
+  rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (scope, match_key)
+);
+
+-- Advisory review assistance for the active/dying rows. The verdict is decided
+-- by assist/rules.py, not by a model: same evidence in, same verdict out, so it
+-- can be replayed and backtested. `narrative` is the only generated field and
+-- explains a decision that was already made. Never an input to sizing.
+CREATE TABLE IF NOT EXISTS assist_result (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  verdict TEXT NOT NULL CHECK (
+    verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  narrative TEXT,
+  -- The number to put in front of the reviewer. Written by assist/rules.suggest
+  -- (deterministic), never by the model, and never applied without a decision.
+  suggested_max INTEGER,
+  suggested_rop INTEGER,
+  suggestion_basis TEXT NOT NULL DEFAULT '',
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  model_version TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  assisted_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -289,11 +446,71 @@ CREATE TABLE IF NOT EXISTS triage_result (
     ON DELETE CASCADE
 );
 
+-- Advisory peer evidence. Never an input to sizing, never exported.
+-- The engine calculates; these are historical analogues for the engineer.
+CREATE TABLE IF NOT EXISTS similarity_result (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  similarity_model_version TEXT NOT NULL,
+  neighbour_count INTEGER NOT NULL DEFAULT 0,
+  pool_size INTEGER NOT NULL DEFAULT 0,
+  nearest_distance REAL,
+  outlier_score REAL NOT NULL DEFAULT 1,
+  is_outlier INTEGER NOT NULL DEFAULT 1,
+  historical_override_rate REAL,
+  historical_upward_override_rate REAL,
+  historical_high_risk_rate REAL,
+  analogue_max_median INTEGER,
+  analogue_max_p25 INTEGER,
+  analogue_max_p75 INTEGER,
+  analogue_rop_median INTEGER,
+  analogue_min_median INTEGER,
+  part_category TEXT NOT NULL DEFAULT '',
+  advisory_codes TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0,
+  generated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
+-- One row per retrieved peer. similarity_reasons is business language only --
+-- it must never embed a supplier or machine_type VALUE (redact.py masks by key
+-- name, so a value inside a free-text column would bypass LLM_REDACT_PROMPTS).
+CREATE TABLE IF NOT EXISTS similarity_neighbour (
+  batch_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_rank INTEGER NOT NULL,
+  neighbour_item_id TEXT NOT NULL,
+  neighbour_stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_batch_id INTEGER NOT NULL,
+  distance REAL NOT NULL,
+  similarity_reasons TEXT NOT NULL DEFAULT '',
+  neighbour_decision TEXT,
+  neighbour_final_max INTEGER,
+  neighbour_final_rop INTEGER,
+  neighbour_final_min INTEGER,
+  neighbour_engine_max INTEGER,
+  neighbour_risk_level TEXT,
+  neighbour_reason_code TEXT,
+  neighbour_justification TEXT,
+  neighbour_comment TEXT,
+  PRIMARY KEY (batch_id, item_id, stockroom_id, neighbour_rank),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES similarity_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
 CREATE INDEX IF NOT EXISTS ix_triage_result_tier
   ON triage_result(batch_id, triage_tier, priority_score);
+CREATE INDEX IF NOT EXISTS ix_similarity_result_outlier
+  ON similarity_result(batch_id, is_outlier, outlier_score);
 """ + FK_INDEX_DDL
 
 # Postgres equivalent. Differences are confined to: IDENTITY vs AUTOINCREMENT,
@@ -318,6 +535,32 @@ CREATE TABLE IF NOT EXISTS batches (
   scored_at TEXT
 );
 
+
+CREATE TABLE IF NOT EXISTS engineer_reminder (
+  reminder_id TEXT PRIMARY KEY,
+  owner_user TEXT NOT NULL,
+  title TEXT NOT NULL,
+  item_id TEXT NOT NULL DEFAULT '',
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  timing TEXT NOT NULL DEFAULT 'next_cycle' CHECK (timing IN ('next_cycle', 'date')),
+  due_date TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'dismissed')),
+  origin_batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
+  matched_batch_id BIGINT REFERENCES batches(batch_id) ON DELETE SET NULL,
+  image_mime TEXT,
+  image_data TEXT,
+  created_at TEXT DEFAULT {PG_NOW},
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+CREATE INDEX IF NOT EXISTS ix_reminder_owner_status
+  ON engineer_reminder(owner_user, status, item_id, stockroom_id);
+
+-- The pilot uses a trusted server identity, not browser Supabase JWT identities.
+-- Only the backend service may access this table; every route also checks owner_user.
+ALTER TABLE engineer_reminder ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON engineer_reminder FROM PUBLIC;
+
 CREATE TABLE IF NOT EXISTS bom_rows (
   batch_id BIGINT NOT NULL REFERENCES batches(batch_id) ON DELETE CASCADE,
   item_id TEXT NOT NULL,
@@ -339,6 +582,7 @@ CREATE TABLE IF NOT EXISTS recommendation_result (
   exposure_usd DOUBLE PRECISION,
   model_version TEXT, rule_version TEXT,
   route TEXT DEFAULT '', consumable TEXT DEFAULT '', agreement TEXT DEFAULT '',
+  agreement_source TEXT DEFAULT '',
   scored_at TEXT DEFAULT {PG_NOW},
   PRIMARY KEY (batch_id, item_id, stockroom_id),
   FOREIGN KEY (batch_id, item_id, stockroom_id)
@@ -365,6 +609,67 @@ CREATE TABLE IF NOT EXISTS review_history (
     ON DELETE RESTRICT
 );
 
+
+-- Account-owned copies; legacy settings above are a frozen migration baseline.
+CREATE TABLE IF NOT EXISTS user_settings (
+  owner_user TEXT PRIMARY KEY,
+  dormant_seeded INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_rule_config (
+  owner_user TEXT NOT NULL,
+  config_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  rule_version TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  active INTEGER DEFAULT 0,
+  updated_by TEXT,
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+
+CREATE TABLE IF NOT EXISTS user_machine_criticality_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  criticality TEXT NOT NULL,
+  service_level_target DOUBLE PRECISION,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_part_category_config (
+  owner_user TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (owner_user, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS user_dormant_rule_config (
+  owner_user TEXT NOT NULL,
+  rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  UNIQUE (owner_user, scope, match_key)
+);
+CREATE INDEX IF NOT EXISTS ix_user_rule_config_active
+  ON user_rule_config(owner_user, active, config_id);
+ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_rule_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_machine_criticality_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_part_category_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_dormant_rule_config ENABLE ROW LEVEL SECURITY;
+
 CREATE TABLE IF NOT EXISTS rule_config (
   config_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   rule_version TEXT NOT NULL,
@@ -382,6 +687,66 @@ CREATE TABLE IF NOT EXISTS machine_criticality_config (
   confirmed_by TEXT,
   confirmed INTEGER DEFAULT 0,
   updated_at TEXT DEFAULT {PG_NOW}
+);
+
+-- What KIND of part this is, matched against item_desc. Engineer-owned on the
+-- same terms as machine_criticality_config: anyone with review rights may
+-- PROPOSE a rule, only an approver confirms, and similarity reads confirmed
+-- rows only. Lower priority wins, so specific rules sit above generic ones.
+CREATE TABLE IF NOT EXISTS part_category_config (
+  pattern TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 500,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW}
+);
+
+-- How much stock a DORMANT part keeps. Engineer-owned on the same terms as
+-- part_category_config: review rights may PROPOSE, an approver CONFIRMS, and
+-- the engine reads confirmed rows only. Lower priority wins; item beats
+-- category beats default. Seeded from what engineers actually decided -- the
+-- engine's own zero is wrong on 1,344 of 8,343 dormant rows in the TCB history.
+CREATE TABLE IF NOT EXISTS dormant_rule_config (
+  rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope TEXT NOT NULL,                  -- 'item' | 'category' | 'default'
+  match_key TEXT NOT NULL DEFAULT '',   -- item_id, category name, or ''
+  policy TEXT NOT NULL,                 -- 'hold_current' | 'fixed_qty' | 'zero'
+  fixed_qty INTEGER,
+  set_by TEXT,
+  confirmed_by TEXT,
+  confirmed INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT {PG_NOW},
+  UNIQUE (scope, match_key)
+);
+
+-- Advisory review assistance for the active/dying rows. The verdict is decided
+-- by assist/rules.py, not by a model: same evidence in, same verdict out, so it
+-- can be replayed and backtested. `narrative` is the only generated field and
+-- explains a decision that was already made. Never an input to sizing.
+CREATE TABLE IF NOT EXISTS assist_result (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  verdict TEXT NOT NULL CHECK (
+    verdict IN ('flag_for_review', 'bulk_accept_candidate', 'needs_context')),
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  narrative TEXT,
+  -- The number to put in front of the reviewer. Written by assist/rules.suggest
+  -- (deterministic), never by the model, and never applied without a decision.
+  suggested_max INTEGER,
+  suggested_rop INTEGER,
+  suggestion_basis TEXT NOT NULL DEFAULT '',
+  evidence_json TEXT NOT NULL DEFAULT '{{}}',
+  model_version TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  assisted_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -468,11 +833,71 @@ CREATE TABLE IF NOT EXISTS triage_result (
     ON DELETE CASCADE
 );
 
+-- Advisory peer evidence. Never an input to sizing, never exported.
+-- The engine calculates; these are historical analogues for the engineer.
+CREATE TABLE IF NOT EXISTS similarity_result (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  similarity_model_version TEXT NOT NULL,
+  neighbour_count INTEGER NOT NULL DEFAULT 0,
+  pool_size INTEGER NOT NULL DEFAULT 0,
+  nearest_distance DOUBLE PRECISION,
+  outlier_score DOUBLE PRECISION NOT NULL DEFAULT 1,
+  is_outlier INTEGER NOT NULL DEFAULT 1,
+  historical_override_rate DOUBLE PRECISION,
+  historical_upward_override_rate DOUBLE PRECISION,
+  historical_high_risk_rate DOUBLE PRECISION,
+  analogue_max_median INTEGER,
+  analogue_max_p25 INTEGER,
+  analogue_max_p75 INTEGER,
+  analogue_rop_median INTEGER,
+  analogue_min_median INTEGER,
+  part_category TEXT NOT NULL DEFAULT '',
+  advisory_codes TEXT NOT NULL DEFAULT '',
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+  generated_at TEXT DEFAULT {PG_NOW},
+  PRIMARY KEY (batch_id, item_id, stockroom_id),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES recommendation_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
+-- One row per retrieved peer. similarity_reasons is business language only --
+-- it must never embed a supplier or machine_type VALUE (redact.py masks by key
+-- name, so a value inside a free-text column would bypass LLM_REDACT_PROMPTS).
+CREATE TABLE IF NOT EXISTS similarity_neighbour (
+  batch_id BIGINT NOT NULL,
+  item_id TEXT NOT NULL,
+  stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_rank INTEGER NOT NULL,
+  neighbour_item_id TEXT NOT NULL,
+  neighbour_stockroom_id TEXT NOT NULL DEFAULT '',
+  neighbour_batch_id BIGINT NOT NULL,
+  distance DOUBLE PRECISION NOT NULL,
+  similarity_reasons TEXT NOT NULL DEFAULT '',
+  neighbour_decision TEXT,
+  neighbour_final_max INTEGER,
+  neighbour_final_rop INTEGER,
+  neighbour_final_min INTEGER,
+  neighbour_engine_max INTEGER,
+  neighbour_risk_level TEXT,
+  neighbour_reason_code TEXT,
+  neighbour_justification TEXT,
+  neighbour_comment TEXT,
+  PRIMARY KEY (batch_id, item_id, stockroom_id, neighbour_rank),
+  FOREIGN KEY (batch_id, item_id, stockroom_id)
+    REFERENCES similarity_result(batch_id, item_id, stockroom_id)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS ix_item_note_item ON item_note(item_id, active);
 CREATE INDEX IF NOT EXISTS ix_pending_change_status ON pending_change(status, item_id);
 CREATE INDEX IF NOT EXISTS ix_conversation_turn_ts ON conversation_turn(ts);
 CREATE INDEX IF NOT EXISTS ix_triage_result_tier
   ON triage_result(batch_id, triage_tier, priority_score);
+CREATE INDEX IF NOT EXISTS ix_similarity_result_outlier
+  ON similarity_result(batch_id, is_outlier, outlier_score);
 """ + FK_INDEX_DDL + PG_ONLY_INDEX_DDL
 
 # Tables whose PK is a generated identity -- needed to translate lastrowid.
@@ -480,11 +905,14 @@ IDENTITY_PK = {
     "batches": "batch_id",
     "review_history": "review_id",
     "rule_config": "config_id",
+    "user_rule_config": "config_id",
+    "user_dormant_rule_config": "rule_id",
     "audit_log": "id",
     "pending_change": "pending_id",
     "conversation_turn": "turn_id",
     "item_note": "note_id",
     "model_prediction_log": "prediction_id",
+    "dormant_rule_config": "rule_id",
 }
 
 # `user` is a reserved word in Postgres: bare `user` parses as CURRENT_USER, so
@@ -684,13 +1112,21 @@ def _ensure_columns(conn) -> None:
     that predates route/consumable/agreement or Phase-2 procurement would 500
     on the next request. New columns are nullable/default-empty.
     """
-    wanted = ("route", "consumable", "agreement")
+    wanted = ("route", "consumable", "agreement", "agreement_source")
     if is_postgres() or use_rest():
         for col in wanted:
             conn.execute("ALTER TABLE recommendation_result "
                          f"ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
         conn.execute("ALTER TABLE triage_result ADD COLUMN IF NOT EXISTS "
                      "procurement_narrative TEXT")
+        # similarity_result already exists on the live project, so CREATE TABLE
+        # IF NOT EXISTS will never add this one.
+        conn.execute("ALTER TABLE similarity_result ADD COLUMN IF NOT EXISTS "
+                     "part_category TEXT DEFAULT ''")
+        for col, decl in (("suggested_max", "INTEGER"), ("suggested_rop", "INTEGER"),
+                          ("suggestion_basis", "TEXT DEFAULT ''")):
+            conn.execute("ALTER TABLE assist_result "
+                         f"ADD COLUMN IF NOT EXISTS {col} {decl}")
         return
     existing = {r["name"] for r in conn.execute(
         "PRAGMA table_info(recommendation_result)")}
@@ -702,6 +1138,17 @@ def _ensure_columns(conn) -> None:
         "PRAGMA table_info(triage_result)")}
     if "procurement_narrative" not in triage_cols:
         conn.execute("ALTER TABLE triage_result ADD COLUMN procurement_narrative TEXT")
+    sim_cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(similarity_result)")}
+    if "part_category" not in sim_cols:
+        conn.execute("ALTER TABLE similarity_result "
+                     "ADD COLUMN part_category TEXT DEFAULT ''")
+    assist_cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(assist_result)")}
+    for col, decl in (("suggested_max", "INTEGER"), ("suggested_rop", "INTEGER"),
+                      ("suggestion_basis", "TEXT DEFAULT ''")):
+        if col not in assist_cols:
+            conn.execute(f"ALTER TABLE assist_result ADD COLUMN {col} {decl}")
 
 
 def init_db() -> None:
@@ -721,6 +1168,14 @@ def init_db() -> None:
         else:
             conn._raw.executescript(ddl)
         _ensure_columns(conn)
+        # Old advisory caches used a shared history pool. Drop only these
+        # recomputable results so their narratives/peer quantities cannot leak
+        # another owner's data after the ownership boundary is enabled.
+        from .similarity import MODEL_VERSION as similarity_version
+        from .assist.rules import MODEL_VERSION as assist_version
+        conn.execute("DELETE FROM similarity_result WHERE similarity_model_version<>?",
+                     (similarity_version,))
+        conn.execute("DELETE FROM assist_result WHERE model_version<>?", (assist_version,))
         # Seed rule_config from the analysed engine config on first run.
         n = conn.execute("SELECT COUNT(*) c FROM rule_config").fetchone()["c"]
         if n == 0:
@@ -730,12 +1185,29 @@ def init_db() -> None:
                 "VALUES (?,?,1,?)",
                 (cfg["rule_version"], json.dumps(cfg), "seed"),
             )
+        # Seed the part-category lexicon, confirmed. An empty criticality table
+        # means "fall back to the source column", which is a safe default; an
+        # empty lexicon means the similarity constraint silently does nothing,
+        # which is worse than a default an engineer can correct. rule_config is
+        # seeded active=1 for the same reason.
+        n = conn.execute(
+            "SELECT COUNT(*) c FROM part_category_config").fetchone()["c"]
+        if n == 0:
+            from .part_category import DEFAULT_RULES
+            # Every value is a placeholder, including the constants: the REST
+            # transport rebuilds the VALUES clause from the row width, so a
+            # literal written inline is silently dropped (rest_conn.executemany).
+            conn.executemany(
+                "INSERT INTO part_category_config (pattern, category, priority, "
+                "set_by, confirmed, confirmed_by) VALUES (?,?,?,?,?,?)",
+                [(pat, cat, pri, "seed", 1, "seed")
+                 for pri, cat, pat in DEFAULT_RULES])
         conn.commit()
     finally:
         conn.close()
 
 
-def stored_config(conn: Conn) -> dict:
+def stored_config(conn: Conn, owner: str) -> dict:
     """The active rule config exactly as persisted -- no criticality merge.
 
     Anything that WRITES a config back must start here. active_config() returns
@@ -743,21 +1215,25 @@ def stored_config(conn: Conn) -> dict:
     that view would bake a snapshot of a mutable table into the immutable
     rule_version stamp, and later criticality edits would then be ignored.
     """
+    from .account_settings import ensure_settings
+    ensure_settings(conn, owner)
     row = conn.execute(
-        "SELECT config_json FROM rule_config WHERE active=1 ORDER BY config_id DESC LIMIT 1"
+        "SELECT config_json FROM user_rule_config WHERE owner_user=? AND active=1 "
+        "ORDER BY config_id DESC LIMIT 1", (owner,)
     ).fetchone()
     return json.loads(row["config_json"])
 
 
-def active_config(conn: Conn) -> dict:
-    cfg = stored_config(conn)
+def active_config(conn: Conn, owner: str) -> dict:
+    cfg = stored_config(conn, owner)
     # Merge engineer-confirmed criticality (PRD 5.3). Only confirmed rows count:
     # an agent/LLM may WRITE a proposal, a human must confirm before the engine
     # reads it.
     crit = {
         r["pattern"]: r["criticality"]
         for r in conn.execute(
-            "SELECT pattern, criticality FROM machine_criticality_config WHERE confirmed=1"
+            "SELECT pattern, criticality FROM user_machine_criticality_config "
+            "WHERE owner_user=? AND confirmed=1", (owner,)
         )
     }
     if crit:

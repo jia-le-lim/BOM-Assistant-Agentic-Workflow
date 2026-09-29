@@ -1,0 +1,15 @@
+.composer-image, .assistant-composer > .composer-image {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  width: 100%; min-width: 0; padding: 8px; margin: 0 0 7px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--hover);
+}
+.composer-image-thumb { flex: 0 0 56px; width: 56px; height: 48px; border-radius: 6px; overflow: hidden; background: var(--page); }
+.composer-image-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.composer-image-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.composer-image-copy strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; font-weight: 550; }
+.composer-image-copy span { font-size: 10px; line-height: 1.4; color: var(--text-secondary); }
+.composer-image-remove { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 6px; color: var(--text-secondary); cursor: pointer; }
+.composer-image-remove:hover:not(:disabled) { background: var(--hover); color: var(--text-primary); }
+.composer-image-remove:disabled { opacity: .4; cursor: not-allowed; }
+.composer-image-error { color: var(--critical); font-size: 11px; line-height: 1.4; padding: 4px 0; }
+.composer-image-hint { font-size: 10px; color: var(--text-muted); margin-top: 4px; }

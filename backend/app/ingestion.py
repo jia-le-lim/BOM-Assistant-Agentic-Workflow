@@ -29,6 +29,10 @@ class IngestionError(ValueError):
     pass
 
 
+class IngestionConflict(IngestionError):
+    pass
+
+
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index, dtype="float64")
@@ -98,7 +102,8 @@ def quarantine_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def ingest(conn: Conn, content: bytes, label: str, filename: str,
-           module_filter: str | None, user: str, match_mode: str = "exact") -> dict:
+           module_filter: str | None, user: str, match_mode: str = "exact",
+           batch_id: int | None = None) -> dict:
     df = _read_table(content, filename)
 
     df = normalize(df)
@@ -128,12 +133,16 @@ def ingest(conn: Conn, content: bytes, label: str, filename: str,
     reason = quarantine_mask(df)
     n_quar = int((reason != "").sum())
 
-    batch_id = conn.insert_returning(
-        "INSERT INTO batches (label, source_filename, uploaded_by, module_filter, "
-        "row_count, quarantined_count) VALUES (?,?,?,?,?,?)",
-        (label, filename, user, module_filter or "ALL", len(df), n_quar),
-        "batches",
-    )
+    if batch_id is None:
+        batch_id = conn.insert_returning(
+            "INSERT INTO batches (label, source_filename, uploaded_by, module_filter, "
+            "row_count, quarantined_count) VALUES (?,?,?,?,?,?)",
+            (label, filename, user, module_filter or "ALL", len(df), n_quar),
+            "batches",
+        )
+        workspace_upload = False
+    else:
+        workspace_upload = True
 
     rows = []
     seen = set()
@@ -149,9 +158,33 @@ def ingest(conn: Conn, content: bytes, label: str, filename: str,
         rows.append((batch_id, item, stk, rec.get("module", ""),
                      1 if reason.iloc[i] else 0, reason.iloc[i] or None,
                      json.dumps(rec)))
-    conn.executemany(
-        "INSERT INTO bom_rows (batch_id, item_id, stockroom_id, module, quarantined, "
-        "quarantine_reason, payload) VALUES (?,?,?,?,?,?,?)", rows)
+    if workspace_upload:
+        update = (
+            "UPDATE batches SET source_filename=?, uploaded_at=datetime('now'), "
+            "row_count=?, quarantined_count=?, status='loaded' WHERE batch_id=? "
+            "AND uploaded_by=? AND status='draft' RETURNING batch_id")
+        params = (filename, len(df), n_quar, batch_id, user)
+        if conn.is_postgres:
+            # A single statement keeps the claim and all rows atomic even over
+            # PostgREST, where commit/rollback cannot span HTTP calls.
+            records = [dict(zip(("item_id", "stockroom_id", "module", "quarantined",
+                                 "quarantine_reason", "payload"), row[1:])) for row in rows]
+            claimed = conn.execute(
+                f"WITH claimed AS ({update}), inserted AS ("
+                "INSERT INTO bom_rows (batch_id, item_id, stockroom_id, module, quarantined, quarantine_reason, payload) "
+                "SELECT claimed.batch_id, r.item_id, r.stockroom_id, r.module, r.quarantined, r.quarantine_reason, r.payload "
+                "FROM claimed CROSS JOIN jsonb_to_recordset(CAST(? AS jsonb)) AS r("
+                "item_id text, stockroom_id text, module text, quarantined integer, quarantine_reason text, payload text) "
+                "RETURNING batch_id) SELECT batch_id FROM claimed",
+                (*params, json.dumps(records))).fetchone()
+        else:
+            claimed = conn.execute(update, params).fetchone()
+        if claimed is None:
+            raise IngestionConflict("This workspace already has an upload. Refresh to see its current status.")
+    if not workspace_upload or not conn.is_postgres:
+        conn.executemany(
+            "INSERT INTO bom_rows (batch_id, item_id, stockroom_id, module, quarantined, "
+            "quarantine_reason, payload) VALUES (?,?,?,?,?,?,?)", rows)
     conn.commit()
 
     return {

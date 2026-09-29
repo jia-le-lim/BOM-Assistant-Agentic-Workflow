@@ -18,6 +18,8 @@ import json
 import re
 
 from .provider import Message, Response, ToolCall, ToolSpec
+from .echo_workspace import browser_context, workspace_calls
+from .echo_retrieval import retrieval_call
 
 ITEM_RE = re.compile(r"\b(\d{6,})\b")
 QTY_RE = re.compile(
@@ -50,6 +52,58 @@ SUMMARY_RE = re.compile(r"\b(?:summary|summarise|summarize)\b", re.IGNORECASE)
 RULES_RE = re.compile(r"\b(?:threshold|thresholds|rule|rules|config)\b",
                       re.IGNORECASE)
 
+# -- the graph's branches (agent/graph.py) ---------------------------------
+# One regex per intent, plus the words that pick a tool inside it. Same
+# contract as the ladder below: this is a stub the routing test measures
+# against a hand-written table, not a model reading the classify prompt.
+ASSIST_RE = re.compile(
+    r"\b(?:assist|verdict|verdicts|flagged|bulk[- ]accept|"
+    r"bulk_accept_candidate|flag_for_review|needs[ _]context)\b", re.IGNORECASE)
+ADVISORY_RE = re.compile(
+    r"\b(?:similar|comparable|peer|peers|analogue|analogues|unusual|outlier|"
+    r"outliers|dormant|coverage)\b", re.IGNORECASE)
+REVIEW_ACTION_RE = re.compile(
+    r"\b(?:confirm|discard|cancel)\b.*\bpending\b|\bpending\s*#?\s*\d+\b",
+    re.IGNORECASE)
+PENDING_ID_RE = re.compile(r"(?:pending|#)\s*#?\s*(\d+)", re.IGNORECASE)
+RUN_RE = re.compile(r"\b(?:run|start|kick off|execute)\b", re.IGNORECASE)
+DORMANT_RE = re.compile(r"\bdormant\b", re.IGNORECASE)
+OUTLIER_RE = re.compile(r"\b(?:outlier|outliers|unusual)\b", re.IGNORECASE)
+VERDICT_NAME_RE = re.compile(
+    r"\b(flag_for_review|bulk_accept_candidate|needs_context)\b", re.IGNORECASE)
+
+# Dormant STOCKING RULES, which are a propose question, not the advisory
+# coverage read DORMANT_RE above serves. KEEP_RE is what separates the two:
+# "how much do the dormant rules cover" asks, "keep dormant parts at 2" tells.
+DORMANT_RULE_RE = re.compile(
+    r"\b(?:dormant|no consumption|not moving|non[- ]moving)\b", re.IGNORECASE)
+KEEP_RE = re.compile(r"\b(?:keep|hold|stock|maintain)\b", re.IGNORECASE)
+CATEGORY_AT_RE = re.compile(
+    r"\ball\s+(?:the\s+)?([a-z][a-z0-9_-]{2,30})\s+(?:parts?|items?)\b",
+    re.IGNORECASE)
+HOLD_CURRENT_RE = re.compile(
+    r"\b(?:hold|keep)\b[^.]{0,30}\b(?:current|where it is|as is|today)\b",
+    re.IGNORECASE)
+ZERO_POLICY_RE = re.compile(r"\b(?:zero|nothing|no stock|don'?t stock)\b",
+                            re.IGNORECASE)
+# "keep them AT 2" is how a rule quantity is actually said, and QTY_RE has no
+# `at` form -- it wants "max N", "to N" or "by N". Kept separate rather than
+# widened there, because QTY_RE is what propose_change routes on and every
+# staging case in test_chat_routing is tuned against its current shape.
+RULE_QTY_RE = re.compile(r"\b(?:at|of)\s+(\d+)\b", re.IGNORECASE)
+
+# Every tool `_route` below can emit. `_classify` uses it to tell a question it
+# can actually answer from one it cannot -- the branch names come from the
+# graph, but which questions are routable is this stub's own knowledge.
+ROUTABLE_TOOLS = frozenset({
+    "search_items", "clarify_request",
+    "get_procurement_context", "get_similar_parts", "search_similar_reviews",
+    "propose_change", "get_recommendation", "get_triage_context",
+    "get_item_history", "get_item_notes", "get_current_values", "top_exposure",
+    "explain_rules", "list_review_queue", "recall_context", "batch_summary",
+    "get_assist_verdict", "list_assist_queue", "run_assist",
+    "get_similarity_outliers", "get_dormant_coverage", "stage_review_action"})
+
 
 class EchoProvider:
     name = "echo"
@@ -61,6 +115,26 @@ class EchoProvider:
         last_user = next((m.content for m in reversed(messages)
                           if m.role == "user"), "")
         tool_results = [m for m in messages if m.role == "tool"]
+        page = browser_context(messages)
+
+        # Ahead of the tool_results short-circuit on purpose: the classify node
+        # runs on every turn, including the second turn of a conversation whose
+        # first turn left tool messages in the history.
+        if messages and messages[0].content.startswith(
+                "Classify the engineer's"):
+            intent = self._classify(last_user)
+            if page:
+                if page.get("path") in {"/config", "/config/dormant"}:
+                    intent = "configure"
+                elif ("this page" in last_user.lower() or "where am i" in last_user.lower()
+                      or "looking at" in last_user.lower()
+                      or re.search(r"\b(?:open|go to|take me to|navigate to)\b", last_user, re.I)):
+                    intent = "lookup"
+                elif page.get("item_id"):
+                    intent = self._classify(last_user + " item " + page["item_id"])
+                    if "why" in last_user.lower() and "assist" not in last_user.lower(): intent = "lookup"
+            return Response(content=intent,
+                            model=self.model, provider=self.name)
 
         if messages and "triage synthesis specialist" in messages[0].content:
             return Response(content=self._triage_verdict(last_user),
@@ -69,6 +143,13 @@ class EchoProvider:
         if tool_results:
             return Response(content=self._summarise(tool_results),
                             model=self.model, provider=self.name)
+
+        if page:
+            calls = workspace_calls(last_user, page, available)
+            if calls:
+                return Response(tool_calls=calls, model=self.model, provider=self.name)
+            if page.get("item_id") and not ITEM_RE.search(last_user):
+                last_user += " item " + page["item_id"]
 
         item = ITEM_RE.search(last_user)
         if (item and "history" in last_user.lower() and "note" in last_user.lower()
@@ -87,6 +168,42 @@ class EchoProvider:
         return Response(tool_calls=[call], model=self.model,
                         provider=self.name)
 
+    # -- branch classification (agent/graph.py) ----------------------------
+
+    def _classify(self, q: str) -> str:
+        """Name one graph branch. Narrowest signal first, same as `_route`.
+
+        `unknown` is returned only when the ladder below could not route the
+        question at all -- a branch name is cheap, and a wrong `unknown` costs
+        the engineer an answer they could have had.
+        """
+        item = ITEM_RE.search(q)
+
+        if REVIEW_ACTION_RE.search(q):
+            return "action"
+        # Ahead of ADVISORY_RE, which also owns the word "dormant": a coverage
+        # QUESTION belongs to advisory, an INSTRUCTION to propose, and KEEP_RE
+        # is the difference. Ahead of the item+WRITE_RE propose branch too --
+        # "keep all filter parts at 2" names a category, not an item id.
+        if ((DORMANT_RULE_RE.search(q) or CATEGORY_AT_RE.search(q))
+                and KEEP_RE.search(q)):
+            return "propose"
+        # Before assist/advisory: "set the max on 100005 to 3" carries no branch
+        # keyword. No quantity is required here on purpose -- "bump 100005 a
+        # bit" is a propose question the engineer has asked badly, and the
+        # propose branch is the one whose prompt tells the model to ask for the
+        # exact value. Staging it still needs a number; propose_change enforces
+        # that, and this stub's ladder will not emit a call without one.
+        if item and WRITE_RE.search(q):
+            return "propose"
+        if ASSIST_RE.search(q):
+            return "assist"
+        if ADVISORY_RE.search(q):
+            return "advisory"
+        if self._route(q, set(ROUTABLE_TOOLS)) is not None:
+            return "lookup"
+        return "unknown"
+
     # -- intent routing ----------------------------------------------------
 
     def _route(self, q: str, available: set[str]) -> ToolCall | None:
@@ -101,6 +218,11 @@ class EchoProvider:
         """
         ql = q.lower()
         item = ITEM_RE.search(q)
+        # Specific item reads and mutations keep their existing precedence.
+        if not item and not KEEP_RE.search(q) and not REVIEW_ACTION_RE.search(q):
+            discovery = retrieval_call(q, available)
+            if discovery is not None:
+                return discovery
 
         if (item and "get_procurement_context" in available
                 and any(w in ql for w in
@@ -108,6 +230,97 @@ class EchoProvider:
                          "order multiple", "ownership"))):
             return ToolCall("c1", "get_procurement_context",
                             {"item_id": item.group(1)})
+
+        # -- the graph's non-lookup branches --------------------------------
+        # All ahead of the generic branches below, because their trigger words
+        # collide with them: "confirm" carries an item id, "show the flagged
+        # items" is a LIST_RE phrase, "dormant rule coverage" is a RULES_RE one,
+        # and "which items are outliers" is both.
+        if "stage_review_action" in available and REVIEW_ACTION_RE.search(q):
+            pending = PENDING_ID_RE.search(q)
+            # "cancel" is a discard. Defaulting it to confirm_pending would show
+            # an engineer who asked to cancel a card whose primary button
+            # records the override.
+            drop = any(w in ql for w in ("discard", "cancel", "throw away",
+                                         "drop it"))
+            args: dict = {
+                "kind": "discard_pending" if drop else "confirm_pending",
+                "item_id": item.group(1) if item else "",
+            }
+            if pending:
+                args["pending_id"] = int(pending.group(1))
+            if args["item_id"]:
+                return ToolCall("c1", "stage_review_action", args)
+
+        if ASSIST_RE.search(q):
+            if "run_assist" in available and RUN_RE.search(q):
+                # No `confirm`: the gate must fire on the first ask, so the
+                # engineer sees the row count before anything is spent.
+                return ToolCall("c1", "run_assist", {})
+            if item and "get_assist_verdict" in available:
+                return ToolCall("c1", "get_assist_verdict",
+                                {"item_id": item.group(1)})
+            if "list_assist_queue" in available:
+                verdict = VERDICT_NAME_RE.search(q)
+                args = {"verdict": verdict.group(1).lower()} if verdict else {}
+                if not verdict and "flag" in ql:
+                    args = {"verdict": "flag_for_review"}
+                return ToolCall("c1", "list_assist_queue", args)
+
+        # Ahead of get_dormant_coverage, which fires on the bare word "dormant".
+        # A rule is only emitted when the policy is unambiguous: a scope with no
+        # readable policy falls through to the coverage read rather than
+        # guessing at a quantity.
+        #
+        # The dormant signal is REQUIRED, not just KEEP_RE. KEEP_RE matches
+        # "stock", so on its own "set the stock max for 100005 at 5" -- an
+        # ordinary propose_change on the scored batch -- came out as a standing
+        # rule that would size that part on every future run. This mirrors what
+        # `_classify` already requires one level up.
+        if ("propose_dormant_rule" in available and KEEP_RE.search(q)
+                and (DORMANT_RULE_RE.search(q) or CATEGORY_AT_RE.search(q))):
+            cat = CATEGORY_AT_RE.search(q)
+            rule_args: dict = {}
+            if item:
+                rule_args = {"scope": "item", "match_key": item.group(1)}
+            elif cat:
+                rule_args = {"scope": "category",
+                             "match_key": cat.group(1).lower()}
+            if rule_args:
+                qty = RULE_QTY_RE.search(q) or QTY_RE.search(q)
+                if HOLD_CURRENT_RE.search(q):
+                    rule_args["policy"] = "hold_current"
+                elif ZERO_POLICY_RE.search(q):
+                    rule_args["policy"] = "zero"
+                elif qty:
+                    value = int(next(g for g in qty.groups() if g))
+                    # Same guard as propose_change: QTY_RE's "max <digits>"
+                    # alternative can span words and capture the item id itself.
+                    if not item or str(value) != item.group(1):
+                        rule_args["policy"] = "fixed_qty"
+                        rule_args["fixed_qty"] = value
+                if "policy" in rule_args:
+                    return ToolCall("c1", "propose_dormant_rule", rule_args)
+
+        if "get_dormant_coverage" in available and DORMANT_RE.search(q):
+            return ToolCall("c1", "get_dormant_coverage", {})
+
+        if (not item and "get_similarity_outliers" in available
+                and OUTLIER_RE.search(q)):
+            return ToolCall("c1", "get_similarity_outliers", {})
+
+        # Before the write branch on purpose: "similar parts for 500005" carries
+        # an item id, and WRITE_RE would otherwise claim anything with a verb.
+        if (item and "get_similar_parts" in available
+                and any(w in ql for w in ("similar", "comparable", "peer",
+                                          "unusual", "analogue"))):
+            return ToolCall("c1", "get_similar_parts",
+                            {"item_id": item.group(1)})
+
+        if ("search_similar_reviews" in available
+                and any(w in ql for w in ("what did we say", "past comment",
+                                          "previously discussed"))):
+            return ToolCall("c1", "search_similar_reviews", {"query": q[:200]})
 
         if item and WRITE_RE.search(q):
             qty = QTY_RE.search(q)
@@ -202,6 +415,21 @@ class EchoProvider:
         if isinstance(data, dict) and data.get("error"):
             return str(data["error"])
 
+        if tool == "get_page_context":
+            page = data["page"]
+            detail = page.get("selected_text") or page.get("visible_text", "")[:700]
+            focused = page.get("focused_field")
+            if focused: detail = f"Focused field: {focused['label']}; draft value: {focused['value']}. " + detail
+            return f"You are on {page['title']} ({page['path']}), viewing {page.get('active_section') or page['title']}. {detail}"
+        if tool == "get_settings":
+            return "Saved settings retrieved. To fill a draft offline, paste a table with item_id, policy, quantity; machine_type, criticality; or use setting_name=value. State the policy and every fixed quantity explicitly."
+        if tool == "fill_settings_form":
+            draft = data["draft"]
+            count = len(draft["rows"]) or len(draft["updates"])
+            return f"Prepared {count} entries for {draft['section']}. Review the editable draft on the page, then use Propose or Save. Nothing has been saved yet."
+        if tool == "navigate_to_page":
+            return f"Requested opening {data['path']}."
+
         if tool == "get_recommendation":
             return (f"Item {data['item_id']}: {data['explanation']} "
                     f"(action: {data['action']}, review required: "
@@ -249,6 +477,10 @@ class EchoProvider:
                      f"{r['risk_level']})" for r in rows]
             return "Top review items by exposure: " + "; ".join(lines)
 
+        if tool in {"search_items", "list_review_queue"} and "total_count" in data:
+            from ..agent.responses import render_items
+            return render_items(data)
+
         if tool == "list_review_queue":
             rows = data.get("items", [])
             # exposure_usd is nullable in recommendation_result, and "$None"
@@ -274,6 +506,64 @@ class EchoProvider:
             cfg = data.get("config", {})
             shown = ", ".join(f"{k}={v}" for k, v in list(cfg.items())[:8])
             return f"Active rule set {data.get('rule_version')}: {shown}"
+
+        if tool == "get_assist_verdict":
+            reasons = ", ".join(data.get("reasons") or []) or "no reasons recorded"
+            narrative = data.get("narrative") or ""
+            return (f"Assist says {data['verdict']} for item "
+                    f"{data['item_id']} ({reasons}). {narrative} "
+                    f"Advisory only: nothing has been decided.")
+
+        if tool == "list_assist_queue":
+            rows = data.get("items", [])
+            counts = data.get("counts", {})
+            lines = [f"{r['item_id']} {r['verdict']}" for r in rows]
+            return (f"Assist queue for batch {data.get('batch_id')} "
+                    f"({counts}): " + "; ".join(lines)
+                    + " These are advisory verdicts, not decisions.")
+
+        if tool == "get_similarity_outliers":
+            rows = data.get("items", [])
+            lines = [f"{r['item_id']} (score {r['outlier_score']}, "
+                     f"{r['neighbour_count']} peers)" for r in rows]
+            return (f"Peer outliers in batch {data.get('batch_id')}: "
+                    + "; ".join(lines)
+                    + " Advisory evidence; no level follows from it.")
+
+        if tool == "propose_dormant_rule":
+            qty = data.get("fixed_qty")
+            return (f"Recorded a proposed dormant rule for {data.get('scope')} "
+                    f"'{data.get('match_key')}': {data.get('policy')}"
+                    f"{'' if qty is None else f' of {qty}'}. It is not active — "
+                    f"someone with approval rights must confirm it, and it "
+                    f"applies from the next engine run.")
+
+        if tool == "get_dormant_coverage":
+            return (f"Dormant coverage for batch {data.get('batch_id')}: "
+                    f"{data.get('matched')} of {data.get('dormant_rows')} rows "
+                    f"({data.get('pct')}%) matched by {data.get('confirmed_rules')} "
+                    f"confirmed rule(s). Book value "
+                    f"${data.get('proposed_book_usd', 0):,.0f} against the "
+                    f"engine's ${data.get('engine_book_usd', 0):,.0f} "
+                    f"(delta ${data.get('delta_usd', 0):,.0f}).")
+
+        if tool == "run_assist":
+            if data.get("gated"):
+                return (f"Assisting batch {data['batch_id']} covers "
+                        f"{data['live_rows']} live rows and spends about "
+                        f"{data['estimated_model_calls']} model calls. Nothing "
+                        f"has run. Say so explicitly if you want it to.")
+            return (f"Assisted {data.get('rows_assisted')} live rows in batch "
+                    f"{data.get('batch_id')}: {data.get('counts')}. Every "
+                    f"verdict is advisory; no row has been decided.")
+
+        if tool == "stage_review_action":
+            action = data.get("staged_action", {})
+            return (f"Staged a {action.get('kind')} card for item "
+                    f"{action.get('item_id')} (pending "
+                    f"{action.get('pending_id')}). Nothing has been recorded — "
+                    f"press confirm to record it, and an override still needs "
+                    f"senior approval.")
 
         if tool == "batch_summary":
             return (f"Batch {data.get('batch_id')}: {data.get('scored')} scored, "

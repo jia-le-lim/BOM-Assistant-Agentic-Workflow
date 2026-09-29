@@ -7,7 +7,8 @@ asserted by reading the produced file back, not by trusting the writer.
 
 import io
 
-from conftest import ADMIN, ENG, SENIOR, VIEWER, upload
+from conftest import ADMIN, ENG, VIEWER, upload
+from app.db import get_conn
 from openpyxl import load_workbook
 
 
@@ -42,14 +43,26 @@ def get_xlsx(client, batch_id, headers=ENG):
     return r
 
 
+def seed_historical_approval(batch_id):
+    """Existing approvals remain exportable after workspaces become private."""
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE review_history SET senior_approved_by=?, "
+                     "senior_approved_at=datetime('now') WHERE batch_id=?",
+                     ("historical-approver", batch_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_approved_values_land_in_their_columns(client, synth_csv, db_file):
     b = scored_batch(client, synth_csv)
-    # 100005 is the high-risk row: override, then a senior approves it.
+    # 100005 is high risk; simulate an approval recorded before isolation.
     client.post(f"/review/100005?batch_id={b}",
                 json={"decision": "override", "final_max": 7, "final_rop": 4,
                       "final_min": 2, "justification": "Constraint tool"},
                 headers=ENG)
-    client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
+    seed_historical_approval(b)
 
     r = get_xlsx(client, b)
     _header, rows, status = sheets(r.content)
@@ -170,7 +183,7 @@ def test_reviewer_text_cannot_become_a_live_formula(client, synth_csv, db_file):
                       "justification": '=HYPERLINK("http://x","click")',
                       "comment": "-1+1"},
                 headers=ENG)
-    client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
+    seed_historical_approval(b)
 
     _header, rows, _status = sheets(get_xlsx(client, b).content)
     row = rows[("100005", "24")]
@@ -185,7 +198,7 @@ def test_export_is_role_gated(client, synth_csv, db_file):
     assert client.get(f"/export/wings.xlsx?batch_id={b}",
                       headers=VIEWER).status_code == 403
     assert client.get(f"/export/wings.xlsx?batch_id={b}",
-                      headers=ADMIN).status_code == 200
+                      headers={**ADMIN, "X-User": "alice"}).status_code == 200
 
 
 def test_unknown_and_unscored_batches_are_refused(client, synth_csv, db_file):

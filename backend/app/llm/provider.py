@@ -26,7 +26,7 @@ class Message:
 class ToolCall:
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, Any] | None
 
 
 @dataclass

@@ -1,16 +1,17 @@
-"""Live E2E smoke test against a running uvicorn instance (port 8011).
+"""Live E2E smoke test against a running uvicorn instance (development port 8012).
 
 Drives the full PRD workflow over HTTP with the real Jan'26 file:
 upload -> score -> triage queue -> review -> senior approval -> export -> chat.
 """
 
+import os
 import sys
 import time
 from pathlib import Path
 
 import httpx
 
-BASE = "http://127.0.0.1:8011"
+BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8012")
 CSV = Path(__file__).resolve().parents[2] / "BOM table" / "BOM REVIEW_Jan'26 .csv"
 ENG = {"X-User": "alice", "X-Role": "engineer"}
 SENIOR = {"X-User": "boss", "X-Role": "senior"}

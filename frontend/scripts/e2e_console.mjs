@@ -1,5 +1,5 @@
 /**
- * E2E through the FRONTEND's own BFF proxy (port 3010), not the backend directly.
+ * E2E through the FRONTEND's own BFF proxy (development port 3011), not the backend directly.
  * Proves the browser-facing contract: proxy forwarding, identity headers, RBAC
  * enforcement, the workflow states the console renders, and the export gate.
  */
@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-const BASE = "http://127.0.0.1:3010/api/backend";
+const BASE = `${(process.env.BASE_URL ?? "http://127.0.0.1:3011").replace(/\/$/, "")}/api/backend`;
 const CSV = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../BOM table/BOM REVIEW_Jan'26 .csv",
@@ -42,7 +42,7 @@ async function waitUp() {
   return false;
 }
 
-console.log("=== E2E via Next.js BFF proxy (port 3010) ===\n");
+console.log(`=== E2E via Next.js BFF proxy (${BASE}) ===\n`);
 
 if (!(await waitUp())) { console.log("Servers never came up"); process.exit(1); }
 const health = await json("health", { headers: VIEWER });

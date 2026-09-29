@@ -18,6 +18,7 @@ export interface AgentTrace {
   model?: string;
   batchId?: number | null;
   fallback?: boolean;
+  responseStatus?: string;
   steps: AgentTraceStep[];
 }
 

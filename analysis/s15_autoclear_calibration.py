@@ -27,21 +27,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common import OUT
+from common import LEVELS, OUT, TARGET_PRECISION, agree
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend" / "app"))
 import engine_statistical  # noqa: E402
 
 from s13_cumulative_sizing import LATEST, load_snapshot  # noqa: E402
-
-TARGET_PRECISION = 98.0
-LEVELS = ("max", "rop", "min")
-
-
-def _agree(eng: np.ndarray, fac: np.ndarray, tol_abs=1.0, tol_rel=0.10) -> np.ndarray:
-    return np.abs(eng - fac) <= np.maximum(tol_abs, tol_rel * np.abs(fac))
-
 
 def evaluate(items: pd.DataFrame, cfg: dict) -> dict:
     res = engine_statistical.run(items, cfg).rename(columns={
@@ -58,12 +50,12 @@ def evaluate(items: pd.DataFrame, cfg: dict) -> dict:
                               errors="coerce").to_numpy(float) for lvl in LEVELS}
     eng = {lvl: res[f"eng_{lvl}"].to_numpy(float) for lvl in LEVELS}
     labelled = np.all([~np.isnan(fac[lvl]) for lvl in LEVELS], axis=0)
-    agree = np.all([_agree(eng[lvl], fac[lvl]) for lvl in LEVELS], axis=0)
+    correct = np.all([agree(eng[lvl], fac[lvl]) for lvl in LEVELS], axis=0)
 
     cl_lab = cleared & labelled
     n_cl_lab = int(cl_lab.sum())
-    precision = 100.0 * float((cl_lab & agree).sum()) / n_cl_lab if n_cl_lab else np.nan
-    escaped = float(exposure[cl_lab & ~agree].sum())
+    precision = 100.0 * float((cl_lab & correct).sum()) / n_cl_lab if n_cl_lab else np.nan
+    escaped = float(exposure[cl_lab & ~correct].sum())
     return {
         "cleared_%": round(100.0 * cleared.mean(), 1),
         "cleared_n": int(cleared.sum()),

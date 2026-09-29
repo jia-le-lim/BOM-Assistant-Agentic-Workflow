@@ -1,8 +1,11 @@
 """Pydantic request/response models."""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from .page_context import PageContext
 
 
 class ReviewRequest(BaseModel):
@@ -30,14 +33,56 @@ class ConfigUpdateRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2000)
+    question: str = Field(min_length=1, max_length=20000)
     batch_id: int | None = None
     session_id: str | None = None
+    page_context: PageContext | None = None
+
+    @model_validator(mode="after")
+    def nonblank_question(self):
+        if not self.question.strip():
+            raise ValueError("question must not be blank")
+        return self
+
+
+class StagedAction(BaseModel):
+    """What the chat agent staged for a human to press.
+
+    Nothing here has been recorded. Confirming it is a click that calls the
+    same endpoint the console tray calls (routers/review.py confirm_pending),
+    under the engineer's own role -- which is why the agent staging one still
+    cannot reach `review_history`.
+
+    `executed` is a constant False by design. If it ever needs to be True, that
+    belongs to the review router, not to a chat payload.
+    """
+    kind: Literal["confirm_pending", "discard_pending"]
+    item_id: str
+    batch_id: int | None = None
+    stockroom_id: str | None = None
+    pending_id: int | None = None
+    proposed_max: int | None = None
+    proposed_rop: int | None = None
+    proposed_min: int | None = None
+    executed: bool = False
 
 
 class TriageRunRequest(BaseModel):
+    """Triage one item, or the whole batch when item_id is omitted.
+
+    Per item is the console path: triage is the only step that spends model
+    calls, so it is paid for when an engineer opens a row, not up front for
+    thousands of rows nobody reads.
+    """
     batch_id: int = Field(ge=1)
     llm_call_budget: int = Field(default=2000, ge=3, le=2000)
+    refresh: bool = False
+    item_id: str | None = None
+    stockroom_id: str | None = None
+
+
+class SimilarityRunRequest(BaseModel):
+    batch_id: int = Field(ge=1)
     refresh: bool = False
 
 
@@ -62,6 +107,55 @@ class CriticalityRequest(BaseModel):
     service_level_target: float | None = Field(default=None, ge=0.5, le=1.0)
 
 
+class PartCategoryRequest(BaseModel):
+    """One lexicon rule: a regex over item_desc, and the category it implies.
+
+    Lower priority wins, so a specific rule (sensor) must sit above a generic
+    one (holder) -- "SENSOR BRACKET ASSY" is a sensor.
+    """
+    pattern: str = Field(min_length=2, max_length=200,
+                         description="regex matched against item_desc, case-insensitive")
+    category: str = Field(min_length=2, max_length=40)
+    priority: int = Field(default=500, ge=1, le=9999)
+
+    @model_validator(mode="after")
+    def pattern_must_compile(self):
+        # Rejected here rather than discovered mid-batch. load_rules() also
+        # skips a broken pattern at read time, for rows that predate this check.
+        try:
+            re.compile(self.pattern)
+        except re.error as e:
+            raise ValueError(f"pattern is not a valid regular expression: {e}")
+        return self
+
+
+class DormantRuleRequest(BaseModel):
+    """One dormant stocking rule: who it applies to, and what quantity it keeps.
+
+    Scope alone decides which rule wins: item beats category beats default, and
+    (scope, match_key) is unique, so at most one rule matches at each tier. No
+    priority number to keep straight and nothing to renumber.
+    """
+    scope: Literal["item", "category", "default"]
+    match_key: str = Field(default="", max_length=64,
+                           description="item_id, category name, or '' for default")
+    policy: Literal["hold_current", "fixed_qty", "zero"]
+    fixed_qty: int | None = Field(default=None, ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def coherent(self):
+        # A fixed_qty rule with no quantity would size to 0 -- the exact silent
+        # zero this whole layer exists to stop. Rejected at the API, not
+        # discovered mid-batch.
+        if self.policy == "fixed_qty" and self.fixed_qty is None:
+            raise ValueError("policy 'fixed_qty' requires fixed_qty")
+        if self.scope == "default" and self.match_key:
+            raise ValueError("the default rule takes no match_key")
+        if self.scope != "default" and not self.match_key:
+            raise ValueError(f"scope '{self.scope}' requires a match_key")
+        return self
+
+
 class BulkReviewItem(BaseModel):
     item_id: str
     stockroom_id: str | None = None
@@ -81,9 +175,9 @@ class BulkReviewFilters(BaseModel):
     reason_code: str | None = None
     min_exposure: float | None = Field(default=None, ge=0)
     min_confidence: float | None = Field(default=None, ge=0, le=1)
-    triage_tier: Literal["clear_candidate", "review", "escalate"] | None = None
-    min_triage_confidence: float | None = Field(default=None, ge=0, le=1)
-    triage_preselect: bool = False
+    assist_verdict: Literal["flag_for_review", "bulk_accept_candidate",
+                            "needs_context"] | None = None
+    assist_preselect: bool = False
     exclude_high_risk: bool = True
 
 

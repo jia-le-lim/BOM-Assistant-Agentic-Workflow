@@ -7,6 +7,12 @@ explicit tests rather than being implied by the happy path.
   4. no retrieved source -> "I don't know"
   5. read-only roles are never even offered the write tool
   6. mem0 stays off and uninvoked by default
+  7. an action card is staged, never executed
+
+Property 7 arrived with the intent router (agent/graph.py), which let chat reach
+the review queue. It is asserted next to the rest of the router's behaviour, in
+test_chat_graph.py::test_action_card_records_nothing -- it needs the graph's
+fixtures, and splitting it from the branch tests would hide what it guards.
 """
 
 import json
@@ -77,12 +83,10 @@ def test_staged_change_is_invisible_to_export_until_confirmed(
     assert "100005" not in body
     assert int(hdrs["X-Awaiting-Senior"]) >= 1
 
-    client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
+    # Another account cannot approve a private workspace.
+    assert client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR).status_code == 404
     body, _ = export_csv(client, b)
-    assert "100005" in body
-    line = next(ln for ln in body.splitlines() if ln.startswith("100005"))
-    # item,stockroom,cur_max,cur_rop,cur_min,new_max,...
-    assert line.split(",")[5] == "3", line
+    assert "100005" not in body
 
 
 def test_confirm_is_recorded_as_a_normal_review(client, synth_csv, db_file):
@@ -95,7 +99,7 @@ def test_confirm_is_recorded_as_a_normal_review(client, synth_csv, db_file):
                 json={"pending_id": pid, "final_max": 3, "final_rop": 2,
                       "final_min": 1}, headers=ENG)
 
-    hist = client.get("/history/100005", headers=VIEWER).json()["reviews"]
+    hist = client.get("/history/100005", headers={**VIEWER, "X-User": "alice"}).json()["reviews"]
     assert len(hist) == 1
     assert hist[0]["reviewer"] == "alice"          # the human, not the model
     assert hist[0]["rule_version"] == "0.2.0-tcb"
@@ -186,7 +190,7 @@ def _stream_events(client, question, headers, **extra):
 
 def test_chat_stream_exposes_grounded_progress(client, synth_csv, db_file):
     scored_batch(client, synth_csv)
-    events = _stream_events(client, "why item 100007?", VIEWER)
+    events = _stream_events(client, "why item 100007?", {**VIEWER, "X-User": "alice"})
     kinds = [event["type"] for event in events]
 
     assert kinds[0] == "request"
@@ -284,24 +288,40 @@ def test_viewer_is_not_offered_the_write_tool(client, synth_csv, db_file):
 
 
 def test_tool_specs_exclude_writes_when_disallowed():
+    """Every non-read tool is withheld from a read-only role, not just the first
+    one that existed.
+
+    This used to assert the withheld set was exactly {"propose_change"}, which
+    was true when that was the only writer and quietly wrong afterwards --
+    `specs()` filtered that one name, so `run_assist`, `stage_review_action` and
+    `propose_dormant_rule` each counted as read-only as they were added.
+    Asserting against WRITE_TOOLS keeps this honest as the surface grows.
+    """
     from app.agent import tools as T
     names = {s.name for s in T.specs(allow_writes=False)}
-    assert "propose_change" not in names
     assert "get_recommendation" in names
-    assert {s.name for s in T.specs(allow_writes=True)} - names == {"propose_change"}
+    assert not (names & T.WRITE_TOOLS), "a read-only role was offered a writer"
+    assert {s.name for s in T.specs(allow_writes=True)} - names == T.WRITE_TOOLS
+    # The set itself is real, so a typo in it cannot silently disable the gate.
+    assert T.WRITE_TOOLS <= set(T.REGISTRY)
 
 
-def test_triage_cannot_write_decisions_or_recommendations(
+def test_assist_cannot_write_decisions_or_recommendations(
         client, synth_csv, db_file):
+    """The advisory layer reads and annotates; it never sizes or decides.
+
+    Replaces the same assertion against the LangGraph triage, removed
+    2026-09-04 -- nothing called it. assist is the only advisory writer left.
+    """
     batch_id = scored_batch(client, synth_csv)
     before = rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id")
 
-    r = client.post("/triage/run", json={"batch_id": batch_id}, headers=ENG)
+    r = client.post(f"/assist/run?batch_id={batch_id}", headers=ENG)
     assert r.status_code == 200, r.text
 
     assert rows(db_file, "SELECT COUNT(*) FROM review_history")[0][0] == 0
     assert rows(db_file, "SELECT * FROM recommendation_result ORDER BY item_id") == before
-    columns = {r[1] for r in rows(db_file, "PRAGMA table_info(triage_result)")}
+    columns = {r[1] for r in rows(db_file, "PRAGMA table_info(assist_result)")}
     assert not columns & {"new_max", "new_rop", "new_min",
                           "final_max", "final_rop", "final_min"}
 

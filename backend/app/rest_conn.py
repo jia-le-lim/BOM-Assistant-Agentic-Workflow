@@ -133,6 +133,28 @@ class _Result:
         return iter(self._rows)
 
 
+def _target_columns(head: str) -> int:
+    """How many columns an `INSERT INTO t (a, b, c)` head declares.
+
+    0 when there is no column list (`INSERT INTO t VALUES ...`) or the head is
+    not an INSERT at all -- the caller then skips the width check rather than
+    guessing.
+    """
+    open_paren = head.find("(")
+    if open_paren < 0 or "insert" not in head[:open_paren].lower():
+        return 0
+    depth = 0
+    for i in range(open_paren, len(head)):
+        if head[i] == "(":
+            depth += 1
+        elif head[i] == ")":
+            depth -= 1
+            if depth == 0:
+                inner = head[open_paren + 1:i]
+                return len([c for c in inner.split(",") if c.strip()])
+    return 0
+
+
 class RestConn:
     """Same call signature as db.Conn, over HTTP."""
 
@@ -193,6 +215,19 @@ class RestConn:
             return
 
         width = len(rows[0])
+        # The VALUES clause is REGENERATED from the row width, so any value
+        # written as a literal rather than a placeholder is silently dropped.
+        # Postgres then answers with a bare "INSERT has more target columns than
+        # expressions"; SQLite executes the original string and never notices,
+        # so the offline suite cannot catch it. Compare the declared target
+        # columns against the row width and fail here, naming the cause.
+        columns = _target_columns(head)
+        if columns and columns != width:
+            raise RestError(
+                f"executemany: {columns} target columns but each row supplies "
+                f"{width} values. Every value must be a placeholder -- an inline "
+                f"literal in VALUES is dropped when the clause is rebuilt.\n"
+                f"statement: {translated[:200]}")
         for start in range(0, len(rows), BATCH):
             chunk = rows[start:start + BATCH]
             groups, flat, n = [], [], 0

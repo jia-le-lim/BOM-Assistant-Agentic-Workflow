@@ -36,7 +36,7 @@ def main() -> None:
         conn = get_conn()
         cards = []
         try:
-            precision_bar = float(active_config(conn).get(
+            precision_bar = float(active_config(conn, "s16-backtest").get(
                 "triage_clear_precision_bar", 0.98))
             for segment, path in SPLITS.items():
                 batch_id = ingest(conn, path.read_bytes(), segment, path.name,

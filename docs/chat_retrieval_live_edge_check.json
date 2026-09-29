@@ -1,0 +1,85 @@
+{
+  "batch_id": 13,
+  "expected_cable_rows": 143,
+  "cases": [
+    {
+      "case": "active_route",
+      "passed": true,
+      "intent": "lookup",
+      "provider": "nyra",
+      "model": "qwen3.8:latest",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "list_review_queue",
+          "args": {
+            "route": "active",
+            "limit": 5
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 5 of 68 matching rows."
+        }
+      ]
+    },
+    {
+      "case": "unknown_category",
+      "passed": true,
+      "intent": "lookup",
+      "provider": "nyra",
+      "model": "qwen3.8:latest",
+      "response_status": "clarification",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "list_review_queue",
+          "args": {
+            "category": "unicorn_parts"
+          },
+          "ok": false,
+          "status": "error",
+          "summary": "Unknown part category. Available categories: sensor, valve, cable, hose_tube, motor, pump, belt, pulley, bearing, seal, filter, nozzle, fastener, pcb, connector, switch, lamp, thermal, optic, power, tool, holder, assembly, uncategorised."
+        }
+      ]
+    },
+    {
+      "case": "description_explanation",
+      "passed": true,
+      "intent": "lookup",
+      "provider": "nyra",
+      "model": "qwen3.8:latest",
+      "response_status": "answered",
+      "model_calls": 4,
+      "tools": [
+        {
+          "name": "search_items",
+          "args": {
+            "query": "tubing"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 20 of 20 matching rows."
+        },
+        {
+          "name": "get_recommendation",
+          "args": {
+            "item_id": "500035612"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved a matching record."
+        },
+        {
+          "name": "get_triage_context",
+          "args": {
+            "item_id": "500035612"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved a matching record."
+        }
+      ]
+    }
+  ]
+}

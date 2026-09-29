@@ -6,15 +6,18 @@ consumable/agreement are populated; the workflow suite stays on the rule engine.
 
 import pandas as pd
 
-from conftest import ADMIN, ENG, make_row, rows_to_csv, upload
+from conftest import OWNER_ADMIN as ADMIN, ENG, make_row, rows_to_csv, upload
 
 WINS = (5, 30, 90, 180, 365, 547)
 
 
 def _constant(item_id: str, **kw) -> dict:
     """A steady low-volume consumer with a big gap to current -> pending_review,
-    high confidence, no benchmark -> bulk-acceptable. unitprice keeps it material
-    (above the immaterial auto-clear floor) so it stays in the queue."""
+    high confidence, and NO benchmark of any kind. unitprice keeps it material
+    (above the immaterial auto-clear floor) so it stays in the queue.
+
+    Deliberately not bulk-acceptable: nothing has ever agreed with this number.
+    Use _matching_constant for a row that is."""
     return make_row(
         item_id=item_id, module="TCB", sfm_criticality="M",
         frequencymonthswithusage=8, contractual_lead_time=30, unitprice=500,
@@ -60,13 +63,23 @@ def _scored(client, monkeypatch, rows) -> int:
 
 
 def test_summary_has_triage_breakdowns(client, monkeypatch):
-    bid = _scored(client, monkeypatch, [_constant(f"P{i}") for i in range(5)])
+    bid = _scored(client, monkeypatch, [_matching_constant(f"P{i}") for i in range(5)])
     s = client.get(f"/batches/{bid}/summary", headers=ENG).json()
     for k in ("consumables", "routes", "agreements", "bulk_acceptable", "pareto"):
         assert k in s, s.keys()
     assert s["consumables"].get("constant", 0) == 5
     assert s["bulk_acceptable"] >= 5
     assert "items_for_80pct" in s["pareto"]
+
+
+def test_unbenchmarked_rows_are_not_bulk_acceptable(client, monkeypatch):
+    """"Safe to bulk-accept" must mean a benchmark AGREED, not that none existed.
+    The old `agreement != "diverge"` test passed every unbenchmarked row -- inert
+    on a reviewed month, wide open on a brand-new one."""
+    bid = _scored(client, monkeypatch, [_constant(f"P{i}") for i in range(5)])
+    s = client.get(f"/batches/{bid}/summary", headers=ENG).json()
+    assert s["agreements"].get("none", 0) == 5
+    assert s["bulk_acceptable"] == 0
 
 
 def test_bulk_accept_via_filter_clears_pending(client, monkeypatch):
@@ -128,32 +141,18 @@ def test_bulk_requires_a_target(client, monkeypatch):
     assert r.status_code == 422
 
 
-def test_bulk_can_filter_by_triage_tier(client, monkeypatch):
+def test_guarded_preselection_is_config_gated(client, monkeypatch):
+    """One switch guards every pre-ticked bulk path. Named for the triage graph
+    that is gone (2026-09-04); assist_preselect is the caller that survives."""
     bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
-    triage = client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
-    assert triage.status_code == 200, triage.text
-    assert client.get(f"/triage/{bid}", headers=ENG).json()["items"][0][
-        "triage_tier"] == "clear_candidate"
-
-    reviewed = client.post("/review/bulk", headers=ENG, json={
-        "batch_id": bid, "decision": "accept",
-        "filters": {"triage_tier": "clear_candidate"}})
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["reviewed"] == 1
-
-
-def test_guarded_triage_preselection_is_config_gated(client, monkeypatch):
-    bid = _scored(client, monkeypatch, [_matching_constant("MATCH")])
-    client.post("/triage/run", json={"batch_id": bid}, headers=ENG)
+    client.post(f"/assist/run?batch_id={bid}", headers=ENG)
     body = {"batch_id": bid, "decision": "accept",
-            "filters": {"triage_preselect": True}}
-    disabled = client.post("/review/bulk", headers=ENG, json=body)
-    assert disabled.status_code == 409
+            "filters": {"assist_preselect": True}}
+    assert client.post("/review/bulk", headers=ENG, json=body).status_code == 409
 
     enabled = client.post("/config/rules", headers=ADMIN, json={
-        "rule_version": "triage-enabled-test",
+        "rule_version": "guarded-enabled-test",
         "updates": {"triage_guarded_assist_enabled": True}})
     assert enabled.status_code == 200, enabled.text
-    reviewed = client.post("/review/bulk", headers=ENG, json=body)
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["reviewed"] == 1
+    assert client.post("/review/bulk", headers=ENG,
+                       json=body).status_code == 200

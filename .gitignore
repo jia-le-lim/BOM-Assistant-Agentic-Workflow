@@ -1,5 +1,7 @@
 # Python tooling
 .venv/
+.venv-ollama/
+supabase/.temp/
 __pycache__/
 *.pyc
 
@@ -10,6 +12,8 @@ __pycache__/
 # Raw monthly BOM workbooks -- 100s of MB of empty-cell bloat and hold sensitive
 # unitprice/supplier/engineer data; also exceed GitHub's 100MB limit. Local only.
 BOM table/*.xlsx
+# Historical archive contains source business records; retain it locally.
+BOM table/BOM Review Archive 1.csv
 
 # Backend local database (contains ingested BOM data -- same sensitivity)
 backend/data/

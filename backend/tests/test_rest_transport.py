@@ -175,3 +175,62 @@ def test_a_plain_review_touches_no_pending_change():
     _record_review(conn, _ACTOR, 1, _REC, "accept", (3, 2, 1), "c", "j")
     assert conn.inserts == ["review_history"]
     assert not any("pending_change" in s for s, _ in conn.statements)
+
+
+def test_executemany_rejects_inline_literals_in_values():
+    """The REST transport rebuilds the VALUES clause from the row width, so a
+    literal written inline is dropped and Postgres answers with an opaque
+    "INSERT has more target columns than expressions". SQLite runs the original
+    string and never notices, so only a guard here catches it.
+
+    Regression: the part_category_config seed shipped with
+    VALUES (?,?,?,'seed',1,'seed') and took down startup against Supabase.
+    """
+    import pytest
+
+    from app.rest_conn import RestError
+
+    conn = RestConn.__new__(RestConn)          # no HTTP client needed
+    with pytest.raises(RestError) as e:
+        conn.executemany(
+            "INSERT INTO t (a, b, c, d) VALUES (?,?,'lit',1)",
+            [("x", "y"), ("p", "q")])
+    assert "target columns" in str(e.value)
+
+
+def test_the_exact_seed_shape_that_broke_startup():
+    """6 target columns, 3 placeholders, 3-tuples -- the placeholder count
+    happened to match the row width, which is why a naive placeholder-vs-width
+    check missed it and the column count is what must be compared."""
+    import pytest
+
+    from app.rest_conn import RestError
+
+    conn = RestConn.__new__(RestConn)
+    with pytest.raises(RestError):
+        conn.executemany(
+            "INSERT INTO part_category_config (pattern, category, priority, "
+            "set_by, confirmed, confirmed_by) VALUES (?,?,?,'seed',1,'seed')",
+            [(r"\bX\b", "x", 10), (r"\bY\b", "y", 20)])
+
+
+def test_target_column_counting():
+    """No declared columns means nothing to compare against; do not guess."""
+    from app.rest_conn import _target_columns
+    assert _target_columns("INSERT INTO t ") == 0
+    assert _target_columns("INSERT INTO t (a, b, c) ") == 3
+    assert _target_columns("UPDATE t SET a=(1) ") == 0
+
+
+def test_executemany_accepts_all_placeholder_values(monkeypatch):
+    """The corrected shape must still go through untouched."""
+    seen = {}
+
+    conn = RestConn.__new__(RestConn)
+    monkeypatch.setattr(RestConn, "_rpc",
+                        lambda self, sql, params, want: seen.update(
+                            sql=sql, params=params) or [])
+    conn.executemany("INSERT INTO t (a, b, c) VALUES (?,?,?)",
+                     [(1, 2, 3), (4, 5, 6)])
+    assert seen["params"] == [1, 2, 3, 4, 5, 6]
+    assert "($1,$2,$3),($4,$5,$6)" in seen["sql"]

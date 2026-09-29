@@ -35,6 +35,14 @@ IDENTITY_COLS = frozenset({
     "set_by", "confirmed_by", "senior_approved_by", "user",
 })
 
+# Deliberately NOT masked (owner decision Q4, 2026-09-01): review_history
+# .justification reaches the assist chain's narration prompt, because the reason
+# an engineer gave last cycle is most of what makes a verdict legible. It is
+# free text a person typed, so it is a prompt-injection surface -- the narration
+# prompt names it as data, `_plain()` caps what comes back, and the narrative
+# never feeds a decision. `comments` stays on SENSITIVE_COLS; this is one field,
+# not a relaxation of PRD 5.1.
+
 MASK = "[redacted]"
 
 

@@ -14,6 +14,8 @@ numpy==2.5.1
 # Writes the reviewed batch back out as a workbook (app/export_xlsx.py), so an
 # engineer never retypes approved numbers into the monthly file by hand.
 openpyxl==3.1.5
+# Validate screenshot content and dimensions before vision inference/storage.
+Pillow==12.3.0
 packaging==26.2
 pandas==3.0.5
 pluggy==1.6.0
@@ -42,6 +44,10 @@ psycopg[binary]==3.3.4
 # Used only by app/llm/nyra.py, and only when LLM_BASE_URL is set. Unset, the
 # app runs on EchoProvider with no network calls at all.
 openai==2.50.0
+
+# Drives the /chat intent router (app/agent/graph.py). The deterministic engine
+# and the assist chain deliberately do NOT use it -- see agent/graph.py's
+# docstring for why loop.py's argument against a graph does not apply to routing.
 langgraph==1.2.9
 
 # --- Optional: mem0 recall layer ---------------------------------------

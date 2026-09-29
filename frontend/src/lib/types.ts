@@ -58,9 +58,22 @@ export interface Recommendation {
   route: string;
   consumable: string;
   agreement: "match" | "diverge" | "none" | "";
+  /** Which benchmark `agreement` was measured against. "factory" = the
+   *  engineer's own number in this upload; "prior_review" = their last decision
+   *  on this part; "" = no benchmark existed. */
+  agreement_source: "factory" | "prior_review" | "";
+  /* Queue-display fields. Attached per page by /recommendations (_enrich) and
+   * absent from the single-item detail payload, hence optional. */
+  item_desc?: string;
+  part_category?: string;
+  current_max?: number | null;
+  current_rop?: number | null;
+  bench_max?: number | null;
+  bench_rop?: number | null;
 }
 
 export interface BatchSummary {
+  read_only?: boolean;
   batch: {
     batch_id: number; label: string; status: string; row_count: number;
     quarantined_count: number; scored_rule_version: string | null;
@@ -117,6 +130,7 @@ export interface Review {
 }
 
 export interface ItemDetail {
+  read_only?: boolean;
   recommendation: Recommendation;
   status: Status;
   latest_review: Review | null;
@@ -137,48 +151,240 @@ export interface RuleConfig {
   config: Record<string, unknown>;
 }
 
-export type TriageTier = "clear_candidate" | "review" | "escalate";
+/**
+ * Advisory peer evidence. Never applied to Min/ROP/Max and never lowers a risk
+ * level — the layer can only add evidence and raise review priority.
+ */
+export interface SimilarityNeighbour {
+  neighbour_rank: number;
+  neighbour_item_id: string;
+  /** From the peer's own frozen BOM row; null if that row is gone. */
+  neighbour_item_desc: string | null;
+  neighbour_batch_id: number;
+  distance: number;
+  similarity_reasons: string;
+  neighbour_decision: string | null;
+  neighbour_final_max: number | null;
+  neighbour_final_rop: number | null;
+  neighbour_final_min: number | null;
+  neighbour_risk_level: string | null;
+  neighbour_reason_code: string | null;
+  neighbour_justification: string | null;
+  neighbour_comment: string | null;
+}
 
-export interface TriageResult {
+export interface SimilarityResult {
   batch_id: number;
   item_id: string;
   stockroom_id: string;
-  triage_tier: TriageTier;
-  priority_score: number;
-  rationale: string;
+  similarity_model_version: string;
+  neighbour_count: number;
+  pool_size: number;
+  nearest_distance: number | null;
+  /** INTEGER on both dialects, like Review.requires_senior_approval. */
+  outlier_score: number;
+  is_outlier: number;
+  historical_override_rate: number | null;
+  historical_upward_override_rate: number | null;
+  historical_high_risk_rate: number | null;
+  analogue_max_median: number | null;
+  analogue_max_p25: number | null;
+  analogue_max_p75: number | null;
+  analogue_rop_median: number | null;
+  analogue_min_median: number | null;
+  /**
+   * What KIND of part this is, from the engineer-owned lexicon. A constraint,
+   * not a weighted feature: peers of a different known category are excluded
+   * outright. "" means no rule matched, and nothing was restricted.
+   */
+  part_category: string;
+  /** Comma-joined, like reason_code — renders through <ReasonCodes />. */
+  advisory_codes: string;
   confidence: number;
-  focus_question: string | null;
-  history_narrative: string | null;
-  demand_narrative: string | null;
-  procurement_narrative: string | null;
-  sources: Record<string, unknown>[];
-  provider: string | null;
-  model: string | null;
-  triaged_at: string;
+  generated_at: string;
+  neighbours: SimilarityNeighbour[];
 }
 
-export interface TriagePage {
-  batch_id: number;
-  total: number;
-  items: TriageResult[];
-}
-
-export interface TriageRunSummary {
+export interface SimilarityRunSummary {
   batch_id: number;
   candidates: number;
-  triaged: number;
-  llm_calls_used: number;
-  specialist_calls_used: number;
-  llm_call_budget: number;
-  budget_exhausted: boolean;
+  scored: number;
+  neighbour_pool: number;
+  outliers: number;
+  diverging: number;
+  no_analogue: number;
+  categorised: number;
+  uncategorised: number;
+  broken_category_rules: string[];
+  similarity_model_version: string;
+}
+
+/** One lexicon rule. Only confirmed rules affect retrieval. */
+export interface PartCategoryRule {
+  pattern: string;
+  category: string;
+  priority: number;
+  set_by: string | null;
+  confirmed: number;
+  confirmed_by: string | null;
+  updated_at: string;
+}
+
+export interface PartCategoryPage {
+  rules: PartCategoryRule[];
+  confirmed: number;
+  pending: number;
+}
+
+export type AssistVerdict =
+  | "flag_for_review" | "bulk_accept_candidate" | "needs_context";
+
+export interface AssistResult {
+  batch_id: number;
+  item_id: string;
+  stockroom_id: string;
+  verdict: AssistVerdict;
+  reasons: string[];
+  narrative: string | null;
+  /** Written by assist/rules.suggest, never by the model. Both numbers come
+   *  from the same source, or both are null. */
+  suggested_max: number | null;
+  suggested_rop: number | null;
+  suggestion_basis: "engine" | "prior_accepted" | "";
+  model_version: string;
+  assisted_at: string;
+}
+
+export interface AssistPage {
+  batch_id: number;
+  items: AssistResult[];
+  counts: Record<AssistVerdict, number>;
+  model_version: string;
+}
+
+export interface AssistRunSummary {
+  batch_id: number;
+  rows_assisted: number;
+  counts: Record<AssistVerdict, number>;
+  model_version: string;
+  /** Null when the batch already had peer matches and none were rebuilt. */
+  similarity: SimilarityRunSummary | null;
+}
+
+export type DormantPolicy = "hold_current" | "fixed_qty" | "zero";
+
+export interface DormantRule {
+  rule_id: number;
+  scope: "item" | "category" | "default";
+  match_key: string;
+  policy: DormantPolicy;
+  fixed_qty: number | null;
+  set_by: string | null;
+  confirmed: number;
+  confirmed_by: string | null;
+  updated_at: string;
+}
+
+export interface DormantRulePage {
+  rules: DormantRule[];
+  confirmed: number;
+  pending: number;
+}
+
+export interface DormantRuleCoverage {
+  batch_id: number;
+  dormant_rows: number;
+  matched: number;
+  pct: number;
+  engine_book_usd: number;
+  proposed_book_usd: number;
+  delta_usd: number;
+  confirmed_rules: number;
+}
+
+/** Which branch of the agent graph answered. Read-only detail for the trace
+ *  panel — the backend enforces what each branch may reach. */
+export type ChatIntent =
+  "lookup" | "assist" | "advisory" | "propose" | "action" | "configure" | "conversation" | "unknown";
+
+export interface PageField {
+  label: string;
+  value: string;
+  section: string;
+  disabled: boolean;
+}
+
+export interface AssistantPageContext {
+  path: string;
+  title: string;
+  batch_id: number | null;
+  item_id: string | null;
+  stockroom_id: string | null;
+  active_section: string;
+  visible_sections: string[];
+  visible_text: string;
+  selected_text: string;
+  focused_field: PageField | null;
+  fields: PageField[];
+  form_state: Record<string, unknown>;
+}
+
+export type DormantRuleDraft = Pick<DormantRule, "scope" | "match_key" | "policy" | "fixed_qty">;
+export interface CriticalityDraft { pattern: string; criticality: "High" | "Medium" | "Low" }
+export interface CategoryDraft { pattern: string; category: string; priority: number }
+export type SettingsFill = {
+  kind: "fill_settings";
+  path: string;
+  rule_version?: string | null;
+} & (
+  | { section: "dormant_rules"; rows: DormantRuleDraft[]; updates: Record<string, never> }
+  | { section: "criticality"; rows: CriticalityDraft[]; updates: Record<string, never> }
+  | { section: "part_categories"; rows: CategoryDraft[]; updates: Record<string, never> }
+  | { section: "thresholds"; rows: never[]; updates: Record<string, number | boolean> }
+);
+export type PageAction = SettingsFill | { kind: "navigate"; path: string };
+
+/**
+ * A review-queue action the agent staged for a human to press. It is not a
+ * decision and it is not executed: pressing confirm calls the same review
+ * endpoint the console tray calls, under the engineer's own role. `executed`
+ * is typed as the literal `false` so a card claiming otherwise cannot compile.
+ */
+export interface StagedAction {
+  kind: "confirm_pending" | "discard_pending";
+  item_id: string;
+  batch_id: number | null;
+  stockroom_id: string | null;
+  pending_id: number | null;
+  proposed_max: number | null;
+  proposed_rop: number | null;
+  proposed_min: number | null;
+  executed: false;
+}
+
+export interface ChatSkill {
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+  available: boolean;
+  unavailable_reason: string | null;
 }
 
 export interface ChatResponse {
+  fallback?: boolean;
+  response_status?: string;
+  response_reason?: string;
+  skill?: Pick<ChatSkill, "name" | "title"> | null;
+  tool_calls?: ChatHistoryTurn["tool_calls"];
   answer: string;
   sources: Record<string, unknown>[];
   batch_id: number | null;
   session_id: string;
   turn_id: number;
+  intent: ChatIntent;
+  staged_action: StagedAction | null;
+  page_actions?: PageAction[];
   next_steps?: NextStepPrediction | null;
 }
 
@@ -200,6 +406,10 @@ export interface ChatSessionSummary {
 }
 
 export interface ChatHistoryTurn {
+  fallback?: boolean;
+  response_status?: string;
+  response_reason?: string;
+  skill?: Pick<ChatSkill, "name" | "title"> | null;
   turn_id: number;
   session_id: string;
   batch_id: number | null;
@@ -209,6 +419,8 @@ export interface ChatHistoryTurn {
     name: string;
     args: Record<string, unknown>;
     ok: boolean;
+    status?: "ok" | "empty" | "error";
+    summary?: string;
   }>;
   provider: string | null;
   model: string | null;
@@ -228,16 +440,15 @@ export interface ChatStreamComplete extends ChatResponse {
   type: "complete";
   provider: string;
   model: string;
-  tool_calls: Array<{
-    name: string;
-    args: Record<string, unknown>;
-    ok: boolean;
-  }>;
+  tool_calls: ChatHistoryTurn["tool_calls"];
 }
 
 export type ChatStreamEvent =
+  | { type: "skill"; name: string; title: string }
   | { type: "request"; query: string; batch_id: number | null;
       provider: string; model: string }
+  | { type: "classify"; intent: ChatIntent; provider: string; model: string }
+  | { type: "intent_downgraded"; from: ChatIntent; reason: string }
   | { type: "model_start"; attempt: number; phase: string;
       provider: string; model: string }
   | { type: "model_complete"; attempt: number; summary: string }
@@ -247,7 +458,7 @@ export type ChatStreamEvent =
       status: "ok" | "empty" | "error"; summary: string }
   | { type: "fallback"; reason: string }
   | { type: "agent_complete"; source_count: number; tool_count: number;
-      fallback: boolean }
+      fallback: boolean; response_status?: string; response_reason?: string }
   | { type: "answer_start" }
   | { type: "answer_delta"; delta: string }
   | { type: "prediction_start"; provider: string; model: string }

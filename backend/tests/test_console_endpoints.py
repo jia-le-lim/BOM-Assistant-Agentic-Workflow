@@ -1,6 +1,6 @@
 """Endpoints the review console depends on: batch list + batch summary."""
 
-from conftest import ENG, SENIOR, VIEWER, upload
+from conftest import ENG, SENIOR, OWNER_VIEWER as VIEWER, upload
 
 
 def scored(client, synth_csv):
@@ -36,17 +36,17 @@ def test_batch_summary_shape(client, synth_csv):
 
 def test_summary_tracks_workflow(client, synth_csv):
     b = scored(client, synth_csv)
-    # High-risk accept -> awaiting_senior -> approve -> reviewed & exportable
+    # High-risk acceptance stays gated when a foreign approver is refused.
     client.post(f"/review/100005?batch_id={b}", json={"decision": "accept"}, headers=ENG)
     s = client.get(f"/batches/{b}/summary", headers=VIEWER).json()
     assert s["statuses"]["awaiting_senior"] == 1
     assert s["export_ready_rows"] == 0        # not yet approved
 
-    client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR)
+    assert client.post(f"/review/100005/approve?batch_id={b}", headers=SENIOR).status_code == 404
     s = client.get(f"/batches/{b}/summary", headers=VIEWER).json()
-    assert s["statuses"].get("awaiting_senior", 0) == 0
-    assert s["statuses"]["reviewed"] == 1
-    assert s["export_ready_rows"] == 1
+    assert s["statuses"].get("awaiting_senior", 0) == 1
+    assert s["statuses"].get("reviewed", 0) == 0
+    assert s["export_ready_rows"] == 0
 
 
 def test_summary_404(client):

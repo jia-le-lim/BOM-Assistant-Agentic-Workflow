@@ -1,0 +1,30 @@
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    route {
+        @crossOrigin expression `{http.request.header.Origin} != "" && {http.request.header.Origin} != "https://" + {http.request.hostport} && {http.request.header.Origin} != "http://" + {http.request.hostport}`
+        respond @crossOrigin "Cross-origin requests are not allowed" 403
+        header {
+            X-Robots-Tag "noindex, nofollow, noarchive"
+            Cache-Control "no-store"
+            Referrer-Policy "no-referrer"
+            X-Frame-Options "DENY"
+        }
+        # Public routes contain only the login form and its static assets.
+        # Everything else is verified before proxying, even if frontend auth is misconfigured.
+        request_header -X-User
+        request_header -X-Pilot-User
+        @protected not path /login /api/auth/login /api/auth/logout /_next/static/* /favicon.ico
+        forward_auth @protected frontend:3010 {
+            uri /api/auth/verify
+            copy_headers X-Pilot-User
+        }
+        reverse_proxy frontend:3010 {
+            header_up -Authorization
+            flush_interval -1
+        }
+    }
+}
