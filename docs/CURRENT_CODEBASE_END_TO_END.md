@@ -69,16 +69,16 @@ The main runtime directories are:
 
 ### 3.1 Frontend startup
 
-The frontend is Next.js 16 with React 19. It normally runs on port `3010`:
+The frontend is Next.js 16 with React 19. It normally runs on port `3011`:
 
 ```powershell
 cd frontend
-npm run dev -- --webpack --port 3010
+npm run dev -- --webpack --port 3011
 ```
 
 All browser requests go to the local Next.js route
 `/api/backend/[...path]`. That route forwards to `BACKEND_URL`, which defaults
-to `http://127.0.0.1:8011`.
+to `http://127.0.0.1:8012`.
 
 The proxy:
 
@@ -97,10 +97,10 @@ same-origin Next.js proxy.
 
 ### 3.2 Backend startup
 
-The FastAPI app normally runs on port `8011`:
+The FastAPI app normally runs on port `8012`:
 
 ```powershell
-.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --port 8011
+.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --port 8012
 ```
 
 Importing `app.main` constructs the FastAPI object but does not touch the
@@ -201,7 +201,7 @@ The HTTP client trusts proxy environment variables.
 
 | Variable | Current use |
 |---|---|
-| `BACKEND_URL` | Frontend BFF target; defaults to `http://127.0.0.1:8011` |
+| `BACKEND_URL` | Frontend BFF target; defaults to `http://127.0.0.1:8012` |
 | `DATABASE_URL` | Direct Postgres DSN; takes precedence over REST settings |
 | `SUPABASE_URL` | Supabase project URL for REST/RPC mode |
 | `SUPABASE_SECRET_KEY` | Preferred current server-side RPC key |

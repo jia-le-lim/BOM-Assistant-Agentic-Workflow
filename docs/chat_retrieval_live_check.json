@@ -1,0 +1,154 @@
+{
+  "batch_id": 13,
+  "expected_cable_rows": 143,
+  "cases": [
+    {
+      "case": "original_cable",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "search_items",
+          "args": {
+            "category": "cable"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 20 matching records."
+        }
+      ]
+    },
+    {
+      "case": "category_count",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "list_review_queue",
+          "args": {
+            "category": "cable",
+            "limit": 5
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 5 matching records."
+        }
+      ]
+    },
+    {
+      "case": "description",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "search_items",
+          "args": {
+            "query": "tubing"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 20 matching records."
+        }
+      ]
+    },
+    {
+      "case": "uncovered_dormant",
+      "passed": true,
+      "intent": "advisory",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "list_review_queue",
+          "args": {
+            "uncovered_dormant": true,
+            "limit": 8
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 8 matching records."
+        }
+      ]
+    },
+    {
+      "case": "missing_item",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "clarification",
+      "model_calls": 4,
+      "tools": [
+        {
+          "name": "clarify_request",
+          "args": {
+            "kind": "item"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved a matching record."
+        }
+      ]
+    },
+    {
+      "case": "unsupported_spending",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "unsupported",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "clarify_request",
+          "args": {
+            "kind": "spending"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved a matching record."
+        }
+      ]
+    },
+    {
+      "case": "no_matching_description",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "search_items",
+          "args": {
+            "query": "ZZZ_NO_SUCH_PART_95173"
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 0 matching records."
+        }
+      ]
+    },
+    {
+      "case": "standard_queue",
+      "passed": true,
+      "intent": "lookup",
+      "response_status": "answered",
+      "model_calls": 3,
+      "tools": [
+        {
+          "name": "list_review_queue",
+          "args": {
+            "risk_level": "High",
+            "limit": 5
+          },
+          "ok": true,
+          "status": "ok",
+          "summary": "Retrieved 5 matching records."
+        }
+      ]
+    }
+  ],
+  "scope": "non-quarantined uploaded rows; workspace has 144 raw cable rows, of which 143 are eligible"
+}

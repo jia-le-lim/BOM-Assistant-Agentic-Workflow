@@ -2,6 +2,26 @@
 
 Installed on the shared Windows PC at `C:\ProgramData\BOM-Supabase`.
 
+## Account settings deployment ? 2026-09-17
+
+The production frontend and backend were rebuilt and restarted with private
+account settings. Auto-clear, thresholds, review assistance, criticality,
+part categories and dormant rules now use account-owned records. Existing shared
+settings are copied once per account. The frontend also forwards authenticated
+DELETE requests so owners can delete their own dormant rules.
+
+Live checks with `tcb-1` and `epoxy-1` passed: distinct dormant-rule records,
+4 cross-account confirmation/deletion requests denied, spoofed identity ignored,
+and both Settings pages displaying the private-account notice. Saved rule values
+were unchanged by verification. Workspace checks also passed (9 foreign requests
+denied), and both app containers are healthy. All five new settings tables have
+RLS enabled. Re-run `check_settings_access.py` and `check_workspace_access.py`
+against the protected local deployment to repeat these checks.
+
+Rollback images: `bom-assistant/backend:before-user-settings-20260917` and
+`bom-assistant/frontend:before-user-settings-20260917`. Pre-deployment database
+backup: `C:\ProgramData\BOM-Supabase\backups\before-user-settings-20260917.dump`.
+
 ## Internal pilot access
 
 Password gateway configured at http://10.138.215.247:13010 and verified from this
@@ -16,8 +36,8 @@ packet drop location remains unconfirmed. See
 Individual accounts `tcb-1` and `epoxy-1`
 passed live browser tests:
 unique passwords, signed-in identity display, identity retained during role
-changes, and spoofed identity headers overridden by the gateway. Both access the
-same pilot workspace. Credentials are in `pilot-accounts.local.json` privately.
+changes, and spoofed identity headers overridden by the gateway. Workspace access is now scoped to the signed-in creator; neither account can
+access the other account's workspaces. Credentials are in `pilot-accounts.local.json` privately.
 See [INTERNAL_ACCESS.md](INTERNAL_ACCESS.md) and `Enable-LanFirewall.ps1`.
 The first direct Cloudflare attempt failed its TCP/UDP port 7844 checks. Public
 sharing now works through the corporate HTTP proxy in Docker container

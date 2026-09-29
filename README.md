@@ -11,16 +11,23 @@ cd C:\ProgramData\BOM-Supabase
 Open http://localhost:3010. See [the simple Docker guide](infra/supabase/START_HERE.md)
 for status, logs, stopping, updating and handover.
 
-For source development, leave Supabase running and stop the two app containers
-to free ports 3010 and 8011. Run from the repository root:
+For source development, run from the repository root. Docker can keep running;
+development uses separate ports:
 
 ```powershell
-docker stop bom-supabase-frontend-1 bom-supabase-backend-1
 make dev
 ```
 
-Open http://localhost:3010. The backend API runs at http://127.0.0.1:8011/docs.
+Open http://localhost:3011. The development API runs at http://127.0.0.1:8012/docs.
 Keep Ollama running for local chat and preference embeddings.
+
+To enable the custom login locally with the existing pilot accounts, run
+`npm --prefix frontend run setup:auth` once, then open
+http://localhost:3011/login. This configures local authentication without changing Docker.
+
+Override the development ports with
+`make dev FRONTEND_PORT=3020 BACKEND_PORT=8020` if needed. The frontend's
+`BACKEND_URL` automatically follows `BACKEND_PORT`. Docker keeps ports 3010/8011.
 
 The Makefile uses `.venv-ollama` when present, otherwise `.venv`. Override this
 with `make dev VENV_DIR=your-environment` if needed. Configuration and local

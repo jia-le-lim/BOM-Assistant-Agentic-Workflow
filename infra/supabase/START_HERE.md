@@ -6,6 +6,8 @@ See [INTERNAL_ACCESS.md](INTERNAL_ACCESS.md) for passwords, startup and network
 troubleshooting. For the public link, run `C:\ProgramData\BOM-Supabase\Pilot.ps1 link`
 and use the same pilot login. Cloudflared and its corporate proxy helper now run
 in Docker; see [PROXY_TUNNEL.md](PROXY_TUNNEL.md) for start/stop instructions.
+The [tunnel monitor](TUNNEL_MONITOR.md) can recover failed public links and email
+replacements through Outlook. Its local status page is http://127.0.0.1:13011.
 
 The frontend, backend and Supabase run as **one Docker Compose project** named
 `bom-supabase`, with a separate container for each service. PostgreSQL data stays
@@ -59,8 +61,9 @@ overriding the deployment's generated settings.
 Press Ctrl+C to exit logs. `stop` stops all services and retains the database.
 `start` recreates missing containers and uses the existing data. Do not run
 `docker compose down -v`, delete the database volume, or reset Docker Desktop:
-those actions can remove persisted data. Do not run `make dev` at the same time;
-the Docker app uses the same ports, 3010 and 8011.
+those actions can remove persisted data. Source development can run alongside
+Docker: `make dev` uses frontend port 3011 and API port 8012, while Docker keeps
+3010 and 8011.
 
 If the app works but chat does not, check Ollama on Windows. The backend uses
 `http://host.docker.internal:11434/v1`; `localhost` inside a container means that

@@ -31,11 +31,12 @@ Desktop, the corporate network connection, and the app must remain available.
 
 Internet browser -> Cloudflare HTTPS -> corporate proxy -> Docker tunnel ->
 password gateway -> frontend -> backend. Existing individual pilot logins apply
-to every frontend page, asset and /api/backend/ request. Private account details
+to workspace pages and /api/backend/ requests. The login form and its static
+assets are public. Private account details
 are in pilot-accounts.local.json; share them separately with invited testers.
 
-The pilot uses the live migrated BOM database and existing role selector,
-including admin actions. Authorized testers can read, export and modify pilot data.
+The pilot uses the live migrated BOM database. Every existing login has
+Administrator access: authorized testers can read, export and modify pilot data.
 The gateway login does not replace Entra ID/SSO or finer role permissions. Studio,
 PostgreSQL and the direct backend port are not tunnel origins.
 
@@ -49,6 +50,60 @@ The container health check verifies its Cloudflared connection. Public HTTP chec
 verify authenticated pages, health, batch listing, pilot identity, login denials
 and same/cross-origin behavior. Validation reports are stored in runtime\pilot.
 The check_pilot.py script remains available for local gateway checks.
+
+## Custom sign-in form
+
+The `/login` page uses an email or pilot username step followed by a password
+step that recalls the selected account. Existing pilot passwords still work.
+The sidebar's Sign out button revokes the session; switching accounts no longer
+requires a new private browser window. “Remember my account” saves only the
+identifier on this device, never the password.
+
+Caddy uses `forward_auth` against `/api/auth/verify`. Unauthenticated workspace
+pages redirect to `/login`; API requests return 401 without `WWW-Authenticate`.
+The frontend also verifies the cookie before forwarding API requests and derives
+`X-User` and the fixed `admin` role from the session. The sidebar displays one
+Administrator identity. Browser headers and saved role selections cannot change
+authenticated access. Existing logins and the two-person approval workflow remain.
+
+`pilot_users.py` renders `runtime/pilot/auth.json` from the existing private
+account file. Only usernames, optional email aliases, and bcrypt hashes enter
+this read-only frontend mount. To enable email login, add an `email` field to
+the intended account in `pilot-accounts.local.json`, then rerun the renderer.
+Do not invent aliases or distribute the hash file. Keep the deployment directory
+restricted to its administrators.
+
+Sessions are random opaque cookies, HttpOnly and SameSite=Lax, valid for eight
+hours. HTTPS connections receive Secure cookies. They are held by the single
+frontend Node process: restarting it signs everyone out. Logout, account removal,
+and password changes revoke sessions. A multi-instance deployment would need a
+shared session store. Failed attempts are limited per account and globally.
+
+Apply this change to the existing deployment as a coordinated frontend and
+gateway update. These commands do not start a public tunnel:
+
+```powershell
+# From the repository, with access to the existing deployment and Docker:
+py -3.13 infra/supabase/pilot_users.py
+py -3.13 infra/supabase/install_app.py
+& C:/ProgramData/BOM-Supabase/Compose.ps1 build
+& C:/ProgramData/BOM-Supabase/Compose.ps1 update-app
+& C:/ProgramData/BOM-Supabase/Pilot.ps1 local-start
+py -3.13 infra/supabase/check_pilot.py
+# If this deployment uses the optional tunnel, rebuild its staged startup check:
+& C:/ProgramData/BOM-Supabase/Pilot.ps1 build
+```
+
+The renderer also stages the updated gateway check scripts and existing tunnel
+source. A running tunnel may keep serving through the gateway; its next `start`
+must use the rebuilt image. Recreating a Quick Tunnel changes its public URL.
+
+Prepare `auth.json` before recreating the frontend: its bind mount deliberately
+fails if the file is missing. Both the gateway and direct frontend API fail
+closed when authentication is required but its configuration is unavailable.
+The frontend health check verifies a configured authentication service; the
+backend retains its separate health check. Tunnel startup checks the protected
+API endpoint, since the public login page now returns 200.
 
 Quick Tunnels are temporary and have no uptime guarantee. Cloudflare documents
 a 200 concurrent-request limit and no SSE support. The app uses NDJSON for chat;
