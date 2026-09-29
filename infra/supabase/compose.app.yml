@@ -56,13 +56,22 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       HOSTNAME: 0.0.0.0
       PORT: "3010"
+      PILOT_AUTH_REQUIRED: "1"
+      PILOT_AUTH_FILE: /run/bom-auth/accounts.json
+    volumes:
+      - type: bind
+        source: ../pilot/auth.json
+        target: /run/bom-auth/accounts.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       backend:
         condition: service_healthy
     ports:
       - "127.0.0.1:3010:3010"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/backend/health',{signal:AbortSignal.timeout(5000)}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/pilot-session',{signal:AbortSignal.timeout(5000)}).then(r=>{if(r.status!==401)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 10s
       start_period: 30s

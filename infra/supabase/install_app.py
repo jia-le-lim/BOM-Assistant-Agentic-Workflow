@@ -4,8 +4,10 @@ Does not stop services or build images. Requires write access to DeploymentRoot.
 Existing backend.docker.env is preserved on subsequent source updates.
 """
 import argparse
+import os
 from pathlib import Path
 import shutil
+import stat
 from urllib.parse import urlsplit, urlunsplit
 
 from manage import read_env, write_private
@@ -23,7 +25,18 @@ def stage(repo, root):
         # Only this installer's explicitly marked, generated source copy can be replaced.
         if not (target / '.bom-app-source').is_file() or target.parent != root:
             raise RuntimeError('Refusing to replace an unrecognized source directory.')
-        shutil.rmtree(target)
+        def remove_readonly(function, path, error):
+            # OneDrive source directories can carry a read-only Windows attribute
+            # into this generated copy. Clear it only inside the verified target.
+            entry = Path(path)
+            if (os.name != 'nt' or not isinstance(error, PermissionError)
+                    or not entry.resolve().is_relative_to(target)
+                    or not entry.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY):
+                raise error
+            entry.chmod(stat.S_IWRITE)
+            function(path)
+
+        shutil.rmtree(target, onexc=remove_readonly)
     target.mkdir(parents=True)
     (target / '.bom-app-source').write_text('Generated application build context. No runtime data.\n')
     for component, files, folders in (
@@ -50,7 +63,8 @@ def stage(repo, root):
         # Keep LLM and preference settings; database credentials come from the stack.
         values = {key: value for key, value in original.items()
                   if key.startswith(('LLM_', 'MEM0_', 'OPENAI_'))
-                  or key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'BOM_ENGINE')}
+                  or key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'BOM_ENGINE',
+                             'BOM_WORKSPACE_READ_ALL_USERS')}
         values.pop('MEM0_DATABASE_URL', None)
         values.pop('MEM0_DIR', None)
         for key in ('LLM_BASE_URL', 'OPENAI_BASE_URL'):

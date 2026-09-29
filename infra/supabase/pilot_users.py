@@ -24,7 +24,8 @@ def render(root, users=()):
             raise ValueError('Use lowercase letters, digits and hyphens for pilot usernames.')
         if user not in accounts:
             accounts[user] = {'password': secrets.token_urlsafe(18)}
-    lines = []
+    auth_accounts = []
+    identifiers = set()
     for user, account in accounts.items():
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', user):
             raise ValueError('Invalid saved pilot username.')
@@ -33,8 +34,19 @@ def render(root, users=()):
                 input=(account['password'] + '\n').encode()).decode().strip()
         if not account['hash'].startswith('$2'):
             raise ValueError('Invalid saved password hash.')
-        lines.append(f"            {user} {account['hash']}")
-    config = (HERE / 'Caddyfile.pilot').read_text().replace('__PILOT_USERS__', '\n'.join(lines))
+        public = {'user': user, 'hash': account['hash']}
+        if account.get('email'):
+            email = account['email'].strip().lower()
+            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
+                raise ValueError('Invalid pilot email alias.')
+            public['email'] = email
+        for identifier in (user, public.get('email')):
+            if identifier:
+                if identifier in identifiers:
+                    raise ValueError('Duplicate pilot account or email alias.')
+                identifiers.add(identifier)
+        auth_accounts.append(public)
+    config = (HERE / 'Caddyfile.pilot').read_text()
     pilot = root / 'runtime/pilot'
     candidate = pilot / 'Caddyfile.candidate'
     candidate.write_text(config, encoding='utf-8')
@@ -42,10 +54,21 @@ def render(root, users=()):
                 f'type=bind,source={candidate},target=/etc/caddy/Caddyfile,readonly',
                 IMAGE, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile'])
     accounts_file.write_text(json.dumps(accounts, indent=2) + '\n', encoding='utf-8')
+    # Mount this hash-only file in the frontend. The password file stays on the host.
+    # The containing private deployment directory controls host access; the container
+    # runs as Node's non-root uid and must be able to read the mounted file.
+    (pilot / 'auth.json').write_text(json.dumps(auth_accounts, indent=2) + '\n', encoding='utf-8')
+    (pilot / 'auth.json').chmod(0o644)
     shutil.copyfile(candidate, pilot / 'Caddyfile')
     candidate.unlink()
+    for name in ('Pilot.ps1', 'check_pilot.py'):
+        if (HERE / name).resolve() != (root / name).resolve():
+            shutil.copy2(HERE / name, root / name)
+    tunnel_source = pilot / 'tunnel-source'
+    if tunnel_source.is_dir():
+        shutil.copy2(HERE / 'cloudflared_proxy.py', tunnel_source / 'cloudflared_proxy.py')
     print('Pilot accounts configured: ' + ', '.join(accounts))
-    print(f'Private login details: {accounts_file}. Restart only the pilot gateway to apply.')
+    print(f'Private login details: {accounts_file}. Apply the frontend auth mount and gateway together; see PILOT.md.')
 
 
 if __name__ == '__main__':

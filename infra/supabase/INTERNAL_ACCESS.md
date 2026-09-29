@@ -8,12 +8,14 @@ password. Get their passwords from
 privately with its intended tester. The original `pilot` login remains available.
 
 The app displays the signed-in username, and the gateway supplies that username
-to the backend for activity attribution. Selecting a different test role keeps
-the same signed-in user. Both accounts see the same pilot data; their names do
-not filter batches by department. The role selector remains available for testing.
+to the backend for activity attribution. Each login uses fixed Administrator
+access for their own workspaces. `tcb-1` can only access workspaces created by
+`tcb-1`; `epoxy-1` can only access those created by `epoxy-1`. Ownership applies
+to direct API requests, chat and exports, including accounts with the admin role. The sidebar displays the username and Administrator label.
 
-To switch accounts, close all InPrivate/Incognito windows and open a fresh private
-window, then use the other login. The browser caches HTTP Basic credentials.
+After deploying the custom login update in [PILOT.md](PILOT.md#custom-sign-in-form),
+use **Sign out** in the sidebar to switch accounts. The form accepts existing
+pilot usernames and any email aliases configured by the project owner.
 
 The gateway runs on the Ethernet IP and requires a login for both pages and API
 requests. Direct frontend port 3010, backend port 8011 and Supabase Studio remain
@@ -23,7 +25,7 @@ This internal address uses HTTP; it is intended for the trusted office network.
 ## Current status
 
 The Ethernet address was verified from this host: anonymous access is denied;
-authenticated access loads all 10 batches. Both individual accounts passed
+authenticated access is restricted to the signed-in owner. Both individual accounts passed
 live browser checks, including identity preservation after role changes and
 rejection of the other account's password. A later test from Wi-Fi client
 `172.21.222.159` reached this host by ping but failed to connect to TCP 13010.
@@ -100,5 +102,6 @@ script. `runtime\lan.json` records the address and allowed client ranges. Do not
 replace this with an unrestricted `0.0.0.0` bind or an Internet-facing firewall
 rule. Existing Windows account/startup handover requirements still apply.
 
-The role selector remains the application's pilot access model: trusted testers
-can select privileged roles and modify or export the live migrated BOM data.
+All existing logins have Administrator access within their own workspaces.
+Imported BOMs remain private to their recorded uploader; no automatic reassignment
+is made based on module or account name. The server assigns this role after verifying the login session.
