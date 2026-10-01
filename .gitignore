@@ -41,3 +41,7 @@ analysis/output/
 
 # Internal exports contain credentials and business data.
 BOM_HANDOVER_*/
+
+# Archive bundles -- large, redundant snapshots of docs/handover packages.
+# Keep the source folders in Git; never commit the zipped copies.
+*.zip
