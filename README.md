@@ -39,3 +39,5 @@ terminal to load the updated PATH:
 ```powershell
 winget install --id ezwinports.make --exact --scope user
 ```
+
+For engineering ownership transfer, see [the complete maintenance handover](docs/handover/README.md). The confidential export folder is excluded from Git and includes private configuration, data backups, Docker images and model assets.
